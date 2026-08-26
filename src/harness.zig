@@ -69,8 +69,15 @@ pub const Session = struct {
 };
 
 pub fn spawn(gpa: std.mem.Allocator, argv: []const []const u8, rows: u16, cols: u16) !Session {
+    // Keep the owning slices around rather than recovering their lengths from
+    // the C pointers later: an argument containing a NUL would then be freed
+    // at the wrong length.
+    const owned = try gpa.alloc([:0]u8, argv.len);
     const cargv = try gpa.allocSentinel(?[*:0]const u8, argv.len, null);
-    for (argv, 0..) |word, i| cargv[i] = try gpa.dupeZ(u8, word);
+    for (argv, 0..) |word, i| {
+        owned[i] = try gpa.dupeZ(u8, word);
+        cargv[i] = owned[i].ptr;
+    }
 
     const ws: posix.winsize = .{ .row = rows, .col = cols, .xpixel = 0, .ypixel = 0 };
     const pty = try sys.openPty(null, &ws);
@@ -91,7 +98,8 @@ pub fn spawn(gpa: std.mem.Allocator, argv: []const []const u8, rows: u16, cols: 
     }
 
     sys.close(pty.slave);
-    for (cargv) |word| gpa.free(std.mem.span(word.?));
+    for (owned) |word| gpa.free(word);
+    gpa.free(owned);
     gpa.free(cargv);
     return .{ .master = pty.master, .pid = pid };
 }

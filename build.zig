@@ -37,6 +37,7 @@ pub fn build(b: *std.Build) void {
     const integration_options = b.addOptions();
     integration_options.addOptionPath("tj_exe", exe.getEmittedBin());
     integration_options.addOptionPath("selftest_exe", selftest.getEmittedBin());
+    integration_options.addOptionPath("plugin", b.path("tj.plugin.zsh"));
 
     const integration_mod = b.createModule(.{
         .root_source_file = b.path("src/integration_test.zig"),

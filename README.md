@@ -36,21 +36,54 @@ cross builds dependency-free.
 
 ## Use
 
+Add the shell integration to `~/.zshrc`, which is what tells tj where one
+command ends and the next begins:
+
+```sh
+source /path/to/tj.plugin.zsh
+```
+
+Then start a session:
+
 ```sh
 tj                        # run $SHELL under the journal
 tj -- zsh -f              # run a specific command instead
-tj --help
 ```
+
+Each command becomes a numbered interaction in the journal:
+
+```sh
+tj sessions               # every session, newest first
+tj list                   # interactions of this session: number, status, command
+tj current                # this session's id
+tj last                   # the last interaction that completed
+```
+
+The journal is plain files under `~/.tj` (override with `$TJ_HOME` or
+`--home`), so nothing needs to understand tj to read it:
+
+```
+~/.tj/<session-ulid>/42/
+├── cmd        the command line as entered
+├── out        what the terminal saw, escape sequences and all
+├── rc         exit status; absent means the command never finished
+└── meta.json
+```
+
+Directories are `0700` and files `0600`: the journal holds whatever
+appeared on your terminal, so treat it like shell history.
 
 ## Status
 
-The proxy works: `tj -- <command>` is indistinguishable from running the
-command directly. The pty is allocated and sized from the outer terminal,
-both byte streams are forwarded unchanged, `SIGWINCH` propagates, signals
-sent to `tj` reach the shell, and the terminal is handed back with its
-original settings on every exit path.
+The proxy is transparent: `tj -- <command>` is indistinguishable from
+running the command directly. The pty is allocated and sized from the outer
+terminal, both byte streams are forwarded unchanged, `SIGWINCH` propagates,
+signals sent to `tj` reach the shell, and the terminal is handed back with
+its original settings on every exit path.
 
-Nothing is recorded yet. The journal itself — sessions, `cmd`/`out`/`rc`
-on disk, `@N` references with zsh expansion and completion, and OSC 5107
-output resources — is still to come, so the subcommands listed in
-`tj --help` exit 2 until there is a journal to read.
+Recording works for `cmd`, `out` and `rc`. Recording never gets in the way
+of the terminal: if the journal cannot be written, the session says so once
+and carries on as a plain proxy.
+
+Still to come: the `@N` reference namespace with zsh expansion and
+completion, and OSC 5107 semantic output resources.

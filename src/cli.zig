@@ -30,7 +30,13 @@ pub const Proxy = struct {
 
 pub const Command = union(enum) {
     proxy: Proxy,
-    subcommand: struct { which: Subcommand, args: []const []const u8 },
+    subcommand: struct {
+        which: Subcommand,
+        args: []const []const u8,
+        /// Honoured here too, so `tj --home X list` reads the journal it names
+        /// rather than quietly reading the default one.
+        home: ?[]const u8 = null,
+    },
     help,
     version,
 };
@@ -71,7 +77,7 @@ pub fn parse(args: []const []const u8) ParseError!Command {
         if (std.mem.startsWith(u8, arg, "-")) return error.UnknownFlag;
 
         if (Subcommand.parse(arg)) |which| {
-            return .{ .subcommand = .{ .which = which, .args = args[i + 1 ..] } };
+            return .{ .subcommand = .{ .which = which, .args = args[i + 1 ..], .home = proxy.home } };
         }
         return error.UnknownFlag;
     }
@@ -109,9 +115,15 @@ test "home accepts both spellings" {
 }
 
 test "subcommands are recognised and keep their arguments" {
-    const cmd = try parse(&.{ "resolve", "@42/out" });
-    try std.testing.expectEqual(Subcommand.resolve, cmd.subcommand.which);
-    try std.testing.expectEqualStrings("@42/out", cmd.subcommand.args[0]);
+    const cmd = try parse(&.{ "list", "01abc" });
+    try std.testing.expectEqual(Subcommand.list, cmd.subcommand.which);
+    try std.testing.expectEqualStrings("01abc", cmd.subcommand.args[0]);
+}
+
+test "a journal location given before a subcommand reaches it" {
+    const cmd = try parse(&.{ "--home", "/tmp/j", "sessions" });
+    try std.testing.expectEqual(Subcommand.sessions, cmd.subcommand.which);
+    try std.testing.expectEqualStrings("/tmp/j", cmd.subcommand.home.?);
 }
 
 test "help and version win over anything else" {

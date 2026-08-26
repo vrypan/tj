@@ -6,10 +6,9 @@
 //!         |
 //!        zsh
 //!
-//! The proxy is currently purely transparent: bytes are copied in both
-//! directions unchanged. Recording, OSC 5107 extraction and command boundary
-//! detection hook into the output path later, which is why output already
-//! flows through a single choke point in `pumpOutput`.
+//! Input is forwarded byte for byte and never inspected. Output passes through
+//! the scanner, which strips tj's own control sequences, reports command
+//! boundaries, and hands the rest to both the terminal and the journal.
 
 const std = @import("std");
 const posix = std.posix;
@@ -17,8 +16,14 @@ const c = std.c;
 const sys = @import("sys.zig");
 const tty = @import("tty.zig");
 const cli = @import("cli.zig");
+const scanner = @import("scanner.zig");
+const ulid = @import("ulid.zig");
+const Store = @import("store.zig").Store;
 
 const io_buf_size = 64 * 1024;
+
+/// How often a running command's buffered output reaches the disk.
+const flush_interval_ms = 200;
 
 const stdin_fd: sys.Fd = 0;
 const stdout_fd: sys.Fd = 1;
@@ -51,8 +56,23 @@ pub fn restoreOnPanic() void {
 
 pub const Result = struct { exit_code: u8 };
 
-pub fn run(gpa: std.mem.Allocator, opts: cli.Proxy) !Result {
+pub fn run(gpa: std.mem.Allocator, io: std.Io, opts: cli.Proxy) !Result {
     const argv = try buildArgv(gpa, opts.argv);
+
+    // Panes and multiplexers make nesting legitimate, so this is a note, not a
+    // refusal: the inner session simply shadows the outer one for this shell.
+    if (sys.env("TJ_SESSION")) |outer| {
+        warnStartup("tj: starting a new session inside {s}\r\n", .{outer});
+    }
+
+    // A failure to open the journal must not stop the shell from starting, so
+    // the session degrades to a plain proxy and says so once.
+    var store_storage: ?Store = Store.create(gpa, io, opts.home) catch |err| blk: {
+        warnStartup("tj: not recording ({t})\r\n", .{err});
+        break :blk null;
+    };
+    const store: ?*Store = if (store_storage) |*value| value else null;
+    defer if (store) |value| value.close();
 
     // Seed the inner pty with the outer terminal's settings so programs that
     // query them (line width, control characters) see the truth from the start.
@@ -79,7 +99,7 @@ pub fn run(gpa: std.mem.Allocator, opts: cli.Proxy) !Result {
     sig_pipe_w.store(sig_fds[1], .monotonic);
 
     installSignalHandlers();
-    exportEnvironment();
+    exportEnvironment(store);
 
     const pid = c.fork();
     if (pid < 0) {
@@ -101,7 +121,11 @@ pub fn run(gpa: std.mem.Allocator, opts: cli.Proxy) !Result {
         if (raw) |saved| tty.restore(saved);
     }
 
-    pump(pty.master, sig_fds[0], pid) catch {};
+    var recorder: Recorder = .{ .store = store };
+    var output: scanner.Scanner = .{ .keep_osc = opts.keep_osc };
+    pump(pty.master, sig_fds[0], pid, &recorder, &output) catch {};
+    // Nothing may stay withheld inside the scanner once the stream is over.
+    output.flush(&recorder);
 
     sys.close(pty.master);
     sys.close(sig_fds[0]);
@@ -183,7 +207,16 @@ fn installSignalHandlers() void {
     posix.sigaction(.PIPE, &ignore, null);
 }
 
-fn exportEnvironment() void {
+/// Exported before the fork so the shell and its plugin inherit them:
+/// `TJ_SESSION` names the journal session, `TJ` points at this exact build.
+fn exportEnvironment(store: ?*Store) void {
+    if (store) |value| {
+        var session: [ulid.len + 1]u8 = undefined;
+        @memcpy(session[0..ulid.len], &value.session);
+        session[ulid.len] = 0;
+        sys.setEnv("TJ_SESSION", session[0..ulid.len :0]);
+    }
+
     var path_buf: [std.fs.max_path_bytes]u8 = undefined;
     var value_buf: [std.fs.max_path_bytes + 1]u8 = undefined;
     const path = sys.selfExePath(&path_buf) orelse return;
@@ -193,7 +226,63 @@ fn exportEnvironment() void {
     sys.setEnv("TJ", value_buf[0..path.len :0]);
 }
 
-fn pump(master: sys.Fd, sig_r: sys.Fd, pid: c.pid_t) !void {
+fn warnStartup(comptime fmt: []const u8, args: anytype) void {
+    var buf: [256]u8 = undefined;
+    const text = std.fmt.bufPrint(&buf, fmt, args) catch return;
+    sys.writeAll(stderr_fd, text) catch {};
+}
+
+/// Turns scanner events into journal entries and forwards every byte the
+/// terminal is meant to see. This is the only place the two jobs meet.
+const Recorder = struct {
+    store: ?*Store,
+    /// The command line arrives just before the "command is running" boundary,
+    /// so it waits here until the interaction actually opens.
+    command: [scanner.max_osc]u8 = undefined,
+    command_len: usize = 0,
+    /// Set when the terminal can no longer be written to; the pump then stops.
+    broken: bool = false,
+
+    /// Bytes for the terminal that also belong in `out`.
+    pub fn data(self: *Recorder, bytes: []const u8) void {
+        self.forward(bytes);
+        if (self.store) |store| store.append(bytes);
+    }
+
+    /// Bytes for the terminal only: tj's own sequences under `--keep-osc`,
+    /// which are protocol, not output.
+    pub fn control(self: *Recorder, bytes: []const u8) void {
+        self.forward(bytes);
+    }
+
+    fn forward(self: *Recorder, bytes: []const u8) void {
+        sys.writeAll(stdout_fd, bytes) catch {
+            self.broken = true;
+        };
+    }
+
+    pub fn event(self: *Recorder, ev: scanner.Event) void {
+        const store = self.store orelse return;
+        switch (ev) {
+            .command_line => |line| {
+                const n = @min(line.len, self.command.len);
+                @memcpy(self.command[0..n], line[0..n]);
+                self.command_len = n;
+            },
+            .command_run => {
+                store.begin(self.command[0..self.command_len]);
+                self.command_len = 0;
+            },
+            .command_end => |code| store.finish(code),
+            // Ends whatever is still open; a no-op right after `command_end`,
+            // which is the usual case since the shell reports both at once.
+            .prompt_start => store.finish(null),
+            .protocol_error => |payload| store.warn("ignored tj sequence: {s}", .{payload}),
+        }
+    }
+};
+
+fn pump(master: sys.Fd, sig_r: sys.Fd, pid: c.pid_t, recorder: *Recorder, output: *scanner.Scanner) !void {
     var in_buf: [io_buf_size]u8 = undefined;
     var out_buf: [io_buf_size]u8 = undefined;
 
@@ -207,7 +296,10 @@ fn pump(master: sys.Fd, sig_r: sys.Fd, pid: c.pid_t) !void {
     const sig = &fds[2];
 
     while (true) {
-        _ = posix.poll(&fds, -1) catch return;
+        // While a command is running, wake up regularly to flush its output to
+        // disk, so `tail -f` on `@N/out` shows progress.
+        const recording = if (recorder.store) |store| store.isRecording() else false;
+        _ = posix.poll(&fds, if (recording) flush_interval_ms else -1) catch return;
 
         if (sig.revents & (posix.POLL.IN | posix.POLL.HUP) != 0) {
             try drainSignals(sig_r, master, pid);
@@ -216,7 +308,10 @@ fn pump(master: sys.Fd, sig_r: sys.Fd, pid: c.pid_t) !void {
         if (out.revents & (posix.POLL.IN | posix.POLL.HUP) != 0) {
             const n = sys.read(master, &out_buf) catch return;
             if (n == 0) return;
-            try pumpOutput(out_buf[0..n]);
+            output.feed(out_buf[0..n], recorder);
+            if (recorder.broken) return;
+        } else if (recorder.store) |store| {
+            store.tick();
         }
 
         if (in.fd >= 0 and in.revents & (posix.POLL.IN | posix.POLL.HUP) != 0) {
@@ -232,12 +327,6 @@ fn pump(master: sys.Fd, sig_r: sys.Fd, pid: c.pid_t) !void {
         if (in.fd >= 0 and in.revents & (posix.POLL.ERR | posix.POLL.NVAL) != 0) in.fd = -1;
         if (out.revents & (posix.POLL.ERR | posix.POLL.NVAL) != 0) return;
     }
-}
-
-/// The single choke point for shell-to-terminal bytes. The recording scanner
-/// goes here; today it forwards verbatim.
-fn pumpOutput(bytes: []const u8) !void {
-    try sys.writeAll(stdout_fd, bytes);
 }
 
 fn drainSignals(sig_r: sys.Fd, master: sys.Fd, pid: c.pid_t) !void {
