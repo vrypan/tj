@@ -34,6 +34,10 @@ pub const Event = union(enum) {
     prompt_start,
     /// `OSC 5107;tj;cmd;<base64>` - the command line as the user typed it.
     command_line: []const u8,
+    /// `OSC 5107;tj;expanded;<base64>` - the same line after the shell
+    /// integration rewrote journal references into paths. Only sent when the
+    /// two differ.
+    command_expanded: []const u8,
     /// `OSC 133;C` - the command starts running now.
     command_run,
     /// `OSC 133;D[;rc]` - the command finished.
@@ -266,8 +270,9 @@ pub const Scanner = struct {
         }
         const rest = payload[tj_prefix.len..];
 
-        if (std.mem.startsWith(u8, rest, "cmd;")) {
-            const encoded = rest["cmd;".len..];
+        if (std.mem.startsWith(u8, rest, "cmd;") or std.mem.startsWith(u8, rest, "expanded;")) {
+            const is_expanded = rest[0] == 'e';
+            const encoded = rest[if (is_expanded) "expanded;".len else "cmd;".len..];
             var decoded: [max_osc]u8 = undefined;
             const decoder = std.base64.standard.Decoder;
             const size = decoder.calcSizeForSlice(encoded) catch {
@@ -282,7 +287,11 @@ pub const Scanner = struct {
                 sink.event(.{ .protocol_error = payload });
                 return;
             };
-            sink.event(.{ .command_line = decoded[0..size] });
+            if (is_expanded) {
+                sink.event(.{ .command_expanded = decoded[0..size] });
+            } else {
+                sink.event(.{ .command_line = decoded[0..size] });
+            }
             return;
         }
 
@@ -324,7 +333,7 @@ const Recorder = struct {
 
     fn deinit(self: *Recorder) void {
         for (self.events.items) |recorded_event| switch (recorded_event) {
-            .command_line, .protocol_error => |text| self.gpa.free(text),
+            .command_line, .command_expanded, .protocol_error => |text| self.gpa.free(text),
             else => {},
         };
         self.forwarded.deinit(self.gpa);
@@ -345,6 +354,7 @@ const Recorder = struct {
         // The scanner hands out slices of its own scratch buffer.
         const owned: Event = switch (ev) {
             .command_line => |text| .{ .command_line = self.gpa.dupe(u8, text) catch unreachable },
+            .command_expanded => |text| .{ .command_expanded = self.gpa.dupe(u8, text) catch unreachable },
             .protocol_error => |text| .{ .protocol_error = self.gpa.dupe(u8, text) catch unreachable },
             else => ev,
         };

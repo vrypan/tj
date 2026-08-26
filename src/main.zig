@@ -32,8 +32,15 @@ const usage =
     \\  last           print the last completed interaction number
     \\  list [session] list the interactions of a session
     \\  sessions       list sessions, newest first
+    \\  resolve <ref>  print the path a journal reference names
+    \\  complete <ref> completion candidates for a partial reference
     \\
-    \\Recording needs the shell integration:
+    \\References name previous computations the way paths name files:
+    \\  @42/out        interaction 42 of this session
+    \\  @-/out         the last interaction that completed
+    \\  @pgsd.42/out   interaction 42 of another session, by a suffix of its id
+    \\
+    \\Recording and reference expansion need the shell integration:
     \\  source /path/to/tj.plugin.zsh   # in ~/.zshrc
     \\
 ;
@@ -66,13 +73,18 @@ pub fn main(init: std.process.Init) !u8 {
                 writer.interface.flush() catch {};
                 try write(init.io, .stderr(), switch (err) {
                     error.NotInSession => "tj: not inside a tj session\n",
-                    error.NoSuchSession => "tj: no such session\n",
-                    error.NothingRecorded => "tj: nothing recorded yet\n",
-                    error.NotImplemented => "tj: journal references are not implemented yet\n",
+                    error.NoSuchSession => "tj: no session matches that id\n",
+                    error.NothingRecorded, error.NothingCompleted => "tj: nothing recorded yet\n",
+                    error.MissingArgument => "tj: this subcommand needs an argument\n",
+                    error.BadReference => "tj: not a journal reference\n",
+                    error.NoSuchInteraction => "tj: no such interaction\n",
                     error.FileNotFound => "tj: no journal yet\n",
                     else => "tj: cannot read the journal\n",
                 });
-                return 1;
+                // A reference that is well formed but names something absent
+                // is worth telling apart from one that is simply wrong: the
+                // shell integration expands the first and leaves the second.
+                return if (err == error.NoSuchInteraction) 2 else 1;
             };
             try writer.interface.flush();
             return 0;
@@ -102,6 +114,7 @@ test {
     _ = cli;
     _ = @import("ulid.zig");
     _ = @import("scanner.zig");
+    _ = @import("reference.zig");
     _ = @import("store.zig");
     _ = commands;
 }

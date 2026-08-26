@@ -188,6 +188,26 @@ const Journal = struct {
         self.tmp.cleanup();
     }
 
+    /// The id of the single session this run created.
+    fn sessionName(self: *Journal, gpa: std.mem.Allocator) ![]u8 {
+        const io = std.testing.io;
+        var it = self.root.iterate();
+        while (try it.next(io)) |entry| {
+            if (entry.kind == .directory) return gpa.dupe(u8, entry.name);
+        }
+        return error.NoSession;
+    }
+
+    /// Makes `@N` and `@-` resolve against this journal's session.
+    fn enter(self: *Journal, gpa: std.mem.Allocator) !void {
+        const name = try self.sessionName(gpa);
+        defer gpa.free(name);
+        var buf: [64]u8 = undefined;
+        @memcpy(buf[0..name.len], name);
+        buf[name.len] = 0;
+        sys.setEnv("TJ_SESSION", buf[0..name.len :0]);
+    }
+
     /// The single session directory this run created.
     fn sessionDir(self: *Journal) !Dir {
         const io = std.testing.io;
@@ -336,4 +356,142 @@ test "an interrupted session leaves the interaction without an rc" {
     var dir = try journal.sessionDir();
     defer dir.close(std.testing.io);
     try std.testing.expectError(error.FileNotFound, dir.openFile(std.testing.io, "1/rc", .{}));
+}
+
+// --- the @ namespace --------------------------------------------------------
+
+test "references resolve to paths inside the journal" {
+    if (!haveZsh()) return error.SkipZigTest;
+    const gpa = std.testing.allocator;
+
+    var journal = try Journal.open(gpa);
+    defer journal.close();
+    try recordSession(gpa, &journal, &.{ "echo first", "echo second" });
+    try journal.enter(gpa);
+
+    const home = try journal.homeArg(gpa);
+    defer gpa.free(home);
+
+    var ok = try run(gpa, &.{ "--home", home, "resolve", "@1/out" }, 24, 80);
+    defer ok.out.deinit(gpa);
+    try std.testing.expectEqual(@as(u8, 0), ok.code);
+    try std.testing.expect(std.mem.indexOf(u8, ok.out.items, "/1/out") != null);
+    try std.testing.expect(std.mem.startsWith(u8, ok.out.items, "/"));
+}
+
+test "a malformed reference and a missing one are told apart" {
+    if (!haveZsh()) return error.SkipZigTest;
+    const gpa = std.testing.allocator;
+
+    var journal = try Journal.open(gpa);
+    defer journal.close();
+    try recordSession(gpa, &journal, &.{"echo only"});
+    try journal.enter(gpa);
+
+    const home = try journal.homeArg(gpa);
+    defer gpa.free(home);
+
+    // Not a reference at all.
+    var bad = try run(gpa, &.{ "--home", home, "resolve", "@nope" }, 24, 80);
+    defer bad.out.deinit(gpa);
+    try std.testing.expectEqual(@as(u8, 1), bad.code);
+
+    // Well formed, but there is no interaction 999.
+    var missing = try run(gpa, &.{ "--home", home, "resolve", "@999/out" }, 24, 80);
+    defer missing.out.deinit(gpa);
+    try std.testing.expectEqual(@as(u8, 2), missing.code);
+}
+
+test "a reference cannot escape its interaction directory" {
+    if (!haveZsh()) return error.SkipZigTest;
+    const gpa = std.testing.allocator;
+
+    var journal = try Journal.open(gpa);
+    defer journal.close();
+    try recordSession(gpa, &journal, &.{"echo only"});
+    try journal.enter(gpa);
+
+    const home = try journal.homeArg(gpa);
+    defer gpa.free(home);
+
+    for ([_][]const u8{ "@1/../../../etc/passwd", "@1//etc/passwd", "@1/./out" }) |attempt| {
+        var r = try run(gpa, &.{ "--home", home, "resolve", attempt }, 24, 80);
+        defer r.out.deinit(gpa);
+        try std.testing.expectEqual(@as(u8, 1), r.code);
+        try std.testing.expect(std.mem.indexOf(u8, r.out.items, "/etc/passwd") == null);
+    }
+}
+
+test "completion offers resources but never tj's own bookkeeping" {
+    if (!haveZsh()) return error.SkipZigTest;
+    const gpa = std.testing.allocator;
+
+    var journal = try Journal.open(gpa);
+    defer journal.close();
+    try recordSession(gpa, &journal, &.{"echo one"});
+    try journal.enter(gpa);
+
+    const home = try journal.homeArg(gpa);
+    defer gpa.free(home);
+
+    var r = try run(gpa, &.{ "--home", home, "complete", "@1/" }, 24, 80);
+    defer r.out.deinit(gpa);
+    try std.testing.expect(std.mem.indexOf(u8, r.out.items, "@1/cmd") != null);
+    try std.testing.expect(std.mem.indexOf(u8, r.out.items, "@1/out") != null);
+    try std.testing.expect(std.mem.indexOf(u8, r.out.items, "@1/rc") != null);
+    try std.testing.expect(std.mem.indexOf(u8, r.out.items, "meta.json") == null);
+}
+
+test "an unquoted reference on a command line becomes a path" {
+    if (!haveZsh()) return error.SkipZigTest;
+    const gpa = std.testing.allocator;
+
+    var journal = try Journal.open(gpa);
+    defer journal.close();
+
+    // The second command reads the first one's output through the journal.
+    try recordSession(gpa, &journal, &.{ "echo alpha-marker", "cat @1/out" });
+
+    const second_out = try journal.read(gpa, "2/out");
+    defer gpa.free(second_out);
+    try std.testing.expect(std.mem.indexOf(u8, second_out, "alpha-marker") != null);
+
+    // The journal records what was typed, not what ran.
+    const second_cmd = try journal.read(gpa, "2/cmd");
+    defer gpa.free(second_cmd);
+    try std.testing.expectEqualStrings("cat @1/out", second_cmd);
+
+    // ...and what ran is kept alongside it.
+    const meta = try journal.read(gpa, "2/meta.json");
+    defer gpa.free(meta);
+    try std.testing.expect(std.mem.indexOf(u8, meta, "expanded_cmd") != null);
+    try std.testing.expect(std.mem.indexOf(u8, meta, "/1/out") != null);
+}
+
+test "quoted references and addresses are left alone" {
+    if (!haveZsh()) return error.SkipZigTest;
+    const gpa = std.testing.allocator;
+
+    var journal = try Journal.open(gpa);
+    defer journal.close();
+    try recordSession(gpa, &journal, &.{
+        "echo start",
+        "echo 'literal @1/out here'",
+        "echo user@host",
+    });
+
+    const quoted = try journal.read(gpa, "2/out");
+    defer gpa.free(quoted);
+    try std.testing.expect(std.mem.indexOf(u8, quoted, "literal @1/out here") != null);
+
+    const address = try journal.read(gpa, "3/out");
+    defer gpa.free(address);
+    try std.testing.expect(std.mem.indexOf(u8, address, "user@host") != null);
+
+    // Neither line was rewritten, so neither has an expansion recorded.
+    for ([_][]const u8{ "2/meta.json", "3/meta.json" }) |path| {
+        const meta = try journal.read(gpa, path);
+        defer gpa.free(meta);
+        try std.testing.expect(std.mem.indexOf(u8, meta, "expanded_cmd") == null);
+    }
 }

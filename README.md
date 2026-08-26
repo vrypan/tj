@@ -59,6 +59,39 @@ tj current                # this session's id
 tj last                   # the last interaction that completed
 ```
 
+## References
+
+Interactions have names, the way files do. Write them on any command line
+and the shell integration turns them into paths before the command runs:
+
+```sh
+curl -s https://example.com/data.json     # interaction 41
+jq .items @41/out                         # read what it printed, without rerunning
+diff @41/out @43/out
+cat @-/cmd                                # the last command that completed
+```
+
+| Reference | Names |
+|---|---|
+| `@42/out` | interaction 42 of this session |
+| `@-/out` | the last interaction that *completed*, never the one running |
+| `@pgsd.42/out` | interaction 42 of another session, by a suffix of its id |
+
+Suffixes rather than prefixes, because every session started in the same
+millisecond shares the ULID's timestamp prefix and only the tail tells them
+apart. The most recent match wins, so short suffixes are for interactive
+use; anything that must stay valid should use the full id.
+
+`@42/<TAB>` completes to the resources that interaction actually has. Words
+that merely contain an `@`, quoted text, and `user@host` are left alone, and
+a reference that cannot be resolved reaches the command literally rather
+than being silently dropped.
+
+The journal records the line you typed; `meta.json` keeps what actually ran
+when expansion changed it.
+
+## Storage
+
 The journal is plain files under `~/.tj` (override with `$TJ_HOME` or
 `--home`), so nothing needs to understand tj to read it:
 
@@ -81,9 +114,10 @@ terminal, both byte streams are forwarded unchanged, `SIGWINCH` propagates,
 signals sent to `tj` reach the shell, and the terminal is handed back with
 its original settings on every exit path.
 
-Recording works for `cmd`, `out` and `rc`. Recording never gets in the way
-of the terminal: if the journal cannot be written, the session says so once
-and carries on as a plain proxy.
+Recording works for `cmd`, `out` and `rc`, and the `@` namespace resolves,
+expands and completes. Recording never gets in the way of the terminal: if
+the journal cannot be written, the session says so once and carries on as a
+plain proxy.
 
-Still to come: the `@N` reference namespace with zsh expansion and
-completion, and OSC 5107 semantic output resources.
+Still to come: OSC 5107 semantic output resources, which let a program mark
+spans of its own output as named files under `@42/files/`.

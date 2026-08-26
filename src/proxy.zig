@@ -215,6 +215,15 @@ fn exportEnvironment(store: ?*Store) void {
         @memcpy(session[0..ulid.len], &value.session);
         session[ulid.len] = 0;
         sys.setEnv("TJ_SESSION", session[0..ulid.len :0]);
+
+        // Also when it came from --home: every `tj` invoked inside the session
+        // has to resolve references against the journal being written, not the
+        // default one.
+        var root: [std.fs.max_path_bytes + 1]u8 = undefined;
+        if (value.root.realPath(value.io, root[0..std.fs.max_path_bytes])) |len| {
+            root[len] = 0;
+            sys.setEnv("TJ_HOME", root[0..len :0]);
+        } else |_| {}
     }
 
     var path_buf: [std.fs.max_path_bytes]u8 = undefined;
@@ -240,6 +249,11 @@ const Recorder = struct {
     /// so it waits here until the interaction actually opens.
     command: [scanner.max_osc]u8 = undefined,
     command_len: usize = 0,
+    /// The same line after journal references were rewritten to paths, when
+    /// the shell integration reports that it changed anything.
+    expanded: [scanner.max_osc]u8 = undefined,
+    expanded_len: usize = 0,
+    has_expanded: bool = false,
     /// Set when the terminal can no longer be written to; the pump then stops.
     broken: bool = false,
 
@@ -269,9 +283,20 @@ const Recorder = struct {
                 @memcpy(self.command[0..n], line[0..n]);
                 self.command_len = n;
             },
+            .command_expanded => |line| {
+                const n = @min(line.len, self.expanded.len);
+                @memcpy(self.expanded[0..n], line[0..n]);
+                self.expanded_len = n;
+                self.has_expanded = true;
+            },
             .command_run => {
-                store.begin(self.command[0..self.command_len]);
+                store.begin(
+                    self.command[0..self.command_len],
+                    if (self.has_expanded) self.expanded[0..self.expanded_len] else null,
+                );
                 self.command_len = 0;
+                self.expanded_len = 0;
+                self.has_expanded = false;
             },
             .command_end => |code| store.finish(code),
             // Ends whatever is still open; a no-op right after `command_end`,
