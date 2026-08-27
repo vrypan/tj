@@ -32,6 +32,7 @@ const usage =
     \\  last           print the last completed interaction number
     \\  list [session] list the interactions of a session
     \\  sessions       list sessions, newest first
+    \\  cat <ref>...   print what a reference names (--raw / --plain)
     \\  resolve <ref>  print the path a journal reference names
     \\  complete <ref> completion candidates for a partial reference
     \\
@@ -78,6 +79,7 @@ pub fn main(init: std.process.Init) !u8 {
                     error.MissingArgument => "tj: this subcommand needs an argument\n",
                     error.BadReference => "tj: not a journal reference\n",
                     error.NoSuchInteraction => "tj: no such interaction\n",
+                    error.NoSuchResource => "tj: that interaction has no such resource\n",
                     error.FileNotFound => "tj: no journal yet\n",
                     else => "tj: cannot read the journal\n",
                 });
@@ -115,6 +117,8 @@ test {
     _ = @import("ulid.zig");
     _ = @import("scanner.zig");
     _ = @import("reference.zig");
+    _ = @import("altscreen.zig");
+    _ = @import("plain.zig");
     _ = @import("store.zig");
     _ = commands;
 }

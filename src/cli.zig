@@ -15,6 +15,7 @@ pub const Subcommand = enum {
     list,
     sessions,
     complete,
+    cat,
 
     pub fn parse(name: []const u8) ?Subcommand {
         return std.meta.stringToEnum(Subcommand, name);

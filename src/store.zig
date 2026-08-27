@@ -24,6 +24,7 @@ const File = std.Io.File;
 
 const sys = @import("sys.zig");
 const ulid = @import("ulid.zig");
+const altscreen = @import("altscreen.zig");
 
 /// The journal holds whatever appears on the terminal, which includes secrets.
 /// It gets the same treatment as shell history.
@@ -53,6 +54,9 @@ pub const Store = struct {
         exit_code: ?u8 = null,
         /// Present only when the shell integration rewrote the line.
         expanded: ?[]u8 = null,
+        /// Keeps full-screen programs out of `out`, the way the alternate
+        /// screen keeps them out of the terminal's scrollback.
+        fullscreen: altscreen.Filter = .{},
     };
 
     /// Creates a new session. `home_override` wins over `$TJ_HOME`, which wins
@@ -141,10 +145,8 @@ pub const Store = struct {
     /// Buffered: the poll loop must not wait on the disk to forward a byte.
     pub fn append(self: *Store, bytes: []const u8) void {
         const current = &(self.current orelse return);
-        current.writer.interface.writeAll(bytes) catch |err| {
-            self.warn("cannot write output: {t}", .{err});
-            self.disable();
-        };
+        var sink: OutputSink = .{ .store = self, .interaction = current };
+        current.fullscreen.feed(bytes, &sink);
     }
 
     /// Called on the periodic tick so `tail -f` on a running command's `out`
@@ -183,7 +185,7 @@ pub const Store = struct {
         current.dir.close(self.io);
     }
 
-    fn writeMeta(self: *Store, current: *const Interaction) !void {
+    fn writeMeta(self: *Store, current: *Interaction) !void {
         var buf: [8 * 1024]u8 = undefined;
         var writer = Io.Writer.fixed(&buf);
         var started: [32]u8 = undefined;
@@ -198,6 +200,15 @@ pub const Store = struct {
             // Command lines are arbitrary bytes; they have to be escaped or the
             // file stops being JSON.
             try std.json.Stringify.encodeJsonString(text, .{}, &writer);
+        }
+
+        // A near-empty `out` for `vi` is correct but surprising, so the
+        // reason is recorded next to it.
+        if (current.fullscreen.regions > 0) {
+            try writer.print(",\"fullscreen\":{{\"regions\":{d},\"suppressed_bytes\":{d}}}", .{
+                current.fullscreen.regions,
+                current.fullscreen.suppressed,
+            });
         }
         try writer.writeAll("}\n");
 
@@ -571,3 +582,18 @@ test "tj's bookkeeping files are not part of the namespace" {
     try std.testing.expect(!isPrivate("rc"));
     try std.testing.expect(!isPrivate("files"));
 }
+
+/// Receives the bytes that survive the full-screen filter and puts them on
+/// disk. A write failure stops recording for the session; it never stops the
+/// terminal.
+const OutputSink = struct {
+    store: *Store,
+    interaction: *Store.Interaction,
+
+    pub fn keep(self: *OutputSink, bytes: []const u8) void {
+        self.interaction.writer.interface.writeAll(bytes) catch |err| {
+            self.store.warn("cannot write output: {t}", .{err});
+            self.store.disable();
+        };
+    }
+};

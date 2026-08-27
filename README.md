@@ -90,6 +90,44 @@ than being silently dropped.
 The journal records the line you typed; `meta.json` keeps what actually ran
 when expansion changed it.
 
+## Reading a recording
+
+`tj cat` prints what a reference names, resolving it itself — so it works
+from bash, from a script, or from a shell that is not running under tj:
+
+```sh
+tj cat @42                # what interaction 42 printed
+tj cat @42/cmd            # the command line
+tj cat @41 @43 | diff - -
+```
+
+Piped, it renders the recording as text a person would have read: escape
+sequences removed, and a progress meter that rewrote its line thirty times
+reduced to the line it settled on. Straight to a terminal it writes the
+bytes as recorded, so colours still render. `--plain` and `--raw` force
+either behaviour.
+
+## Full-screen programs
+
+Editors, pagers and monitors switch the terminal to its alternate screen
+before painting and switch back on exit, which is why your prompt reappears
+intact after quitting vim — that buffer is not part of scrollback.
+
+`out` follows the same rule. What a full-screen program paints is not
+recorded, so `vi notes.txt` leaves a `cmd`, an `rc` and a near-empty `out`,
+which is exactly what you would find scrolling back. Anything the program
+printed before or after is ordinary output and is kept, and `meta.json`
+notes what was dropped:
+
+```json
+"fullscreen": {"regions": 1, "suppressed_bytes": 2249}
+```
+
+This is detected from the switch sequences, never from a list of program
+names, so it also covers `git log` paging through `less` and your own
+tools. It applies to recording only: the program renders exactly as it
+would without tj.
+
 ## Storage
 
 The journal is plain files under `~/.tj` (override with `$TJ_HOME` or
@@ -98,7 +136,7 @@ The journal is plain files under `~/.tj` (override with `$TJ_HOME` or
 ```
 ~/.tj/<session-ulid>/42/
 ├── cmd        the command line as entered
-├── out        what the terminal saw, escape sequences and all
+├── out        what you could scroll back to, escape sequences and all
 ├── rc         exit status; absent means the command never finished
 └── meta.json
 ```
@@ -118,6 +156,9 @@ Recording works for `cmd`, `out` and `rc`, and the `@` namespace resolves,
 expands and completes. Recording never gets in the way of the terminal: if
 the journal cannot be written, the session says so once and carries on as a
 plain proxy.
+
+Full-screen programs are kept out of the journal, and `tj cat` reads a
+recording back as either bytes or plain text.
 
 Still to come: OSC 5107 semantic output resources, which let a program mark
 spans of its own output as named files under `@42/files/`.

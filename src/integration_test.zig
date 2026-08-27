@@ -495,3 +495,124 @@ test "quoted references and addresses are left alone" {
         try std.testing.expect(std.mem.indexOf(u8, meta, "expanded_cmd") == null);
     }
 }
+
+// --- full-screen programs and reading resources -----------------------------
+
+test "a full-screen program leaves nothing in the journal" {
+    if (!haveZsh()) return error.SkipZigTest;
+    const gpa = std.testing.allocator;
+
+    var journal = try Journal.open(gpa);
+    defer journal.close();
+
+    // The sequences a pager or editor sends, without the unpredictability of
+    // driving a real one.
+    try recordSession(gpa, &journal, &.{
+        "printf 'BEFORE\\n\\033[?1049hHIDDEN-PAINTING\\033[?1049lAFTER\\n'",
+    });
+
+    const out = try journal.read(gpa, "1/out");
+    defer gpa.free(out);
+
+    // What the terminal keeps in scrollback is kept; the rest is not.
+    try std.testing.expect(std.mem.indexOf(u8, out, "BEFORE") != null);
+    try std.testing.expect(std.mem.indexOf(u8, out, "AFTER") != null);
+    try std.testing.expect(std.mem.indexOf(u8, out, "HIDDEN-PAINTING") == null);
+    try std.testing.expect(std.mem.indexOf(u8, out, "1049") == null);
+
+    // A near-empty `out` should be explainable from the metadata alone.
+    const meta = try journal.read(gpa, "1/meta.json");
+    defer gpa.free(meta);
+    try std.testing.expect(std.mem.indexOf(u8, meta, "\"fullscreen\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, meta, "\"regions\":1") != null);
+}
+
+test "the terminal still sees the full-screen program" {
+    if (!haveZsh()) return error.SkipZigTest;
+    const gpa = std.testing.allocator;
+
+    var journal = try Journal.open(gpa);
+    defer journal.close();
+
+    const home = try journal.homeArg(gpa);
+    defer gpa.free(home);
+
+    const session = try harness.spawn(gpa, &.{ tj, "--home", home, "--", "/bin/zsh", "-i" }, 24, 80);
+    var out: std.ArrayList(u8) = .empty;
+    defer out.deinit(gpa);
+
+    _ = try session.readUntil(gpa, &out, "%", timeout_ms);
+    try session.write("printf '\\033[?1049hHIDDEN-PAINTING\\033[?1049l'\n");
+    sys.sleepMs(400);
+    try session.write("exit\n");
+    _ = try session.finish(gpa, &out, timeout_ms);
+
+    // Filtering applies to the journal only: the program must render exactly
+    // as it would without tj.
+    try std.testing.expect(std.mem.indexOf(u8, out.items, "HIDDEN-PAINTING") != null);
+    try std.testing.expect(std.mem.indexOf(u8, out.items, "\x1b[?1049h") != null);
+}
+
+test "tj cat renders recorded output as readable text" {
+    if (!haveZsh()) return error.SkipZigTest;
+    const gpa = std.testing.allocator;
+
+    var journal = try Journal.open(gpa);
+    defer journal.close();
+    try recordSession(gpa, &journal, &.{"printf '\\033[31mred\\033[0m\\r\\n10%%\\r100%% done\\r\\n'"});
+    try journal.enter(gpa);
+
+    const home = try journal.homeArg(gpa);
+    defer gpa.free(home);
+
+    var rendered = try run(gpa, &.{ "--home", home, "cat", "--plain", "@1" }, 24, 80);
+    defer rendered.out.deinit(gpa);
+
+    // Colours gone, and only what survived the carriage returns.
+    try std.testing.expect(std.mem.indexOf(u8, rendered.out.items, "red") != null);
+    try std.testing.expect(std.mem.indexOf(u8, rendered.out.items, "\x1b[31m") == null);
+    try std.testing.expect(std.mem.indexOf(u8, rendered.out.items, "100% done") != null);
+    try std.testing.expect(std.mem.indexOf(u8, rendered.out.items, "10%\r") == null);
+}
+
+test "tj cat --raw gives back exactly what was recorded" {
+    if (!haveZsh()) return error.SkipZigTest;
+    const gpa = std.testing.allocator;
+
+    var journal = try Journal.open(gpa);
+    defer journal.close();
+    try recordSession(gpa, &journal, &.{"printf '\\033[31mred\\033[0m\\n'"});
+    try journal.enter(gpa);
+
+    const home = try journal.homeArg(gpa);
+    defer gpa.free(home);
+
+    var raw = try run(gpa, &.{ "--home", home, "cat", "--raw", "@1" }, 24, 80);
+    defer raw.out.deinit(gpa);
+    try std.testing.expect(std.mem.indexOf(u8, raw.out.items, "\x1b[31m") != null);
+}
+
+test "tj cat defaults to the output and reads other resources by name" {
+    if (!haveZsh()) return error.SkipZigTest;
+    const gpa = std.testing.allocator;
+
+    var journal = try Journal.open(gpa);
+    defer journal.close();
+    try recordSession(gpa, &journal, &.{"echo marker-text"});
+    try journal.enter(gpa);
+
+    const home = try journal.homeArg(gpa);
+    defer gpa.free(home);
+
+    var output = try run(gpa, &.{ "--home", home, "cat", "@1" }, 24, 80);
+    defer output.out.deinit(gpa);
+    try std.testing.expect(std.mem.indexOf(u8, output.out.items, "marker-text") != null);
+
+    var command = try run(gpa, &.{ "--home", home, "cat", "@1/cmd" }, 24, 80);
+    defer command.out.deinit(gpa);
+    try std.testing.expect(std.mem.indexOf(u8, command.out.items, "echo marker-text") != null);
+
+    var missing = try run(gpa, &.{ "--home", home, "cat", "@1/nope" }, 24, 80);
+    defer missing.out.deinit(gpa);
+    try std.testing.expectEqual(@as(u8, 1), missing.code);
+}

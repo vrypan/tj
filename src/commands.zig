@@ -7,6 +7,7 @@ const cli = @import("cli.zig");
 const store = @import("store.zig");
 const sys = @import("sys.zig");
 const reference = @import("reference.zig");
+const plain = @import("plain.zig");
 
 /// The parsed subcommand, exactly as `cli` produced it.
 const Subcommand = @FieldType(cli.Command, "subcommand");
@@ -18,6 +19,7 @@ pub const Error = error{
     MissingArgument,
     BadReference,
     NoSuchInteraction,
+    NoSuchResource,
 };
 
 pub fn run(
@@ -33,6 +35,7 @@ pub fn run(
         .last => try printLast(gpa, io, sub.home, out),
         .resolve => try resolveReference(gpa, io, sub.home, sub.args, out),
         .complete => try completeReference(gpa, io, sub.home, sub.args, out),
+        .cat => try catResource(gpa, io, sub.home, sub.args, out),
     }
 }
 
@@ -263,4 +266,57 @@ fn listWithin(
         try found.append(gpa, name);
     }
     return found.toOwnedSlice(gpa);
+}
+
+// --- reading resources ------------------------------------------------------
+
+/// `out` files can be large; this is the point at which tj gives up rather
+/// than trying to hold one in memory.
+const max_resource = 64 * 1024 * 1024;
+
+/// `tj cat @42` - print what an interaction recorded, without needing the
+/// shell integration to expand anything. Useful from bash, from a script, or
+/// from a shell that is not running under tj at all.
+fn catResource(
+    gpa: std.mem.Allocator,
+    io: Io,
+    home: ?[]const u8,
+    args: []const []const u8,
+    out: *Io.Writer,
+) !void {
+    // Terminals can render escape sequences, pipes cannot. Follow the usual
+    // convention and let either flag settle it explicitly.
+    var as_written = sys.isTty(1);
+    var refs: std.ArrayList([]const u8) = .empty;
+    defer refs.deinit(gpa);
+
+    for (args) |arg| {
+        if (std.mem.eql(u8, arg, "--raw") or std.mem.eql(u8, arg, "-r")) {
+            as_written = true;
+        } else if (std.mem.eql(u8, arg, "--plain") or std.mem.eql(u8, arg, "-p")) {
+            as_written = false;
+        } else {
+            try refs.append(gpa, arg);
+        }
+    }
+    if (refs.items.len == 0) return error.MissingArgument;
+
+    var root = try store.openRoot(io, home);
+    defer root.close(io);
+
+    for (refs.items) |text| {
+        var ref = reference.parse(text) catch return error.BadReference;
+        // `tj cat @42` means the output: that is what anyone wants to see.
+        if (ref.subpath.len == 0) ref.subpath = "out";
+
+        const found = try store.locate(gpa, io, root, sys.env("TJ_SESSION"), ref);
+        defer found.deinit(gpa);
+        if (!found.exists) return error.NoSuchInteraction;
+
+        const bytes = store.Dir.cwd().readFileAlloc(io, found.path, gpa, .limited(max_resource)) catch
+            return error.NoSuchResource;
+        defer gpa.free(bytes);
+
+        if (as_written) try out.writeAll(bytes) else try plain.render(gpa, bytes, out);
+    }
 }
