@@ -843,7 +843,15 @@ pub fn validResourcePath(path: []const u8) bool {
 }
 
 test "resource paths that programs may use" {
-    for ([_][]const u8{ "err", "files/data.csv", "a/b/c.txt", "files/.hidden" }) |path| {
+    for ([_][]const u8{
+        "err",
+        "files/data.csv",
+        "a/b/c.txt",
+        "files/.hidden",
+        "files/name with spaces.txt",
+        "files/glob*$?.txt",
+        "files/quote's.txt",
+    }) |path| {
         try std.testing.expect(validResourcePath(path));
     }
 }

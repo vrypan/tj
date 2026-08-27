@@ -13,6 +13,7 @@ const tj = options.tj_exe;
 
 const timeout_ms = 5000;
 const test_prompt = "TJ_TEST_PROMPT> ";
+const journal_dir = "journal home *$'quoted";
 
 /// Tests start real sessions, and a session writes a journal. Point every
 /// child at a scratch one: a test run must not leave anything in the journal
@@ -189,7 +190,7 @@ const Journal = struct {
 
         const len = try self.tmp.dir.realPath(io, &self.path_buf);
 
-        try self.tmp.dir.createDirPath(io, "journal");
+        try self.tmp.dir.createDirPath(io, journal_dir);
 
         self.path_len = len;
         return self;
@@ -202,7 +203,7 @@ const Journal = struct {
     }
 
     fn homeArg(self: *const Journal, gpa: std.mem.Allocator) ![]const u8 {
-        return std.fmt.allocPrint(gpa, "{s}/journal", .{self.path()});
+        return std.fmt.allocPrint(gpa, "{s}/{s}", .{ self.path(), journal_dir });
     }
 
     fn close(self: *Journal) void {
@@ -212,7 +213,7 @@ const Journal = struct {
     /// The id of the single session this run created.
     fn sessionName(self: *Journal, gpa: std.mem.Allocator) ![]u8 {
         const io = std.testing.io;
-        var root = try self.tmp.dir.openDir(io, "journal", .{ .iterate = true });
+        var root = try self.tmp.dir.openDir(io, journal_dir, .{ .iterate = true });
         defer root.close(io);
         var it = root.iterate();
         while (try it.next(io)) |entry| {
@@ -234,7 +235,7 @@ const Journal = struct {
     /// The single session directory this run created.
     fn sessionDir(self: *Journal) !Dir {
         const io = std.testing.io;
-        var root = try self.tmp.dir.openDir(io, "journal", .{ .iterate = true });
+        var root = try self.tmp.dir.openDir(io, journal_dir, .{ .iterate = true });
         defer root.close(io);
         var it = root.iterate();
         while (try it.next(io)) |entry| {
@@ -912,6 +913,41 @@ test "published resources are addressable and completable" {
     var top = try run(gpa, &.{ "--home", home, "complete", "@1/" }, 24, 80);
     defer top.out.deinit(gpa);
     try std.testing.expect(std.mem.indexOf(u8, top.out.items, "@1/files/") != null);
+}
+
+test "zsh completion keeps special resource names as one inert argument" {
+    if (!haveZsh()) return error.SkipZigTest;
+    const gpa = std.testing.allocator;
+
+    var journal = try Journal.open(gpa);
+    defer journal.close();
+
+    const session = try spawnJournalZsh(gpa, &journal);
+    var out: std.ArrayList(u8) = .empty;
+    defer out.deinit(gpa);
+    try setupJournalZsh(gpa, session, &out);
+
+    const publish = try publisher(gpa, "\\033]5107;tj;begin;files/note *$ file.txt;text/plain\\033\\\\" ++
+        "special-resource-content\\033]5107;tj;end\\033\\\\");
+    defer gpa.free(publish);
+    var from = out.items.len;
+    try session.write(publish);
+    try session.write("\n");
+    try std.testing.expect(try session.readUntilFrom(gpa, &out, from, test_prompt, timeout_ms));
+
+    from = out.items.len;
+    try session.write("autoload -Uz compinit; compinit -D; _tj_register_completion\n");
+    try std.testing.expect(try session.readUntilFrom(gpa, &out, from, test_prompt, timeout_ms));
+
+    from = out.items.len;
+    try session.write("cat @1/files/note");
+    try session.write("\t");
+    try std.testing.expect(try session.readUntilFrom(gpa, &out, from, "file.txt", timeout_ms));
+    try session.write("\n");
+    try std.testing.expect(try session.readUntilFrom(gpa, &out, from, "special-resource-content", timeout_ms));
+
+    try session.write("exit 0\n");
+    try std.testing.expectEqual(@as(u8, 0), try session.finish(gpa, &out, timeout_ms));
 }
 
 test "a published resource survives arbitrary bytes" {

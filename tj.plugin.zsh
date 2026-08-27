@@ -96,7 +96,7 @@ add-zsh-hook precmd _tj_precmd
 # `user@host` is untouched, and quoted text is copied through verbatim: the
 # scan tracks quoting rather than pattern-matching the whole line.
 _tj_expand() {
-  local buf=$1 out='' word='' resolved ch
+  local buf=$1 out='' word='' reference='' resolved ch
   local -i i=1 n=${#buf} at_word_start=1 changed=0
 
   while (( i <= n )); do
@@ -123,13 +123,22 @@ _tj_expand() {
       *)
         word=''
         while (( i <= n )); do
+          if [[ ${buf[i]} == '\' ]] && (( i < n )); then
+            word+=${buf[i]}; (( i++ ))
+            word+=${buf[i]}; (( i++ ))
+            continue
+          fi
           case ${buf[i]} in
             (' '|$'\t'|$'\n'|'|'|'&'|';'|'('|')'|'<'|'>'|"'"|'"') break ;;
           esac
           word+=${buf[i]}; (( i++ ))
         done
-        if (( at_word_start )) && [[ $word == @* ]] &&
-           resolved=$(command "$(_tj_bin)" resolve "$word" 2>/dev/null); then
+        # Completion quotes special bytes with backslashes. Remove that one
+        # lexical quoting layer before asking the shell-neutral resolver about
+        # the reference; ${(Q)} does not evaluate the word as shell code.
+        reference=${(Q)word}
+        if (( at_word_start )) && [[ $reference == @* ]] &&
+           resolved=$(command "$(_tj_bin)" resolve "$reference" 2>/dev/null); then
           # The resolver returns a filesystem path, not shell source. Quote it
           # with zsh's lexer so names containing spaces or metacharacters stay
           # one inert argument when the buffer is accepted.
