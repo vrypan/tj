@@ -96,6 +96,14 @@ pub const Store = struct {
     pub fn close(self: *Store) void {
         self.finish(null);
         self.session_dir.close(self.io);
+
+        // A session that recorded nothing is noise: nothing to reference,
+        // nothing to read, and one more name for a short suffix to collide
+        // with. Removing a directory refuses to remove one with anything in
+        // it, so this cannot take a session that has content - including one
+        // that only managed to write a log saying why it recorded nothing.
+        self.root.deleteDir(self.io, &self.session) catch {};
+
         self.root.close(self.io);
         self.gpa.free(self.out_buffer);
     }

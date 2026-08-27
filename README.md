@@ -228,6 +228,13 @@ The journal is plain files under `~/.tj` (override with `$TJ_HOME` or
 Directories are `0700` and files `0600`: the journal holds whatever
 appeared on your terminal, so treat it like shell history.
 
+Sessions outlive the terminal window they ran in — that is the point, and
+`@pgsd.42/out` is meant to keep working after the pane it belonged to is
+gone. A session that recorded nothing is removed when it exits, so opening a
+shell and closing it leaves no trace, and neither does running tj without
+the shell integration loaded. A session that recorded nothing but logged why
+is kept, because that log is the explanation.
+
 ## Development
 
 ```sh

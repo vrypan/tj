@@ -671,3 +671,88 @@ test "tj cat takes the path a reference expanded to, as well as the reference" {
     defer malformed.out.deinit(gpa);
     try std.testing.expectEqual(@as(u8, 1), malformed.code);
 }
+
+// --- sessions that recorded nothing ------------------------------------------
+
+/// A journal directory with no shell integration pointed at it, for testing
+/// what a session leaves behind.
+const Scratch = struct {
+    tmp: std.testing.TmpDir,
+    path_len: usize,
+    path_buf: [std.fs.max_path_bytes]u8,
+
+    fn open() !Scratch {
+        var self: Scratch = .{
+            .tmp = std.testing.tmpDir(.{}),
+            .path_len = 0,
+            .path_buf = undefined,
+        };
+        self.path_len = try self.tmp.dir.realPath(std.testing.io, &self.path_buf);
+        return self;
+    }
+
+    fn path(self: *const Scratch) []const u8 {
+        return self.path_buf[0..self.path_len];
+    }
+
+    fn close(self: *Scratch) void {
+        self.tmp.cleanup();
+    }
+
+    /// How many session directories the journal holds.
+    fn sessions(self: *Scratch) !usize {
+        var count: usize = 0;
+        var it = self.tmp.dir.iterate();
+        while (try it.next(std.testing.io)) |entry| {
+            if (entry.kind == .directory) count += 1;
+        }
+        return count;
+    }
+};
+
+test "a session that recorded nothing leaves nothing behind" {
+    const gpa = std.testing.allocator;
+
+    var scratch = try Scratch.open();
+    defer scratch.close();
+
+    // /bin/sh loads no tj integration, so no command boundaries are ever
+    // reported and the session records nothing.
+    var r = try run(gpa, &.{ "--home", scratch.path(), "run", "--", "/bin/sh", "-c", "true" }, 24, 80);
+    defer r.out.deinit(gpa);
+    try std.testing.expectEqual(@as(u8, 0), r.code);
+
+    try std.testing.expectEqual(@as(usize, 0), try scratch.sessions());
+}
+
+test "a session that recorded something is kept" {
+    if (!haveZsh()) return error.SkipZigTest;
+    const gpa = std.testing.allocator;
+
+    var journal = try Journal.open(gpa);
+    defer journal.close();
+    try recordSession(gpa, &journal, &.{"echo kept"});
+
+    const cmd = try journal.read(gpa, "1/cmd");
+    defer gpa.free(cmd);
+    try std.testing.expectEqualStrings("echo kept", cmd);
+}
+
+test "a session that could not record but said why is kept" {
+    const gpa = std.testing.allocator;
+
+    var scratch = try Scratch.open();
+    defer scratch.close();
+
+    // A malformed tj sequence: no interaction is opened, but the session log
+    // records that something was ignored, and that is worth keeping.
+    var r = try run(gpa, &.{
+        "--home",                                scratch.path(),
+        "run",                                   "--",
+        "/bin/sh",                               "-c",
+        "printf '\\033]5107;tj;bogus\\033\\\\'",
+    }, 24, 80);
+    defer r.out.deinit(gpa);
+
+    try std.testing.expectEqual(@as(usize, 1), try scratch.sessions());
+}
