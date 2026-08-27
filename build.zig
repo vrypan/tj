@@ -50,7 +50,14 @@ pub fn build(b: *std.Build) void {
     const unit_tests = b.addTest(.{ .root_module = exe_mod });
     const integration_tests = b.addTest(.{ .root_module = integration_mod });
 
+    // The integration fixture changes process-wide environment variables and
+    // uses PTYs. Run its test binary directly so Zig's terminal runner invokes
+    // its test functions serially, rather than the build-server runner which
+    // dispatches them concurrently.
+    const run_integration_tests = b.addSystemCommand(&.{"env"});
+    run_integration_tests.addFileArg(integration_tests.getEmittedBin());
+
     const test_step = b.step("test", "Run tests");
     test_step.dependOn(&b.addRunArtifact(unit_tests).step);
-    test_step.dependOn(&b.addRunArtifact(integration_tests).step);
+    test_step.dependOn(&run_integration_tests.step);
 }
