@@ -124,7 +124,9 @@ test "resizing the outer terminal resizes the inner one" {
     defer out.deinit(gpa);
 
     try std.testing.expect(try session.readUntil(gpa, &out, "READY", timeout_ms));
+    const from = out.items.len;
     try session.resize(40, 100);
+    try std.testing.expect(try session.readUntilFrom(gpa, &out, from, "40 100", timeout_ms));
     _ = try session.finish(gpa, &out, timeout_ms);
 
     try std.testing.expect(std.mem.indexOf(u8, out.items, "40 100") != null);
@@ -272,9 +274,11 @@ fn appendShellQuoted(gpa: std.mem.Allocator, out: *std.ArrayList(u8), text: []co
 fn setupJournalZsh(gpa: std.mem.Allocator, session: harness.Session, out: *std.ArrayList(u8)) !void {
     var command: std.ArrayList(u8) = .empty;
     defer command.deinit(gpa);
-    try command.appendSlice(gpa, "source -- ");
+    // `source -- file` is not portable across the zsh versions used by the
+    // native CI runners. The POSIX dot builtin accepts the quoted pathname.
+    try command.appendSlice(gpa, ". ");
     try appendShellQuoted(gpa, &command, options.plugin);
-    try command.appendSlice(gpa, "; PS1='TJ_TEST_PROMPT> '\n");
+    try command.appendSlice(gpa, " || exit; PS1='TJ_TEST_PROMPT> '\n");
     try session.write(command.items);
     if (!try session.readUntil(gpa, out, test_prompt, timeout_ms)) return error.ShellNotReady;
 }
