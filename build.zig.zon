@@ -10,6 +10,7 @@
         "src",
         "tj.plugin.zsh",
         "skill",
+        "contrib",
         "TJ-spec.md",
         "README.md",
         "TODO.md",

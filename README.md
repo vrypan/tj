@@ -232,6 +232,41 @@ What the journal cannot supply is intent. It records what happened, not what
 you were trying to do or what you already ruled out — so the prompt still
 carries the goal, exactly as in `pi explain @42`.
 
+## Publishing an agent's answer
+
+An agent's reply is usually markdown, and the fenced blocks in it are exactly
+the parts worth keeping as files. [contrib/tj-fence](contrib/tj-fence) turns
+them into published resources:
+
+```sh
+cl() { claude -p "$*" --allowedTools "Bash(tj *)" | tj-fence; }
+```
+
+```
+$ cl give me a 3-row csv of fruit and price, and a command that sums them
+```csv
+fruit,price
+apple,1.25
+...
+```
+
+$ tj cat '@2/files/1.csv' | tail -n +2 | cut -d, -f2 | paste -sd+ - | bc
+4.75
+```
+
+The display is unchanged — tj strips its own markers before the terminal sees
+them — and the blocks are now `@2/files/1.csv` and `@2/files/2.sh`, with mime
+types taken from the fence language.
+
+Nothing is asked of the model, deliberately. Asked to emit the control
+sequences itself it refuses, which is the right instinct: writing raw escape
+sequences into a terminal is what terminal injection looks like. And a
+command it runs cannot emit them either, because a coding agent's shell tool
+captures stdout rather than connecting it to the terminal, and `/dev/tty`
+from inside that tool does not reach the session. Marking happens in the
+wrapper, on output the agent has already produced, where it needs no
+permission and no cooperation.
+
 ## Reading a recording
 
 `tj cat` prints what a reference names, resolving it itself — so it works
