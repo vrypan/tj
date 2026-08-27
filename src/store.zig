@@ -473,13 +473,13 @@ fn openOrCreateRoot(io: Io, path: []const u8) !Dir {
         error.PathAlreadyExists => .existed,
         else => return err,
     };
-    return Dir.cwd().openDir(io, path, .{});
+    return Dir.cwd().openDir(io, path, .{ .iterate = true });
 }
 
 pub fn openRoot(io: Io, home_override: ?[]const u8) !Dir {
     var buf: [std.fs.max_path_bytes]u8 = undefined;
     const path = try resolveRoot(home_override, &buf);
-    return Dir.cwd().openDir(io, path, .{});
+    return Dir.cwd().openDir(io, path, .{ .iterate = true });
 }
 
 /// Session ids, newest first. ULIDs sort chronologically, so this is just a
@@ -522,7 +522,7 @@ pub const InteractionInfo = struct {
 
 /// Interactions of one session, in numeric order.
 pub fn listInteractions(gpa: std.mem.Allocator, io: Io, root: Dir, session: []const u8) ![]InteractionInfo {
-    var dir = try root.openDir(io, session, .{});
+    var dir = try root.openDir(io, session, .{ .iterate = true });
     defer dir.close(io);
 
     var found: std.ArrayList(InteractionInfo) = .empty;
@@ -742,7 +742,7 @@ pub fn findSession(gpa: std.mem.Allocator, io: Io, root: Dir, suffix: []const u8
 
 /// Interaction numbers present in a session, in numeric order.
 pub fn listNumbers(gpa: std.mem.Allocator, io: Io, root: Dir, session: []const u8) ![]u32 {
-    var dir = try root.openDir(io, session, .{});
+    var dir = try root.openDir(io, session, .{ .iterate = true });
     defer dir.close(io);
 
     var found: std.ArrayList(u32) = .empty;
@@ -765,7 +765,7 @@ pub fn listResources(gpa: std.mem.Allocator, io: Io, root: Dir, session: []const
     var path_buf: [64]u8 = undefined;
     const sub = try std.fmt.bufPrint(&path_buf, "{s}/{d}", .{ session, number });
 
-    var dir = try root.openDir(io, sub, .{});
+    var dir = try root.openDir(io, sub, .{ .iterate = true });
     defer dir.close(io);
 
     var found: std.ArrayList([]u8) = .empty;

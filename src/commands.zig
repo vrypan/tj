@@ -277,7 +277,7 @@ fn listWithin(
     var path_buf: [std.fs.max_path_bytes]u8 = undefined;
     const sub = try std.fmt.bufPrint(&path_buf, "{s}/{d}/{s}", .{ session, number, directory });
 
-    var dir = try root.openDir(io, sub, .{});
+    var dir = try root.openDir(io, sub, .{ .iterate = true });
     defer dir.close(io);
 
     var found: std.ArrayList([]u8) = .empty;

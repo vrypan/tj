@@ -212,7 +212,7 @@ const Journal = struct {
     /// The id of the single session this run created.
     fn sessionName(self: *Journal, gpa: std.mem.Allocator) ![]u8 {
         const io = std.testing.io;
-        var root = try self.tmp.dir.openDir(io, "journal", .{});
+        var root = try self.tmp.dir.openDir(io, "journal", .{ .iterate = true });
         defer root.close(io);
         var it = root.iterate();
         while (try it.next(io)) |entry| {
@@ -234,7 +234,7 @@ const Journal = struct {
     /// The single session directory this run created.
     fn sessionDir(self: *Journal) !Dir {
         const io = std.testing.io;
-        var root = try self.tmp.dir.openDir(io, "journal", .{});
+        var root = try self.tmp.dir.openDir(io, "journal", .{ .iterate = true });
         defer root.close(io);
         var it = root.iterate();
         while (try it.next(io)) |entry| {
@@ -710,7 +710,7 @@ const Scratch = struct {
 
     fn open() !Scratch {
         var self: Scratch = .{
-            .tmp = std.testing.tmpDir(.{}),
+            .tmp = std.testing.tmpDir(.{ .iterate = true }),
             .path_len = 0,
             .path_buf = undefined,
         };
