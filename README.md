@@ -90,6 +90,38 @@ than being silently dropped.
 The journal records the line you typed; `meta.json` keeps what actually ran
 when expansion changed it.
 
+## Showing the number in your prompt
+
+Inside a session the plugin exports `TJ_NEXT`, the number the command you
+are about to type will get. Reading it costs nothing per prompt, and it is
+unset outside a session, so a prompt that uses it is unchanged elsewhere.
+
+For [starship](https://starship.rs), add an `env_var` module:
+
+```toml
+[env_var.TJ_NEXT]
+format = '[@$env_value]($style) '
+style = 'dimmed white'
+```
+
+`$all` picks it up automatically. To put it at the far left instead, name it
+explicitly at the front of your format:
+
+```toml
+format = """
+${env_var.TJ_NEXT}$all\
+$character"""
+```
+
+For a plain zsh prompt:
+
+```zsh
+setopt promptsubst
+PS1='[@${TJ_NEXT}] '"$PS1"
+```
+
+Scrolling back, every command is then headed by the reference that names it.
+
 ## Reading a recording
 
 `tj cat` prints what a reference names, resolving it itself — so it works

@@ -44,7 +44,22 @@ _tj_preexec() {
   # Only worth sending when expansion actually changed something.
   [[ $typed != $1 ]] && _tj_emit "5107;tj;expanded;$(_tj_encode "$1")"
   _tj_emit "133;C"
+
+  (( _tj_count++ ))
+  export TJ_NEXT=$(( _tj_count + 1 ))
 }
+
+# --- the number of the command about to be typed ----------------------------
+#
+# Exported rather than computed by the prompt, so showing it costs no process
+# per prompt. Any prompt can use $TJ_NEXT; starship reads it with an env_var
+# module. tj assigns numbers on the same event this counter follows - one per
+# preexec - so the two stay in step.
+#
+# Seeded from the journal, because the plugin can be sourced part way through
+# a session that already has interactions.
+typeset -gi _tj_count=${$(command "$(_tj_bin)" last 2>/dev/null):-0}
+export TJ_NEXT=$(( _tj_count + 1 ))
 
 _tj_precmd() {
   # Must be the first thing read, before any command here disturbs it.
