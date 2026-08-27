@@ -954,6 +954,59 @@ test "a carriage return at the very end of a resource is kept" {
     try std.testing.expectEqualStrings("ends with cr\r", text);
 }
 
+test "metadata preserves every accepted resource beyond eight kibibytes" {
+    const io = std.testing.io;
+    const gpa = std.testing.allocator;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var root_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const root_len = try tmp.dir.realPath(io, &root_buf);
+
+    const long_mime =
+        "application/x-test; title=\"quoted\\\\value\"; padding=" ++
+        "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx" ++
+        "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx" ++
+        "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx" ++
+        "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx" ++
+        "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx" ++
+        "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx";
+
+    var store = try Store.create(gpa, io, root_buf[0..root_len]);
+    store.begin("demo", "expanded \"command\" with \\ and a newline\n");
+
+    for (0..max_resources) |i| {
+        var path_buf: [96]u8 = undefined;
+        const path = try std.fmt.bufPrint(&path_buf, "files/item-\"quoted\"-\\\\-{d}.dat", .{i});
+        store.beginResource(path, long_mime);
+        store.endResource();
+        store.current.?.published[i].truncated = i % 3 == 0;
+    }
+    store.finish(0);
+
+    const meta = try store.session_dir.readFileAlloc(io, "1/meta.json", gpa, .limited(64 * 1024));
+    defer gpa.free(meta);
+    store.close();
+
+    try std.testing.expect(meta.len > 8 * 1024);
+    const parsed = try std.json.parseFromSlice(std.json.Value, gpa, meta, .{});
+    defer parsed.deinit();
+
+    const root = parsed.value.object;
+    try std.testing.expect(root.get("started").?.string.len > 0);
+    try std.testing.expect(root.get("ended").?.string.len > 0);
+    try std.testing.expectEqualStrings("expanded \"command\" with \\ and a newline\n", root.get("expanded_cmd").?.string);
+
+    const resources = root.get("resources").?.object;
+    try std.testing.expectEqual(max_resources, resources.count());
+    for (0..max_resources) |i| {
+        var path_buf: [96]u8 = undefined;
+        const path = try std.fmt.bufPrint(&path_buf, "files/item-\"quoted\"-\\\\-{d}.dat", .{i});
+        const entry = resources.get(path).?.object;
+        try std.testing.expectEqualStrings(long_mime, entry.get("mime").?.string);
+        try std.testing.expectEqual(i % 3 == 0, entry.get("truncated").?.bool);
+    }
+}
+
 // --- reading back what a session recorded ------------------------------------
 
 /// When an interaction ran, as milliseconds since the epoch.
