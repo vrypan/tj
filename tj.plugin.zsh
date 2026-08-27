@@ -46,20 +46,35 @@ _tj_preexec() {
   _tj_emit "133;C"
 
   (( _tj_count++ ))
-  export TJ_NEXT=$(( _tj_count + 1 ))
+  _tj_publish
 }
 
-# --- the number of the command about to be typed ----------------------------
+# --- naming the command about to be typed -----------------------------------
 #
-# Exported rather than computed by the prompt, so showing it costs no process
-# per prompt. Any prompt can use $TJ_NEXT; starship reads it with an env_var
-# module. tj assigns numbers on the same event this counter follows - one per
-# preexec - so the two stay in step.
+# Exported rather than computed by the prompt, so showing any of this costs no
+# process per prompt:
 #
-# Seeded from the journal, because the plugin can be sourced part way through
-# a session that already has interactions.
+#   TJ_SESSION        the full session id, exported by tj itself
+#   TJ_SESSION_SHORT  the shortest suffix that names this session
+#   TJ_NEXT           the number the next command will get
+#   TJ_REF            a reference to it that can be typed from anywhere
+#
+# tj assigns numbers on the same event this counter follows - one per preexec -
+# so the two stay in step. Seeded from the journal, because the plugin can be
+# sourced part way through a session that already has interactions.
 typeset -gi _tj_count=${$(command "$(_tj_bin)" last 2>/dev/null):-0}
-export TJ_NEXT=$(( _tj_count + 1 ))
+
+# Four characters of a ULID's random tail is plenty to tell a handful of
+# sessions apart. $TJ_SESSION holds the whole id when that is not enough.
+export TJ_SESSION_SHORT=${TJ_SESSION: -4}
+
+_tj_publish() {
+  export TJ_NEXT=$(( _tj_count + 1 ))
+  # Qualified by session, so it still resolves from another pane.
+  export TJ_REF="@${TJ_SESSION_SHORT}.${TJ_NEXT}"
+}
+
+_tj_publish
 
 _tj_precmd() {
   # Must be the first thing read, before any command here disturbs it.

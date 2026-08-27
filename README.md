@@ -90,17 +90,30 @@ than being silently dropped.
 The journal records the line you typed; `meta.json` keeps what actually ran
 when expansion changed it.
 
-## Showing the number in your prompt
+## Showing the reference in your prompt
 
-Inside a session the plugin exports `TJ_NEXT`, the number the command you
-are about to type will get. Reading it costs nothing per prompt, and it is
-unset outside a session, so a prompt that uses it is unchanged elsewhere.
+Inside a session these are exported, so a prompt can show them without
+running anything:
+
+| | |
+|---|---|
+| `TJ_REF` | `@fgpc.43` — a reference to the command about to be typed |
+| `TJ_NEXT` | `43` — just the number |
+| `TJ_SESSION_SHORT` | `fgpc` — the shortest suffix naming this session |
+| `TJ_SESSION` | the full 26-character session id |
+
+`TJ_REF` is qualified by session, so it stays valid when you type it in
+another pane. Four characters of a ULID's random tail separates a handful
+of sessions; use `$TJ_SESSION` where that is not enough.
+
+All of them are unset outside a session, so a prompt that uses them is
+unchanged elsewhere.
 
 For [starship](https://starship.rs), add an `env_var` module:
 
 ```toml
-[env_var.TJ_NEXT]
-format = '[@$env_value]($style) '
+[env_var.TJ_REF]
+format = '[$env_value]($style) '
 style = 'dimmed white'
 ```
 
@@ -109,15 +122,24 @@ explicitly at the front of your format:
 
 ```toml
 format = """
-${env_var.TJ_NEXT}$all\
+${env_var.TJ_REF}$all\
 $character"""
+```
+
+Styling the session and the number differently takes two modules:
+
+```toml
+[env_var.TJ_SESSION_SHORT]
+format = '[$env_value](dimmed white)'
+[env_var.TJ_NEXT]
+format = '[.$env_value](white) '
 ```
 
 For a plain zsh prompt:
 
 ```zsh
 setopt promptsubst
-PS1='[@${TJ_NEXT}] '"$PS1"
+PS1='[${TJ_REF}] '"$PS1"
 ```
 
 Scrolling back, every command is then headed by the reference that names it.
