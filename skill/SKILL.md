@@ -123,6 +123,25 @@ tj cat @42/files/data.csv
 `tj hist` does not list these. Check `@42/meta.json` for a `resources` map,
 or run `tj complete '@42/'` to see what an interaction holds.
 
+## Output the user may want to reuse
+
+When part of an answer is meant to be **used** rather than read - a table of
+data, a script, a config block - put it in a fenced block with a language
+tag, and keep prose out of the fence:
+
+    ```csv
+    date,amount
+    2026-08-01,12.50
+    ```
+
+A wrapper may turn fenced blocks into files of this interaction, taking the
+mime type from that tag, which is why the tag is worth getting right. Whether
+such a wrapper is in the pipeline is not something you can see from here.
+
+So: **do not claim a file was written, and do not invent a name or a number
+for it.** You do not choose either. Write the block, say what it is, and stop
+there.
+
 ## Rules
 
 - **Use `tj cat`, never `cat @N/out`.** The second replays the whole
