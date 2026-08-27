@@ -170,7 +170,6 @@ const sys = @import("sys.zig");
 /// A zsh session under tj, with the plugin loaded and a journal of its own.
 const Journal = struct {
     tmp: std.testing.TmpDir,
-    root: Dir,
     // A length, not a slice: the struct is returned by value, and a slice into
     // its own buffer would point at the caller's dead stack frame.
     path_len: usize,
@@ -183,7 +182,6 @@ const Journal = struct {
     fn open(_: std.mem.Allocator) !Journal {
         var self: Journal = .{
             .tmp = std.testing.tmpDir(.{}),
-            .root = undefined,
             .path_len = 0,
             .path_buf = undefined,
         };
@@ -192,7 +190,6 @@ const Journal = struct {
         const len = try self.tmp.dir.realPath(io, &self.path_buf);
 
         try self.tmp.dir.createDirPath(io, "journal");
-        self.root = try self.tmp.dir.openDir(io, "journal", .{});
 
         self.path_len = len;
         return self;
@@ -209,14 +206,15 @@ const Journal = struct {
     }
 
     fn close(self: *Journal) void {
-        self.root.close(std.testing.io);
         self.tmp.cleanup();
     }
 
     /// The id of the single session this run created.
     fn sessionName(self: *Journal, gpa: std.mem.Allocator) ![]u8 {
         const io = std.testing.io;
-        var it = self.root.iterate();
+        var root = try self.tmp.dir.openDir(io, "journal", .{});
+        defer root.close(io);
+        var it = root.iterate();
         while (try it.next(io)) |entry| {
             if (entry.kind == .directory) return gpa.dupe(u8, entry.name);
         }
@@ -236,9 +234,11 @@ const Journal = struct {
     /// The single session directory this run created.
     fn sessionDir(self: *Journal) !Dir {
         const io = std.testing.io;
-        var it = self.root.iterate();
+        var root = try self.tmp.dir.openDir(io, "journal", .{});
+        defer root.close(io);
+        var it = root.iterate();
         while (try it.next(io)) |entry| {
-            if (entry.kind == .directory) return self.root.openDir(io, entry.name, .{});
+            if (entry.kind == .directory) return root.openDir(io, entry.name, .{});
         }
         return error.NoSession;
     }
