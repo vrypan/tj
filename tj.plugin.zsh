@@ -130,7 +130,10 @@ _tj_expand() {
         done
         if (( at_word_start )) && [[ $word == @* ]] &&
            resolved=$(command "$(_tj_bin)" resolve "$word" 2>/dev/null); then
-          out+=$resolved
+          # The resolver returns a filesystem path, not shell source. Quote it
+          # with zsh's lexer so names containing spaces or metacharacters stay
+          # one inert argument when the buffer is accepted.
+          out+=${(q)resolved}
           changed=1
         else
           # Never drop a word: an unresolvable reference reaches the command
@@ -164,7 +167,9 @@ _tj_completer() {
   local -a candidates
   candidates=(${(f)"$(command "$(_tj_bin)" complete "$PREFIX" 2>/dev/null)"})
   (( ${#candidates} )) || return 1
-  compadd -U -Q -- $candidates
+  # Let zsh quote the match it inserts. `-Q` would turn a resource name into
+  # active shell syntax when it contains a metacharacter.
+  compadd -U -- $candidates
   return 0
 }
 

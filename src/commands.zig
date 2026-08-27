@@ -21,6 +21,7 @@ pub const Error = error{
     NoSuchInteraction,
     NoSuchResource,
     BadCount,
+    BadReplayOption,
     InsideSession,
 };
 
@@ -340,6 +341,12 @@ fn catResource(
     defer root.close(io);
 
     for (refs.items) |text| {
+        if (as_written and window == .all) {
+            var file = try openTarget(gpa, io, root, text);
+            defer file.close(io);
+            try copyFile(io, file, out);
+            continue;
+        }
         const bytes = try readTarget(gpa, io, root, text);
         defer gpa.free(bytes);
 
@@ -368,6 +375,16 @@ fn catResource(
                 countLines(rendered.items),
             });
         }
+    }
+}
+
+fn copyFile(io: Io, file: Io.File, out: *Io.Writer) !void {
+    var buffer: [64 * 1024]u8 = undefined;
+    var reader = file.readerStreaming(io, &buffer);
+    while (true) {
+        const n = try reader.interface.readSliceShort(&buffer);
+        if (n == 0) break;
+        try out.writeAll(buffer[0..n]);
     }
 }
 
@@ -486,6 +503,17 @@ test "counting lines matches what a window kept" {
 /// typed. Outside a session there is nothing to rewrite and the reference is
 /// resolved here instead. Either way it ends at the same file.
 fn readTarget(gpa: std.mem.Allocator, io: Io, root: store.Dir, text: []const u8) ![]u8 {
+    var file = try openTarget(gpa, io, root, text);
+    defer file.close(io);
+    var bytes: std.ArrayList(u8) = .empty;
+    errdefer bytes.deinit(gpa);
+    var writer = Io.Writer.Allocating.fromArrayList(gpa, &bytes);
+    defer bytes = writer.toArrayList();
+    try copyFile(io, file, &writer.writer);
+    return writer.toOwnedSlice();
+}
+
+fn openTarget(gpa: std.mem.Allocator, io: Io, root: store.Dir, text: []const u8) !Io.File {
     var path_buf: [std.fs.max_path_bytes]u8 = undefined;
     var path: []const u8 = text;
     var owned: ?[]const u8 = null;
@@ -510,8 +538,7 @@ fn readTarget(gpa: std.mem.Allocator, io: Io, root: store.Dir, text: []const u8)
         path = std.fmt.bufPrint(&path_buf, "{s}/out", .{path}) catch return error.BadReference;
     }
 
-    return store.Dir.cwd().readFileAlloc(io, path, gpa, .limited(max_resource)) catch
-        error.NoSuchResource;
+    return store.Dir.cwd().openFile(io, path, .{}) catch error.NoSuchResource;
 }
 
 fn isDirectory(io: Io, path: []const u8) bool {
@@ -540,20 +567,32 @@ const Replay = struct {
     duration_only: bool = false,
 
     /// A recorded gap, capped and scaled into something watchable.
-    fn delay(self: Replay, millis: i64) u64 {
+    fn delay(self: Replay, millis: i64) !u64 {
         if (millis <= 0) return 0;
         const capped = @min(@as(u64, @intCast(millis)), self.max_pause_ms);
-        return @intFromFloat(@as(f64, @floatFromInt(capped)) / self.speed);
+        return scaleMillis(capped, self.speed);
     }
 
     /// Sleeps unless only the total was asked for. Returns what it cost
     /// either way, so the two paths cannot drift apart.
-    fn wait(self: Replay, millis: i64) u64 {
-        const ms = self.delay(millis);
+    fn wait(self: Replay, millis: i64) !u64 {
+        const ms = try self.delay(millis);
         if (!self.duration_only) sys.sleepMs(ms);
         return ms;
     }
 };
+
+fn scaleMillis(value: u64, speed: f64) !u64 {
+    const scaled = @as(f64, @floatFromInt(value)) / speed;
+    if (!std.math.isFinite(scaled) or scaled < 0 or scaled > @as(f64, @floatFromInt(std.math.maxInt(u64)))) {
+        return error.BadReplayOption;
+    }
+    return @intFromFloat(scaled);
+}
+
+fn addDuration(total: *u64, value: u64) !void {
+    total.* = std.math.add(u64, total.*, value) catch return error.BadReplayOption;
+}
 
 /// `tj replay <session>` - play a recording back into the terminal.
 ///
@@ -579,20 +618,21 @@ fn replaySession(
             replay.typing_ms = n;
         } else if (try takeCount(args, &i, "--max-pause")) |n| {
             replay.max_pause_ms = n;
-        } else if (try takeCount(args, &i, "--from")) |n| {
-            replay.from = @intCast(n);
-        } else if (try takeCount(args, &i, "--to")) |n| {
-            replay.to = @intCast(n);
+        } else if (try takeReplayNumber(args, &i, "--from")) |n| {
+            replay.from = n;
+        } else if (try takeReplayNumber(args, &i, "--to")) |n| {
+            replay.to = n;
         } else if (try takeText(args, &i, "--prompt")) |text| {
             replay.prompt = text;
         } else if (try takeText(args, &i, "--speed")) |text| {
-            replay.speed = std.fmt.parseFloat(f64, text) catch return error.BadCount;
-            if (replay.speed <= 0) return error.BadCount;
+            replay.speed = std.fmt.parseFloat(f64, text) catch return error.BadReplayOption;
+            if (!std.math.isFinite(replay.speed) or replay.speed <= 0) return error.BadReplayOption;
         } else if (std.mem.eql(u8, arg, "--duration")) {
             replay.duration_only = true;
         } else if (std.mem.startsWith(u8, arg, "-")) {
             return error.UnknownFlag;
         } else {
+            if (wanted != null) return error.BadReplayOption;
             wanted = arg;
         }
     }
@@ -641,17 +681,17 @@ fn replaySession(
         // The gap since the last command finished is the time somebody spent
         // reading it and typing the next one.
         if (previous_end) |ended| {
-            if (timing) |t| total_ms += replay.wait(t.started - ended);
+            if (timing) |t| try addDuration(&total_ms, try replay.wait(t.started - ended));
         }
 
         if (!replay.duration_only) try out.writeAll(replay.prompt);
-        total_ms += try typeOut(gpa, io, root, session, number, replay, out);
+        try addDuration(&total_ms, try typeOut(gpa, io, root, session, number, replay, out));
 
         // Then the command runs, which took as long as it took.
-        if (timing) |t| total_ms += replay.wait(t.duration());
+        if (timing) |t| try addDuration(&total_ms, try replay.wait(t.duration()));
 
         if (!replay.duration_only) {
-            try writeResource(gpa, io, root, session, number, "out", out);
+            try writeResource(io, root, session, number, "out", out);
             try out.flush();
         }
 
@@ -659,7 +699,7 @@ fn replaySession(
     }
 
     // Rounded up, so a tape that waits this long never cuts the end off.
-    if (replay.duration_only) try out.print("{d}\n", .{(total_ms + 999) / 1000});
+    if (replay.duration_only) try out.print("{d}\n", .{(try std.math.add(u64, total_ms, 999)) / 1000});
 }
 
 /// Types the command line out a character at a time, the way it was typed.
@@ -677,11 +717,10 @@ fn typeOut(
     const cmd = root.readFileAlloc(io, sub, gpa, .limited(max_resource)) catch "";
     defer if (cmd.len > 0) gpa.free(cmd);
 
-    const per_char: u64 = if (replay.typing_ms == 0) 0 else @intFromFloat(
-        @as(f64, @floatFromInt(replay.typing_ms)) / replay.speed,
-    );
+    const per_char: u64 = if (replay.typing_ms == 0) 0 else try scaleMillis(replay.typing_ms, replay.speed);
 
-    if (replay.duration_only) return per_char * cmd.len;
+    const total = std.math.mul(u64, per_char, @as(u64, @intCast(cmd.len))) catch return error.BadReplayOption;
+    if (replay.duration_only) return total;
 
     if (per_char == 0) {
         try out.writeAll(cmd);
@@ -694,13 +733,19 @@ fn typeOut(
     }
     try out.writeAll("\r\n");
     try out.flush();
-    return per_char * cmd.len;
+    return total;
+}
+
+fn takeReplayNumber(args: []const []const u8, i: *usize, comptime name: []const u8) !?u32 {
+    const text = try takeText(args, i, name) orelse return null;
+    const number = std.fmt.parseInt(u32, text, 10) catch return error.BadReplayOption;
+    if (number == 0) return error.BadReplayOption;
+    return number;
 }
 
 /// Writes a recorded resource through verbatim. `out` is what the terminal
 /// saw, so replaying it raw is what makes the colours come back.
 fn writeResource(
-    gpa: std.mem.Allocator,
     io: Io,
     root: store.Dir,
     session: []const u8,
@@ -710,9 +755,9 @@ fn writeResource(
 ) !void {
     var path_buf: [64]u8 = undefined;
     const sub = try std.fmt.bufPrint(&path_buf, "{s}/{d}/{s}", .{ session, number, name });
-    const bytes = root.readFileAlloc(io, sub, gpa, .limited(max_resource)) catch return;
-    defer gpa.free(bytes);
-    try out.writeAll(bytes);
+    var file = root.openFile(io, sub, .{}) catch return;
+    defer file.close(io);
+    try copyFile(io, file, out);
 }
 
 fn takeText(args: []const []const u8, i: *usize, comptime name: []const u8) !?[]const u8 {
@@ -728,16 +773,16 @@ fn takeText(args: []const []const u8, i: *usize, comptime name: []const u8) !?[]
 
 test "a recorded gap is capped so a demo stays watchable" {
     const replay: Replay = .{ .max_pause_ms = 2000, .speed = 1.0 };
-    try std.testing.expectEqual(@as(u64, 0), replay.delay(0));
-    try std.testing.expectEqual(@as(u64, 0), replay.delay(-5));
-    try std.testing.expectEqual(@as(u64, 500), replay.delay(500));
+    try std.testing.expectEqual(@as(u64, 0), try replay.delay(0));
+    try std.testing.expectEqual(@as(u64, 0), try replay.delay(-5));
+    try std.testing.expectEqual(@as(u64, 500), try replay.delay(500));
     // A minute of somebody reading the screen becomes two seconds.
-    try std.testing.expectEqual(@as(u64, 2000), replay.delay(60_000));
+    try std.testing.expectEqual(@as(u64, 2000), try replay.delay(60_000));
 }
 
 test "speed divides every delay" {
     const fast: Replay = .{ .max_pause_ms = 4000, .speed = 4.0 };
-    try std.testing.expectEqual(@as(u64, 250), fast.delay(1000));
+    try std.testing.expectEqual(@as(u64, 250), try fast.delay(1000));
     const slow: Replay = .{ .max_pause_ms = 4000, .speed = 0.5 };
-    try std.testing.expectEqual(@as(u64, 2000), slow.delay(1000));
+    try std.testing.expectEqual(@as(u64, 2000), try slow.delay(1000));
 }

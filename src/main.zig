@@ -87,6 +87,7 @@ pub fn main(init: std.process.Init) !u8 {
                     error.MissingArgument => "tj: this subcommand needs an argument\n",
                     error.BadReference => "tj: not a journal reference\n",
                     error.BadCount => "tj: --head and --tail need a number of lines\n",
+                    error.BadReplayOption => "tj: invalid replay numeric option\n",
                     error.NoSuchInteraction => "tj: no such interaction\n",
                     error.NoSuchResource => "tj: no such resource or file\n",
                     error.InsideSession => "tj: cannot replay inside a tj session, because the session would record the replay; run it from a shell that is not under tj\n",

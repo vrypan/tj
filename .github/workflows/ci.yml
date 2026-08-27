@@ -1,0 +1,46 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  native:
+    name: Native (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-24.04, macos-15]
+    steps:
+      - uses: actions/checkout@v6
+      # Keep this in sync with build.zig.zon minimum_zig_version.
+      - uses: mlugg/setup-zig@v2
+        with:
+          version: 0.16.0
+      - name: Install zsh
+        if: runner.os == 'Linux'
+        run: sudo apt-get update && sudo apt-get install --yes zsh
+      - run: zig version
+      - run: make fmt-check
+      - run: make test
+
+  release-targets:
+    name: Cross-build release targets
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v6
+      # Keep this in sync with build.zig.zon minimum_zig_version.
+      - uses: mlugg/setup-zig@v2
+        with:
+          version: 0.16.0
+      - run: zig version
+      - run: make -j6 all

@@ -12,6 +12,7 @@ const options = @import("build_options");
 const tj = options.tj_exe;
 
 const timeout_ms = 5000;
+const test_prompt = "TJ_TEST_PROMPT> ";
 
 /// Tests start real sessions, and a session writes a journal. Point every
 /// child at a scratch one: a test run must not leave anything in the journal
@@ -187,23 +188,17 @@ const Journal = struct {
         const io = std.testing.io;
 
         const len = try self.tmp.dir.realPath(io, &self.path_buf);
-        const base = self.path_buf[0..len];
 
         // zsh only loads our plugin if it reads a .zshrc we control.
         var rc: std.ArrayList(u8) = .empty;
         defer rc.deinit(gpa);
-        try rc.appendSlice(gpa, "PS1='%% '\nsource ");
+        try rc.appendSlice(gpa, "PS1='TJ_TEST_PROMPT> '\nsource ");
         try rc.appendSlice(gpa, options.plugin);
         try rc.append(gpa, '\n');
         try self.tmp.dir.writeFile(io, .{ .sub_path = ".zshrc", .data = rc.items });
 
         try self.tmp.dir.createDirPath(io, "journal");
         self.root = try self.tmp.dir.openDir(io, "journal", .{});
-
-        var zdotdir: [std.fs.max_path_bytes]u8 = undefined;
-        @memcpy(zdotdir[0..base.len], base);
-        zdotdir[base.len] = 0;
-        sys.setEnv("ZDOTDIR", zdotdir[0..base.len :0]);
 
         self.path_len = len;
         return self;
@@ -261,6 +256,16 @@ const Journal = struct {
     }
 };
 
+/// Starts zsh with only the fixture's startup file.  This avoids inheriting a
+/// developer's ZDOTDIR while keeping the plugin setup visible in the fixture.
+fn spawnJournalZsh(gpa: std.mem.Allocator, journal: *const Journal) !harness.Session {
+    const home = try journal.homeArg(gpa);
+    defer gpa.free(home);
+    const zdotdir = try std.fmt.allocPrint(gpa, "ZDOTDIR={s}", .{journal.path()});
+    defer gpa.free(zdotdir);
+    return spawnTj(gpa, &.{ tj, "--home", home, "run", "--", "/usr/bin/env", zdotdir, "/bin/zsh", "-i" }, 24, 80);
+}
+
 fn haveZsh() bool {
     const io = std.testing.io;
     const file = Dir.cwd().openFile(io, "/bin/zsh", .{}) catch return false;
@@ -270,24 +275,20 @@ fn haveZsh() bool {
 
 /// Runs `script` line by line in an interactive zsh under tj, then exits.
 fn recordSession(gpa: std.mem.Allocator, journal: *Journal, script: []const []const u8) !void {
-    const home = try journal.homeArg(gpa);
-    defer gpa.free(home);
-
-    const session = try spawnTj(gpa, &.{ tj, "--home", home, "run", "--", "/bin/zsh", "-i" }, 24, 80);
+    const session = try spawnJournalZsh(gpa, journal);
     var out: std.ArrayList(u8) = .empty;
     defer out.deinit(gpa);
 
-    // Wait for the first prompt so the plugin's hooks are installed.
-    _ = try session.readUntil(gpa, &out, "%", timeout_ms);
+    // Wait for the fixture's prompt so the plugin's hooks are installed.
+    if (!try session.readUntil(gpa, &out, test_prompt, timeout_ms)) return error.ShellNotReady;
     for (script) |line| {
+        const from = out.items.len;
         try session.write(line);
         try session.write("\n");
-        // Let the command finish before sending the next one, so interaction
-        // numbers are predictable.
-        sys.sleepMs(300);
+        if (!try session.readUntilFrom(gpa, &out, from, test_prompt, timeout_ms)) return error.CommandDidNotFinish;
     }
-    try session.write("exit\n");
-    _ = try session.finish(gpa, &out, timeout_ms);
+    try session.write("exit 0\n");
+    try std.testing.expectEqual(@as(u8, 0), try session.finish(gpa, &out, timeout_ms));
 }
 
 test "commands are recorded as cmd, out and rc" {
@@ -327,18 +328,16 @@ test "tj's own control sequences never reach the terminal" {
     var journal = try Journal.open(gpa);
     defer journal.close();
 
-    const home = try journal.homeArg(gpa);
-    defer gpa.free(home);
-
-    const session = try spawnTj(gpa, &.{ tj, "--home", home, "run", "--", "/bin/zsh", "-i" }, 24, 80);
+    const session = try spawnJournalZsh(gpa, &journal);
     var out: std.ArrayList(u8) = .empty;
     defer out.deinit(gpa);
 
-    _ = try session.readUntil(gpa, &out, "%", timeout_ms);
+    try std.testing.expect(try session.readUntil(gpa, &out, test_prompt, timeout_ms));
+    const from = out.items.len;
     try session.write("echo marker\n");
-    sys.sleepMs(300);
+    try std.testing.expect(try session.readUntilFrom(gpa, &out, from, test_prompt, timeout_ms));
     try session.write("exit\n");
-    _ = try session.finish(gpa, &out, timeout_ms);
+    try std.testing.expectEqual(@as(u8, 0), try session.finish(gpa, &out, timeout_ms));
 
     try std.testing.expect(std.mem.indexOf(u8, out.items, "marker") != null);
     // The command line travels inside a 5107 sequence; none of it may be shown.
@@ -371,16 +370,14 @@ test "an interrupted session leaves the interaction without an rc" {
     var journal = try Journal.open(gpa);
     defer journal.close();
 
-    const home = try journal.homeArg(gpa);
-    defer gpa.free(home);
-
-    const session = try spawnTj(gpa, &.{ tj, "--home", home, "run", "--", "/bin/zsh", "-i" }, 24, 80);
+    const session = try spawnJournalZsh(gpa, &journal);
     var out: std.ArrayList(u8) = .empty;
     defer out.deinit(gpa);
 
-    _ = try session.readUntil(gpa, &out, "%", timeout_ms);
+    try std.testing.expect(try session.readUntil(gpa, &out, test_prompt, timeout_ms));
+    const from = out.items.len;
     try session.write("sleep 30\n");
-    sys.sleepMs(400);
+    try std.testing.expect(try session.readUntilFrom(gpa, &out, from, "sleep 30", timeout_ms));
     _ = std.c.kill(session.pid, posix.SIG.TERM);
     _ = try session.finish(gpa, &out, timeout_ms);
 
@@ -570,18 +567,16 @@ test "the terminal still sees the full-screen program" {
     var journal = try Journal.open(gpa);
     defer journal.close();
 
-    const home = try journal.homeArg(gpa);
-    defer gpa.free(home);
-
-    const session = try spawnTj(gpa, &.{ tj, "--home", home, "run", "--", "/bin/zsh", "-i" }, 24, 80);
+    const session = try spawnJournalZsh(gpa, &journal);
     var out: std.ArrayList(u8) = .empty;
     defer out.deinit(gpa);
 
-    _ = try session.readUntil(gpa, &out, "%", timeout_ms);
+    try std.testing.expect(try session.readUntil(gpa, &out, test_prompt, timeout_ms));
+    const from = out.items.len;
     try session.write("printf '\\033[?1049hHIDDEN-PAINTING\\033[?1049l'\n");
-    sys.sleepMs(400);
+    try std.testing.expect(try session.readUntilFrom(gpa, &out, from, test_prompt, timeout_ms));
     try session.write("exit\n");
-    _ = try session.finish(gpa, &out, timeout_ms);
+    try std.testing.expectEqual(@as(u8, 0), try session.finish(gpa, &out, timeout_ms));
 
     // Filtering applies to the journal only: the program must render exactly
     // as it would without tj.

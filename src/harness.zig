@@ -47,6 +47,35 @@ pub const Session = struct {
         return std.mem.indexOf(u8, out.items, marker) != null;
     }
 
+    /// Like readUntil, but only accepts a marker received after `from`.
+    /// This makes a prompt already in the transcript unable to acknowledge a
+    /// command that was written later.
+    pub fn readUntilFrom(
+        self: Session,
+        gpa: std.mem.Allocator,
+        out: *std.ArrayList(u8),
+        from: usize,
+        marker: []const u8,
+        timeout_ms: i32,
+    ) !bool {
+        var remaining = timeout_ms;
+        var buf: [4096]u8 = undefined;
+        while (remaining > 0) {
+            if (std.mem.indexOf(u8, out.items[from..], marker) != null) return true;
+            var fds = [_]posix.pollfd{.{ .fd = self.master, .events = posix.POLL.IN, .revents = 0 }};
+            const step: i32 = 100;
+            const ready = posix.poll(&fds, step) catch return false;
+            if (ready == 0) {
+                remaining -= step;
+                continue;
+            }
+            const n = sys.read(self.master, &buf) catch 0;
+            if (n == 0) break;
+            try out.appendSlice(gpa, buf[0..n]);
+        }
+        return std.mem.indexOf(u8, out.items[from..], marker) != null;
+    }
+
     /// Drains to end of output, then reaps the child.
     pub fn finish(self: Session, gpa: std.mem.Allocator, out: *std.ArrayList(u8), timeout_ms: i32) !u8 {
         var remaining = timeout_ms;

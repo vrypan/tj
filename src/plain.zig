@@ -13,11 +13,78 @@
 const std = @import("std");
 const Io = std.Io;
 
+pub const Renderer = struct {
+    gpa: std.mem.Allocator,
+    line: std.ArrayList(u8) = .empty,
+    state: State = .text,
+    pending_cr: bool = false,
+
+    const State = enum { text, escape, csi, string, string_escape, charset };
+
+    pub fn init(gpa: std.mem.Allocator) Renderer {
+        return .{ .gpa = gpa };
+    }
+    pub fn deinit(self: *Renderer) void {
+        self.line.deinit(self.gpa);
+    }
+
+    pub fn feed(self: *Renderer, bytes: []const u8, out: *Io.Writer) !void {
+        for (bytes) |value| try self.byte(value, out);
+    }
+
+    pub fn finish(self: *Renderer, out: *Io.Writer) !void {
+        // A partial escape is intentionally discarded; bytes before it have
+        // already been emitted into the visible line.
+        if (self.line.items.len > 0) try out.writeAll(self.line.items);
+    }
+
+    fn byte(self: *Renderer, value: u8, out: *Io.Writer) !void {
+        switch (self.state) {
+            .escape => switch (value) {
+                '[' => self.state = .csi,
+                ']' => self.state = .string,
+                'P', 'X', '^', '_' => self.state = .string,
+                '(', ')', '*', '+' => self.state = .charset,
+                else => self.state = .text,
+            },
+            .charset => self.state = .text,
+            .csi => {
+                if (value >= 0x40 and value <= 0x7e) self.state = .text;
+            },
+            .string => {
+                if (value == 0x07) self.state = .text else if (value == 0x1b) self.state = .string_escape;
+            },
+            .string_escape => self.state = if (value == '\\') .text else .string,
+            .text => switch (value) {
+                0x1b => self.state = .escape,
+                '\r' => self.pending_cr = true,
+                '\n' => {
+                    try out.writeAll(self.line.items);
+                    try out.writeAll("\n");
+                    self.line.clearRetainingCapacity();
+                    self.pending_cr = false;
+                },
+                0x08 => {
+                    if (self.line.items.len > 0) _ = self.line.pop();
+                },
+                else => {
+                    if (value < 0x20 and value != '\t') return;
+                    if (self.pending_cr) {
+                        self.line.clearRetainingCapacity();
+                        self.pending_cr = false;
+                    }
+                    try self.line.append(self.gpa, value);
+                },
+            },
+        }
+    }
+};
+
 pub fn render(gpa: std.mem.Allocator, bytes: []const u8, out: *Io.Writer) !void {
-    var stripped: std.ArrayList(u8) = .empty;
-    defer stripped.deinit(gpa);
-    try stripEscapes(gpa, bytes, &stripped);
-    try resolveOverwrites(stripped.items, out);
+    var renderer = Renderer.init(gpa);
+    defer renderer.deinit();
+    try renderer.feed(bytes, out);
+    try renderer.finish(out);
 }
 
 /// Removes ANSI escape sequences, leaving the characters between them.

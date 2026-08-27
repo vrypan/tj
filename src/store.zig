@@ -384,48 +384,50 @@ pub const Store = struct {
     }
 
     fn writeMeta(self: *Store, current: *Interaction) !void {
-        var buf: [8 * 1024]u8 = undefined;
-        var writer = Io.Writer.fixed(&buf);
+        var json: std.ArrayList(u8) = .empty;
+        defer json.deinit(self.gpa);
+        var writer = Io.Writer.Allocating.fromArrayList(self.gpa, &json);
+        defer json = writer.toArrayList();
         var started: [32]u8 = undefined;
         var ended: [32]u8 = undefined;
 
-        try writer.print("{{\"v\":1,\"started\":\"{s}\",\"ended\":\"{s}\"", .{
+        try writer.writer.print("{{\"v\":1,\"started\":\"{s}\",\"ended\":\"{s}\"", .{
             formatTimestamp(current.started_ms, &started),
             formatTimestamp(nowMillis(self.io), &ended),
         });
         if (current.expanded) |text| {
-            try writer.writeAll(",\"expanded_cmd\":");
+            try writer.writer.writeAll(",\"expanded_cmd\":");
             // Command lines are arbitrary bytes; they have to be escaped or the
             // file stops being JSON.
-            try std.json.Stringify.encodeJsonString(text, .{}, &writer);
+            try std.json.Stringify.encodeJsonString(text, .{}, &writer.writer);
         }
 
         // A near-empty `out` for `vi` is correct but surprising, so the
         // reason is recorded next to it.
         if (current.fullscreen.regions > 0) {
-            try writer.print(",\"fullscreen\":{{\"regions\":{d},\"suppressed_bytes\":{d}}}", .{
+            try writer.writer.print(",\"fullscreen\":{{\"regions\":{d},\"suppressed_bytes\":{d}}}", .{
                 current.fullscreen.regions,
                 current.fullscreen.suppressed,
             });
         }
         if (current.published_count > 0) {
-            try writer.writeAll(",\"resources\":{");
+            try writer.writer.writeAll(",\"resources\":{");
             for (current.published[0..current.published_count], 0..) |entry, i| {
-                if (i > 0) try writer.writeAll(",");
+                if (i > 0) try writer.writer.writeAll(",");
                 // Paths and mime types come from the program, so both are
                 // escaped rather than trusted to be plain.
-                try std.json.Stringify.encodeJsonString(entry.path, .{}, &writer);
-                try writer.writeAll(":{\"mime\":");
-                try std.json.Stringify.encodeJsonString(entry.mime, .{}, &writer);
-                try writer.print(",\"truncated\":{}}}", .{entry.truncated});
+                try std.json.Stringify.encodeJsonString(entry.path, .{}, &writer.writer);
+                try writer.writer.writeAll(":{\"mime\":");
+                try std.json.Stringify.encodeJsonString(entry.mime, .{}, &writer.writer);
+                try writer.writer.print(",\"truncated\":{}}}", .{entry.truncated});
             }
-            try writer.writeAll("}");
+            try writer.writer.writeAll("}");
         }
-        try writer.writeAll("}\n");
+        try writer.writer.writeAll("}\n");
 
         try current.dir.writeFile(self.io, .{
             .sub_path = "meta.json",
-            .data = writer.buffered(),
+            .data = writer.writer.buffered(),
             .flags = .{ .permissions = file_permissions },
         });
     }
