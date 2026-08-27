@@ -583,8 +583,11 @@ const Replay = struct {
 };
 
 fn scaleMillis(value: u64, speed: f64) !u64 {
+    if (!std.math.isFinite(speed) or speed <= 0) return error.BadReplayOption;
     const scaled = @as(f64, @floatFromInt(value)) / speed;
-    if (!std.math.isFinite(scaled) or scaled < 0 or scaled > @as(f64, @floatFromInt(std.math.maxInt(u64)))) {
+    // maxInt(u64) rounds to 2^64 as an f64, so equality is already outside
+    // the integer range accepted by @intFromFloat.
+    if (!std.math.isFinite(scaled) or scaled < 0 or scaled >= @as(f64, @floatFromInt(std.math.maxInt(u64)))) {
         return error.BadReplayOption;
     }
     return @intFromFloat(scaled);
@@ -592,6 +595,46 @@ fn scaleMillis(value: u64, speed: f64) !u64 {
 
 fn addDuration(total: *u64, value: u64) !void {
     total.* = std.math.add(u64, total.*, value) catch return error.BadReplayOption;
+}
+
+fn typingDuration(per_char: u64, command_len: u64) !u64 {
+    return std.math.mul(u64, per_char, command_len) catch return error.BadReplayOption;
+}
+
+const ReplayRequest = struct {
+    replay: Replay,
+    wanted: ?[]const u8,
+};
+
+fn parseReplayArgs(args: []const []const u8) !ReplayRequest {
+    var request: ReplayRequest = .{ .replay = .{}, .wanted = null };
+
+    var i: usize = 0;
+    while (i < args.len) : (i += 1) {
+        const arg = args[i];
+        if (try takeReplayMillis(args, &i, "--typing")) |n| {
+            request.replay.typing_ms = n;
+        } else if (try takeReplayMillis(args, &i, "--max-pause")) |n| {
+            request.replay.max_pause_ms = n;
+        } else if (try takeReplayNumber(args, &i, "--from")) |n| {
+            request.replay.from = n;
+        } else if (try takeReplayNumber(args, &i, "--to")) |n| {
+            request.replay.to = n;
+        } else if (try takeText(args, &i, "--prompt")) |text| {
+            request.replay.prompt = text;
+        } else if (try takeReplaySpeed(args, &i)) |speed| {
+            request.replay.speed = speed;
+        } else if (std.mem.eql(u8, arg, "--duration")) {
+            request.replay.duration_only = true;
+        } else if (std.mem.startsWith(u8, arg, "-")) {
+            return error.UnknownFlag;
+        } else {
+            if (request.wanted != null) return error.BadReplayOption;
+            request.wanted = arg;
+        }
+    }
+
+    return request;
 }
 
 /// `tj replay <session>` - play a recording back into the terminal.
@@ -608,34 +651,9 @@ fn replaySession(
     args: []const []const u8,
     out: *Io.Writer,
 ) !void {
-    var replay: Replay = .{};
-    var wanted: ?[]const u8 = null;
-
-    var i: usize = 0;
-    while (i < args.len) : (i += 1) {
-        const arg = args[i];
-        if (try takeCount(args, &i, "--typing")) |n| {
-            replay.typing_ms = n;
-        } else if (try takeCount(args, &i, "--max-pause")) |n| {
-            replay.max_pause_ms = n;
-        } else if (try takeReplayNumber(args, &i, "--from")) |n| {
-            replay.from = n;
-        } else if (try takeReplayNumber(args, &i, "--to")) |n| {
-            replay.to = n;
-        } else if (try takeText(args, &i, "--prompt")) |text| {
-            replay.prompt = text;
-        } else if (try takeText(args, &i, "--speed")) |text| {
-            replay.speed = std.fmt.parseFloat(f64, text) catch return error.BadReplayOption;
-            if (!std.math.isFinite(replay.speed) or replay.speed <= 0) return error.BadReplayOption;
-        } else if (std.mem.eql(u8, arg, "--duration")) {
-            replay.duration_only = true;
-        } else if (std.mem.startsWith(u8, arg, "-")) {
-            return error.UnknownFlag;
-        } else {
-            if (wanted != null) return error.BadReplayOption;
-            wanted = arg;
-        }
-    }
+    const request = try parseReplayArgs(args);
+    const replay = request.replay;
+    const wanted = request.wanted;
 
     // Replaying into a live session would feed the recording back into the
     // journal: the replayed shell-integration markers read as real command
@@ -719,7 +737,7 @@ fn typeOut(
 
     const per_char: u64 = if (replay.typing_ms == 0) 0 else try scaleMillis(replay.typing_ms, replay.speed);
 
-    const total = std.math.mul(u64, per_char, @as(u64, @intCast(cmd.len))) catch return error.BadReplayOption;
+    const total = try typingDuration(per_char, @intCast(cmd.len));
     if (replay.duration_only) return total;
 
     if (per_char == 0) {
@@ -737,10 +755,72 @@ fn typeOut(
 }
 
 fn takeReplayNumber(args: []const []const u8, i: *usize, comptime name: []const u8) !?u32 {
-    const text = try takeText(args, i, name) orelse return null;
+    const text = takeText(args, i, name) catch |err| switch (err) {
+        error.MissingFlagValue => return error.BadReplayOption,
+    } orelse return null;
     const number = std.fmt.parseInt(u32, text, 10) catch return error.BadReplayOption;
     if (number == 0) return error.BadReplayOption;
     return number;
+}
+
+fn takeReplayMillis(args: []const []const u8, i: *usize, comptime name: []const u8) !?u64 {
+    const text = takeText(args, i, name) catch |err| switch (err) {
+        error.MissingFlagValue => return error.BadReplayOption,
+    } orelse return null;
+    return std.fmt.parseInt(u64, text, 10) catch error.BadReplayOption;
+}
+
+fn takeReplaySpeed(args: []const []const u8, i: *usize) !?f64 {
+    const text = takeText(args, i, "--speed") catch |err| switch (err) {
+        error.MissingFlagValue => return error.BadReplayOption,
+    } orelse return null;
+    const speed = std.fmt.parseFloat(f64, text) catch return error.BadReplayOption;
+    if (!std.math.isFinite(speed) or speed <= 0) return error.BadReplayOption;
+    return speed;
+}
+
+test "replay interaction ranges parse directly into u32" {
+    const minimum = try parseReplayArgs(&.{ "--from", "1", "--to=4294967295" });
+    try std.testing.expectEqual(@as(u32, 1), minimum.replay.from);
+    try std.testing.expectEqual(std.math.maxInt(u32), minimum.replay.to);
+
+    try std.testing.expectError(error.BadReplayOption, parseReplayArgs(&.{ "--from", "0" }));
+    try std.testing.expectError(error.BadReplayOption, parseReplayArgs(&.{"--to=4294967296"}));
+}
+
+test "replay accepts only finite positive speeds" {
+    for ([_][]const u8{ "0.5", "1", "2" }) |text| {
+        const parsed = try parseReplayArgs(&.{ "--speed", text });
+        try std.testing.expect(parsed.replay.speed > 0);
+        try std.testing.expect(std.math.isFinite(parsed.replay.speed));
+    }
+
+    for ([_][]const u8{ "nan", "inf", "-inf", "0", "-1" }) |text| {
+        try std.testing.expectError(error.BadReplayOption, parseReplayArgs(&.{ "--speed", text }));
+    }
+}
+
+test "replay millisecond options use their final u64 type" {
+    const parsed = try parseReplayArgs(&.{ "--typing=18446744073709551615", "--max-pause", "0" });
+    try std.testing.expectEqual(std.math.maxInt(u64), parsed.replay.typing_ms);
+    try std.testing.expectEqual(@as(u64, 0), parsed.replay.max_pause_ms);
+    try std.testing.expectError(
+        error.BadReplayOption,
+        parseReplayArgs(&.{ "--typing", "18446744073709551616" }),
+    );
+}
+
+test "replay rejects more than one session name" {
+    try std.testing.expectError(error.BadReplayOption, parseReplayArgs(&.{ "first", "second" }));
+}
+
+test "replay timing arithmetic rejects unrepresentable durations" {
+    try std.testing.expectError(error.BadReplayOption, scaleMillis(std.math.maxInt(u64), 1));
+    try std.testing.expectError(error.BadReplayOption, scaleMillis(1, 0));
+    try std.testing.expectError(error.BadReplayOption, typingDuration(std.math.maxInt(u64), 2));
+
+    var total: u64 = std.math.maxInt(u64);
+    try std.testing.expectError(error.BadReplayOption, addDuration(&total, 1));
 }
 
 /// Writes a recorded resource through verbatim. `out` is what the terminal

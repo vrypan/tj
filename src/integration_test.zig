@@ -989,6 +989,26 @@ test "a published resource survives arbitrary bytes" {
 
 // --- replay -------------------------------------------------------------------
 
+test "invalid replay numeric options exit cleanly" {
+    const gpa = std.testing.allocator;
+    leaveSession();
+
+    const cases = [_][]const []const u8{
+        &.{ "replay", "--from", "4294967296" },
+        &.{ "replay", "--speed", "nan" },
+        &.{ "replay", "--typing", "18446744073709551616" },
+    };
+    for (cases) |args| {
+        var r = try run(gpa, args, 24, 80);
+        defer r.out.deinit(gpa);
+
+        try std.testing.expectEqual(@as(u8, 1), r.code);
+        try std.testing.expect(std.mem.indexOf(u8, r.out.items, "invalid replay numeric option") != null);
+        try std.testing.expect(std.mem.indexOf(u8, r.out.items, "panic") == null);
+        try std.testing.expect(std.mem.indexOf(u8, r.out.items, "error return trace") == null);
+    }
+}
+
 test "a session replays the commands and output it recorded" {
     if (!haveZsh()) return error.SkipZigTest;
     const gpa = std.testing.allocator;
