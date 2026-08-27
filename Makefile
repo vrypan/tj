@@ -18,12 +18,22 @@ TARGETS := \
 	x86_64-linux-gnu
 
 .DEFAULT_GOAL := build
-.PHONY: build test fmt fmt-check check all package clean list $(TARGETS)
+.PHONY: build install test fmt fmt-check check all package clean list $(TARGETS)
+
+PREFIX ?= $(HOME)/.local
 
 # --- development ------------------------------------------------------------
 
 build:
 	$(ZIG) build
+
+# Both, because the agent wrappers pipe one into the other and a missing
+# tj-fence fails as an unhelpful "command not found".
+install: build
+	install -d $(PREFIX)/bin
+	install -m 755 zig-out/bin/tj $(PREFIX)/bin/
+	install -m 755 contrib/tj-fence $(PREFIX)/bin/
+	@echo "installed tj and tj-fence in $(PREFIX)/bin"
 
 test:
 	$(ZIG) build test

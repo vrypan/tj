@@ -10,15 +10,17 @@ Building needs Zig 0.16.0. Running tj needs nothing.
 ```sh
 git clone <this repo> ~/src/tj
 cd ~/src/tj
-zig build                             # produces zig-out/bin/tj
-mkdir -p ~/.local/bin
-install -m 755 zig-out/bin/tj ~/.local/bin/   # anywhere on your $PATH
+make install                          # tj and tj-fence into ~/.local/bin
 ```
 
-Check it landed:
+`PREFIX=/usr/local make install` to put them elsewhere; anywhere on your
+`$PATH` will do.
+
+Check they landed:
 
 ```sh
 tj --version                          # tj 0.1.0
+tj-fence < /dev/null && echo ok       # used by the agent wrappers below
 ```
 
 ## Set up zsh
