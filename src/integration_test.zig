@@ -201,6 +201,12 @@ const Journal = struct {
         return self;
     }
 
+    /// Writes a fixture next to the journal and returns its absolute path.
+    fn fixture(self: *const Journal, gpa: std.mem.Allocator, name: []const u8, bytes: []const u8) ![]const u8 {
+        try self.tmp.dir.writeFile(std.testing.io, .{ .sub_path = name, .data = bytes });
+        return std.fmt.allocPrint(gpa, "{s}/{s}", .{ self.path(), name });
+    }
+
     fn homeArg(self: *const Journal, gpa: std.mem.Allocator) ![]const u8 {
         return std.fmt.allocPrint(gpa, "{s}/journal", .{self.path()});
     }
@@ -885,4 +891,41 @@ test "published resources are addressable and completable" {
     var top = try run(gpa, &.{ "--home", home, "complete", "@1/" }, 24, 80);
     defer top.out.deinit(gpa);
     try std.testing.expect(std.mem.indexOf(u8, top.out.items, "@1/files/") != null);
+}
+
+test "a published resource survives arbitrary bytes" {
+    if (!haveZsh()) return error.SkipZigTest;
+    const gpa = std.testing.allocator;
+
+    var journal = try Journal.open(gpa);
+    defer journal.close();
+
+    // Everything that could plausibly be mistaken for control information:
+    // a complete OSC, an unterminated one, the alternate screen switches,
+    // every combination of CR and LF, tabs, and all 256 byte values.
+    var blob: std.ArrayList(u8) = .empty;
+    defer blob.deinit(gpa);
+    try blob.appendSlice(gpa, "\x1b]0;title\x07");
+    try blob.appendSlice(gpa, "\x1b]");
+    try blob.appendSlice(gpa, &[_]u8{0} ** 8);
+    try blob.appendSlice(gpa, "\x1b[?1049hpainted\x1b[?1049l");
+    try blob.appendSlice(gpa, "\x1b]5107;other;x\x1b\\");
+    try blob.appendSlice(gpa, "\r\n\n\r\r\n\t\t");
+    for (0..256) |byte| try blob.append(gpa, @intCast(byte));
+
+    const path = try journal.fixture(gpa, "blob.bin", blob.items);
+    defer gpa.free(path);
+
+    const script = try std.fmt.allocPrint(gpa, "printf '\\033]5107;tj;begin;files/blob.bin;application/octet-stream\\033\\\\'; " ++
+        "cat {s}; " ++
+        "printf '\\033]5107;tj;end\\033\\\\'", .{path});
+    defer gpa.free(script);
+    try recordSession(gpa, &journal, &.{script});
+
+    const recovered = try journal.read(gpa, "1/files/blob.bin");
+    defer gpa.free(recovered);
+
+    // The terminal's newline translation is undone exactly, so even a
+    // carriage return the data really contained comes back.
+    try std.testing.expectEqualSlices(u8, blob.items, recovered);
 }

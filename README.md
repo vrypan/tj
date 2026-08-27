@@ -243,8 +243,15 @@ not a rule — `err` is a resource too.
 
 Line endings are normalised: a program writes `\n`, the terminal turns it
 into `\r\n` in transit, and the resource gets back the `\n` the program
-meant, so a published script is executable. This channel carries text; a
-pty mangles binary regardless, so binary must be encoded by the program.
+meant, so a published script is executable.
+
+Binary works too. The normalisation is the exact inverse of the terminal's
+translation, so data that really contains `CRLF` survives it, and a PNG
+round-trips byte for byte. Two caveats: data containing tj's own end marker
+ends the resource there, which no in-band protocol without escaping can
+avoid; and a terminal with `oxtabs` set expands tabs before tj sees them,
+which cannot be undone. The bytes still reach your screen and will make a
+mess of it, exactly as they would without tj.
 
 ## Storage
 
