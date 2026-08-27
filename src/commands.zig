@@ -305,18 +305,50 @@ fn catResource(
     defer root.close(io);
 
     for (refs.items) |text| {
-        var ref = reference.parse(text) catch return error.BadReference;
-        // `tj cat @42` means the output: that is what anyone wants to see.
-        if (ref.subpath.len == 0) ref.subpath = "out";
-
-        const found = try store.locate(gpa, io, root, sys.env("TJ_SESSION"), ref);
-        defer found.deinit(gpa);
-        if (!found.exists) return error.NoSuchInteraction;
-
-        const bytes = store.Dir.cwd().readFileAlloc(io, found.path, gpa, .limited(max_resource)) catch
-            return error.NoSuchResource;
+        const bytes = try readTarget(gpa, io, root, text);
         defer gpa.free(bytes);
-
         if (as_written) try out.writeAll(bytes) else try plain.render(gpa, bytes, out);
     }
+}
+
+/// Accepts a reference or a path to the same thing.
+///
+/// Inside a session the shell integration has already rewritten `@42/out`
+/// into a path by the time tj is executed, so insisting on a reference would
+/// make `tj cat @42` work everywhere except the place it is most likely to be
+/// typed. Outside a session there is nothing to rewrite and the reference is
+/// resolved here instead. Either way it ends at the same file.
+fn readTarget(gpa: std.mem.Allocator, io: Io, root: store.Dir, text: []const u8) ![]u8 {
+    var path_buf: [std.fs.max_path_bytes]u8 = undefined;
+    var path: []const u8 = text;
+    var owned: ?[]const u8 = null;
+    defer if (owned) |value| gpa.free(value);
+
+    if (reference.parse(text)) |parsed| {
+        const found = try store.locate(gpa, io, root, sys.env("TJ_SESSION"), parsed);
+        defer found.deinit(gpa);
+        if (!found.exists) return error.NoSuchInteraction;
+        owned = try gpa.dupe(u8, found.path);
+        path = owned.?;
+    } else |err| switch (err) {
+        // Shaped like a reference but wrong: worth saying so rather than
+        // trying it as a filename.
+        error.Malformed => return error.BadReference,
+        error.NotAReference => {},
+    }
+
+    // Naming the interaction rather than a resource means its output, whether
+    // that came from `@42` or from the path `@42` expanded to.
+    if (isDirectory(io, path)) {
+        path = std.fmt.bufPrint(&path_buf, "{s}/out", .{path}) catch return error.BadReference;
+    }
+
+    return store.Dir.cwd().readFileAlloc(io, path, gpa, .limited(max_resource)) catch
+        error.NoSuchResource;
+}
+
+fn isDirectory(io: Io, path: []const u8) bool {
+    var dir = store.Dir.cwd().openDir(io, path, .{}) catch return false;
+    dir.close(io);
+    return true;
 }

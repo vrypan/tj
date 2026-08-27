@@ -3,54 +3,65 @@
 Makes terminal interactions persistent, addressable, and reusable. See
 [TJ-spec.md](TJ-spec.md) for the design.
 
-## Build
+## Install
 
-Requires Zig 0.16.0.
-
-```sh
-zig build                 # builds zig-out/bin/tj
-zig build test            # unit + pty integration tests
-zig fmt --check .         # formatting gate
-```
-
-Cross-compiles with nothing installed on the host. The Makefile wraps the
-release matrix:
+Building needs Zig 0.16.0. Running tj needs nothing.
 
 ```sh
-make              # native debug build
-make check        # fmt + tests, the gates every change must pass
-make list         # the target list
-make -j6 all      # every target -> dist/<target>/bin/tj
-make package      # the same, as dist/tj-<version>-<target>.tar.gz
+git clone <this repo> ~/src/tj
+cd ~/src/tj
+zig build                             # produces zig-out/bin/tj
+mkdir -p ~/.local/bin
+install -m 755 zig-out/bin/tj ~/.local/bin/   # anywhere on your $PATH
 ```
 
-Targets: `{aarch64,x86_64}` × `{macos, linux-musl, linux-gnu}`. The musl
-builds are static. Override `OPTIMIZE` (default `ReleaseSafe`) or `ZIG`
-to change how they are built.
+Check it landed:
 
-The proxy uses `std.posix` wherever Zig 0.16 provides the call. Process
-control, `ioctl`, and the pty grant/unlock sequence have no `std`
-equivalent in this release, so `src/sys.zig` declares them against plain
-libc - no libutil or any other add-on library, which is what keeps the
-cross builds dependency-free.
+```sh
+tj --version                          # tj 0.1.0
+```
+
+## Set up zsh
+
+tj records by watching the terminal, but a pty carries a single
+undifferentiated byte stream: the prompt, your keystrokes echoing back, and
+a command's output all arrive as one flow with nothing marking where one
+command ends and the next begins. The zsh plugin supplies those marks, and
+it is also what turns `@41/out` into a path before a command runs.
+
+Add one line to `~/.zshrc`:
+
+```sh
+source ~/src/tj/tj.plugin.zsh
+```
+
+Adjust the path to wherever you cloned it. The plugin starts with a guard on
+`$TJ_SESSION`, so outside a tj session it does nothing at all — loading it
+unconditionally is safe, and it costs nothing in shells that never run under
+tj.
+
+**Without this line tj still runs and your terminal still behaves normally,
+but nothing is recorded** and `tj list` comes back empty. That is the one
+setup step worth not skipping.
 
 ## Use
 
-Add the shell integration to `~/.zshrc`, which is what tells tj where one
-command ends and the next begins:
-
-```sh
-source /path/to/tj.plugin.zsh
-```
-
-Then start a session:
+Start a session:
 
 ```sh
 tj                        # run $SHELL under the journal
 tj -- zsh -f              # run a specific command instead
 ```
 
-Each command becomes a numbered interaction in the journal:
+Everything inside behaves as it always did. Check that recording works:
+
+```sh
+echo hello
+tj list                   # 1  0    echo hello
+tj cat @1                 # hello
+```
+
+Each command becomes a numbered interaction:
 
 ```sh
 tj sessions               # every session, newest first
@@ -109,7 +120,8 @@ of sessions; use `$TJ_SESSION` where that is not enough.
 All of them are unset outside a session, so a prompt that uses them is
 unchanged elsewhere.
 
-For [starship](https://starship.rs), add an `env_var` module:
+For [starship](https://starship.rs), add an `env_var` module to
+`~/.config/starship.toml`:
 
 ```toml
 [env_var.TJ_REF]
@@ -117,8 +129,18 @@ format = '[$env_value]($style) '
 style = 'dimmed white'
 ```
 
-`$all` picks it up automatically. To put it at the far left instead, name it
-explicitly at the front of your format:
+`$all` picks it up automatically, so nothing else needs changing:
+
+```
+tj on git main via zig v0.16.0  @fgpc.43
+>
+```
+
+Outside a tj session the variable is unset and the module renders nothing,
+leaving your prompt exactly as it was.
+
+To put it at the far left instead, name it explicitly at the front of your
+format:
 
 ```toml
 format = """
@@ -161,6 +183,10 @@ reduced to the line it settled on. Straight to a terminal it writes the
 bytes as recorded, so colours still render. `--plain` and `--raw` force
 either behaviour.
 
+It takes a path as readily as a reference, which is what makes `tj cat @42`
+work everywhere. Inside a session the shell has already rewritten `@42` into
+a path by the time tj runs; outside one, tj resolves it itself.
+
 ## Full-screen programs
 
 Editors, pagers and monitors switch the terminal to its alternate screen
@@ -197,6 +223,32 @@ The journal is plain files under `~/.tj` (override with `$TJ_HOME` or
 
 Directories are `0700` and files `0600`: the journal holds whatever
 appeared on your terminal, so treat it like shell history.
+
+## Development
+
+```sh
+make              # native debug build
+make check        # fmt + tests, the gates every change must pass
+zig build test    # the tests alone: unit, plus pty-driven end to end
+```
+
+Cross-compiles with nothing installed on the host:
+
+```sh
+make list         # the target list
+make -j6 all      # every target -> dist/<target>/bin/tj
+make package      # the same, as dist/tj-<version>-<target>.tar.gz
+```
+
+Targets: `{aarch64,x86_64}` × `{macos, linux-musl, linux-gnu}`. The musl
+builds are static. Override `OPTIMIZE` (default `ReleaseSafe`) or `ZIG`
+to change how they are built.
+
+The proxy uses `std.posix` wherever Zig 0.16 provides the call. Process
+control, `ioctl`, and the pty grant/unlock sequence have no `std`
+equivalent in this release, so `src/sys.zig` declares them against plain
+libc - no libutil or any other add-on library, which is what keeps the
+cross builds dependency-free.
 
 ## Status
 

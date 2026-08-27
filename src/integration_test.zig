@@ -616,3 +616,36 @@ test "tj cat defaults to the output and reads other resources by name" {
     defer missing.out.deinit(gpa);
     try std.testing.expectEqual(@as(u8, 1), missing.code);
 }
+
+test "tj cat takes the path a reference expanded to, as well as the reference" {
+    if (!haveZsh()) return error.SkipZigTest;
+    const gpa = std.testing.allocator;
+
+    var journal = try Journal.open(gpa);
+    defer journal.close();
+    try recordSession(gpa, &journal, &.{"echo path-or-ref"});
+    try journal.enter(gpa);
+
+    const home = try journal.homeArg(gpa);
+    defer gpa.free(home);
+
+    // Inside a session the shell integration rewrites `@1` before tj runs, so
+    // this is the form tj actually receives there.
+    var resolved = try run(gpa, &.{ "--home", home, "resolve", "@1" }, 24, 80);
+    defer resolved.out.deinit(gpa);
+    const path = std.mem.trim(u8, resolved.out.items, " \r\n");
+
+    var by_path = try run(gpa, &.{ "--home", home, "cat", path }, 24, 80);
+    defer by_path.out.deinit(gpa);
+    try std.testing.expect(std.mem.indexOf(u8, by_path.out.items, "path-or-ref") != null);
+
+    var by_ref = try run(gpa, &.{ "--home", home, "cat", "@1" }, 24, 80);
+    defer by_ref.out.deinit(gpa);
+    try std.testing.expect(std.mem.indexOf(u8, by_ref.out.items, "path-or-ref") != null);
+
+    // A word shaped like a reference but invalid is still reported as one,
+    // rather than being tried as a filename.
+    var malformed = try run(gpa, &.{ "--home", home, "cat", "@0" }, 24, 80);
+    defer malformed.out.deinit(gpa);
+    try std.testing.expectEqual(@as(u8, 1), malformed.code);
+}

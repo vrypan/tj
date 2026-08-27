@@ -79,7 +79,7 @@ pub fn main(init: std.process.Init) !u8 {
                     error.MissingArgument => "tj: this subcommand needs an argument\n",
                     error.BadReference => "tj: not a journal reference\n",
                     error.NoSuchInteraction => "tj: no such interaction\n",
-                    error.NoSuchResource => "tj: that interaction has no such resource\n",
+                    error.NoSuchResource => "tj: no such resource or file\n",
                     error.FileNotFound => "tj: no journal yet\n",
                     else => "tj: cannot read the journal\n",
                 });
