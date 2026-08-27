@@ -13,6 +13,28 @@ const tj = options.tj_exe;
 
 const timeout_ms = 5000;
 
+/// Tests start real sessions, and a session writes a journal. Point every
+/// child at a scratch one: a test run must not leave anything in the journal
+/// the developer is actually using.
+var journal_isolated = false;
+
+fn isolateJournal() void {
+    // Once only. Tests that set TJ_SESSION themselves, to make `@N` resolve
+    // against a journal they built, must not have it taken away again.
+    if (journal_isolated) return;
+    journal_isolated = true;
+
+    sys.setEnv("TJ_HOME", ".zig-cache/tj-test-home");
+    // Inherited from the developer's environment otherwise, which would make
+    // `@N` resolve against whatever session they happen to be sitting in.
+    sys.setEnv("TJ_SESSION", "");
+}
+
+fn spawnTj(gpa: std.mem.Allocator, args: []const []const u8, rows: u16, cols: u16) !harness.Session {
+    isolateJournal();
+    return harness.spawn(gpa, args, rows, cols);
+}
+
 fn run(gpa: std.mem.Allocator, args: []const []const u8, rows: u16, cols: u16) !struct {
     out: std.ArrayList(u8),
     code: u8,
@@ -22,7 +44,7 @@ fn run(gpa: std.mem.Allocator, args: []const []const u8, rows: u16, cols: u16) !
     try argv.append(gpa, tj);
     try argv.appendSlice(gpa, args);
 
-    const session = try harness.spawn(gpa, argv.items, rows, cols);
+    const session = try spawnTj(gpa, argv.items, rows, cols);
     var out: std.ArrayList(u8) = .empty;
     const code = try session.finish(gpa, &out, timeout_ms);
     return .{ .out = out, .code = code };
@@ -69,7 +91,7 @@ test "a command that cannot be executed exits 127" {
 
 test "input typed at the outer terminal reaches the shell" {
     const gpa = std.testing.allocator;
-    const session = try harness.spawn(gpa, &.{ tj, "run", "--", "/bin/sh" }, 24, 80);
+    const session = try spawnTj(gpa, &.{ tj, "run", "--", "/bin/sh" }, 24, 80);
     var out: std.ArrayList(u8) = .empty;
     defer out.deinit(gpa);
 
@@ -83,7 +105,7 @@ test "input typed at the outer terminal reaches the shell" {
 
 test "resizing the outer terminal resizes the inner one" {
     const gpa = std.testing.allocator;
-    const session = try harness.spawn(
+    const session = try spawnTj(
         gpa,
         &.{ tj, "run", "--", "/bin/sh", "-c", "trap 'stty size; exit 0' WINCH; echo READY; sleep 5" },
         24,
@@ -101,7 +123,7 @@ test "resizing the outer terminal resizes the inner one" {
 
 test "signals sent to tj are forwarded to the shell" {
     const gpa = std.testing.allocator;
-    const session = try harness.spawn(
+    const session = try spawnTj(
         gpa,
         &.{ tj, "run", "--", "/bin/sh", "-c", "trap 'echo GOTTERM; exit 9' TERM; echo READY; sleep 5" },
         24,
@@ -119,7 +141,7 @@ test "signals sent to tj are forwarded to the shell" {
 
 test "the terminal is raw while tj runs and restored afterwards" {
     const gpa = std.testing.allocator;
-    const session = try harness.spawn(gpa, &.{options.selftest_exe}, 24, 80);
+    const session = try spawnTj(gpa, &.{options.selftest_exe}, 24, 80);
     var out: std.ArrayList(u8) = .empty;
     defer out.deinit(gpa);
     const code = try session.finish(gpa, &out, timeout_ms);
@@ -237,7 +259,7 @@ fn recordSession(gpa: std.mem.Allocator, journal: *Journal, script: []const []co
     const home = try journal.homeArg(gpa);
     defer gpa.free(home);
 
-    const session = try harness.spawn(gpa, &.{ tj, "--home", home, "run", "--", "/bin/zsh", "-i" }, 24, 80);
+    const session = try spawnTj(gpa, &.{ tj, "--home", home, "run", "--", "/bin/zsh", "-i" }, 24, 80);
     var out: std.ArrayList(u8) = .empty;
     defer out.deinit(gpa);
 
@@ -294,7 +316,7 @@ test "tj's own control sequences never reach the terminal" {
     const home = try journal.homeArg(gpa);
     defer gpa.free(home);
 
-    const session = try harness.spawn(gpa, &.{ tj, "--home", home, "run", "--", "/bin/zsh", "-i" }, 24, 80);
+    const session = try spawnTj(gpa, &.{ tj, "--home", home, "run", "--", "/bin/zsh", "-i" }, 24, 80);
     var out: std.ArrayList(u8) = .empty;
     defer out.deinit(gpa);
 
@@ -338,7 +360,7 @@ test "an interrupted session leaves the interaction without an rc" {
     const home = try journal.homeArg(gpa);
     defer gpa.free(home);
 
-    const session = try harness.spawn(gpa, &.{ tj, "--home", home, "run", "--", "/bin/zsh", "-i" }, 24, 80);
+    const session = try spawnTj(gpa, &.{ tj, "--home", home, "run", "--", "/bin/zsh", "-i" }, 24, 80);
     var out: std.ArrayList(u8) = .empty;
     defer out.deinit(gpa);
 
@@ -537,7 +559,7 @@ test "the terminal still sees the full-screen program" {
     const home = try journal.homeArg(gpa);
     defer gpa.free(home);
 
-    const session = try harness.spawn(gpa, &.{ tj, "--home", home, "run", "--", "/bin/zsh", "-i" }, 24, 80);
+    const session = try spawnTj(gpa, &.{ tj, "--home", home, "run", "--", "/bin/zsh", "-i" }, 24, 80);
     var out: std.ArrayList(u8) = .empty;
     defer out.deinit(gpa);
 
