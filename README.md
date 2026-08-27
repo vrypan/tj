@@ -278,4 +278,5 @@ Full-screen programs are kept out of the journal, and `tj cat` reads a
 recording back as either bytes or plain text.
 
 Still to come: OSC 5107 semantic output resources, which let a program mark
-spans of its own output as named files under `@42/files/`.
+spans of its own output as named files under `@42/files/`. [TODO.md](TODO.md)
+keeps that and the other open ends.
