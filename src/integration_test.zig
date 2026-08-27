@@ -60,6 +60,51 @@ fn run(gpa: std.mem.Allocator, args: []const []const u8, rows: u16, cols: u16) !
     return .{ .out = out, .code = code };
 }
 
+/// Drains a large PTY transcript without retaining bytes that precede its
+/// final marker. This keeps the large-file regression honest about memory.
+fn finishKeepingTail(
+    gpa: std.mem.Allocator,
+    session: harness.Session,
+    keep: usize,
+    timeout: i32,
+) !struct { tail: std.ArrayList(u8), total: u64, code: u8 } {
+    var tail: std.ArrayList(u8) = .empty;
+    errdefer tail.deinit(gpa);
+    var total: u64 = 0;
+    var remaining = timeout;
+    var buf: [64 * 1024]u8 = undefined;
+
+    while (remaining > 0) {
+        var fds = [_]posix.pollfd{.{ .fd = session.master, .events = posix.POLL.IN, .revents = 0 }};
+        const step: i32 = 100;
+        const ready = posix.poll(&fds, step) catch break;
+        if (ready == 0) {
+            remaining -= step;
+            continue;
+        }
+        const n = sys.read(session.master, &buf) catch 0;
+        if (n == 0) break;
+        total += @intCast(n);
+
+        const bytes = buf[0..n];
+        if (bytes.len >= keep) {
+            tail.clearRetainingCapacity();
+            try tail.appendSlice(gpa, bytes[bytes.len - keep ..]);
+        } else {
+            if (tail.items.len + bytes.len > keep) {
+                const drop = tail.items.len + bytes.len - keep;
+                const retained = tail.items.len - drop;
+                std.mem.copyForwards(u8, tail.items[0..retained], tail.items[drop..]);
+                tail.items.len = retained;
+            }
+            try tail.appendSlice(gpa, bytes);
+        }
+    }
+
+    sys.close(session.master);
+    return .{ .tail = tail, .total = total, .code = sys.waitFor(session.pid).code };
+}
+
 test "exit status of the wrapped command is tj's exit status" {
     const gpa = std.testing.allocator;
     for ([_]u8{ 0, 3, 42 }) |want| {
@@ -698,6 +743,54 @@ test "tj cat takes the path a reference expanded to, as well as the reference" {
     var malformed = try run(gpa, &.{ "--home", home, "cat", "@0" }, 24, 80);
     defer malformed.out.deinit(gpa);
     try std.testing.expectEqual(@as(u8, 1), malformed.code);
+}
+
+test "cat windows and replay stream output beyond sixty-four mibibytes" {
+    if (!haveZsh()) return error.SkipZigTest;
+    const gpa = std.testing.allocator;
+    const io = std.testing.io;
+    const beyond_old_limit = 64 * 1024 * 1024 + 4096;
+
+    var journal = try Journal.open(gpa);
+    defer journal.close();
+    try recordSession(gpa, &journal, &.{"echo replace-this-output"});
+
+    var session_dir = try journal.sessionDir();
+    defer session_dir.close(io);
+    var file = try session_dir.createFile(io, "1/out", .{});
+    try file.writePositionalAll(io, "FIRST-LINE\n", 0);
+    try file.setLength(io, beyond_old_limit);
+    try file.writePositionalAll(io, "\nTAIL-A\nREPLAY-BEYOND-LIMIT\n", beyond_old_limit);
+    file.close(io);
+
+    try journal.enter(gpa);
+    const home = try journal.homeArg(gpa);
+    defer gpa.free(home);
+
+    var head = try run(gpa, &.{ "--home", home, "cat", "--raw", "--head", "1", "@1" }, 24, 80);
+    defer head.out.deinit(gpa);
+    try std.testing.expectEqual(@as(u8, 0), head.code);
+    try std.testing.expect(std.mem.indexOf(u8, head.out.items, "FIRST-LINE") != null);
+    try std.testing.expect(std.mem.indexOf(u8, head.out.items, "REPLAY-BEYOND-LIMIT") == null);
+    try std.testing.expect(std.mem.indexOf(u8, head.out.items, "showing 1 of 4 lines") != null);
+
+    var tail = try run(gpa, &.{ "--home", home, "cat", "--plain", "--tail", "2", "@1" }, 24, 80);
+    defer tail.out.deinit(gpa);
+    try std.testing.expectEqual(@as(u8, 0), tail.code);
+    try std.testing.expect(std.mem.indexOf(u8, tail.out.items, "FIRST-LINE") == null);
+    try std.testing.expect(std.mem.indexOf(u8, tail.out.items, "TAIL-A") != null);
+    try std.testing.expect(std.mem.indexOf(u8, tail.out.items, "REPLAY-BEYOND-LIMIT") != null);
+    try std.testing.expect(std.mem.indexOf(u8, tail.out.items, "showing 2 of 4 lines") != null);
+
+    leaveSession();
+    const replay = try spawnTj(gpa, &.{
+        tj, "--home", home, "replay", "--typing", "0", "--max-pause", "0", "--prompt", "",
+    }, 24, 80);
+    var replayed = try finishKeepingTail(gpa, replay, 8192, 30_000);
+    defer replayed.tail.deinit(gpa);
+    try std.testing.expectEqual(@as(u8, 0), replayed.code);
+    try std.testing.expect(replayed.total > 64 * 1024 * 1024);
+    try std.testing.expect(std.mem.indexOf(u8, replayed.tail.items, "REPLAY-BEYOND-LIMIT") != null);
 }
 
 // --- sessions that recorded nothing ------------------------------------------

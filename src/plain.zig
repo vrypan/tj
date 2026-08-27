@@ -15,6 +15,8 @@ const Io = std.Io;
 
 pub const Renderer = struct {
     gpa: std.mem.Allocator,
+    // A line cannot be emitted until a later carriage return can no longer
+    // overwrite it, so one unterminated line is the renderer's memory bound.
     line: std.ArrayList(u8) = .empty,
     state: State = .text,
     pending_cr: bool = false,
@@ -28,17 +30,17 @@ pub const Renderer = struct {
         self.line.deinit(self.gpa);
     }
 
-    pub fn feed(self: *Renderer, bytes: []const u8, out: *Io.Writer) !void {
+    pub fn feed(self: *Renderer, bytes: []const u8, out: anytype) !void {
         for (bytes) |value| try self.byte(value, out);
     }
 
-    pub fn finish(self: *Renderer, out: *Io.Writer) !void {
+    pub fn finish(self: *Renderer, out: anytype) !void {
         // A partial escape is intentionally discarded; bytes before it have
         // already been emitted into the visible line.
         if (self.line.items.len > 0) try out.writeAll(self.line.items);
     }
 
-    fn byte(self: *Renderer, value: u8, out: *Io.Writer) !void {
+    fn byte(self: *Renderer, value: u8, out: anytype) !void {
         switch (self.state) {
             .escape => switch (value) {
                 '[' => self.state = .csi,
@@ -87,90 +89,6 @@ pub fn render(gpa: std.mem.Allocator, bytes: []const u8, out: *Io.Writer) !void 
     try renderer.finish(out);
 }
 
-/// Removes ANSI escape sequences, leaving the characters between them.
-fn stripEscapes(gpa: std.mem.Allocator, bytes: []const u8, out: *std.ArrayList(u8)) !void {
-    var i: usize = 0;
-    while (i < bytes.len) {
-        const byte = bytes[i];
-
-        if (byte == 0x1b) {
-            i = skipSequence(bytes, i);
-            continue;
-        }
-        if (byte == 0x08) {
-            // Backspace: `man` writes "X\bX" to embolden.
-            if (out.items.len > 0 and out.items[out.items.len - 1] != '\n') _ = out.pop();
-            i += 1;
-            continue;
-        }
-        // Other C0 controls carry no text.
-        if (byte < 0x20 and byte != '\n' and byte != '\r' and byte != '\t') {
-            i += 1;
-            continue;
-        }
-
-        try out.append(gpa, byte);
-        i += 1;
-    }
-}
-
-/// Returns the index just past the escape sequence starting at `start`.
-fn skipSequence(bytes: []const u8, start: usize) usize {
-    var i = start + 1;
-    if (i >= bytes.len) return bytes.len;
-
-    switch (bytes[i]) {
-        // CSI: parameters, then intermediates, then one final byte.
-        '[' => {
-            i += 1;
-            while (i < bytes.len and bytes[i] >= 0x30 and bytes[i] <= 0x3f) i += 1;
-            while (i < bytes.len and bytes[i] >= 0x20 and bytes[i] <= 0x2f) i += 1;
-            if (i < bytes.len) i += 1;
-            return i;
-        },
-        // OSC: ends at BEL or ST.
-        ']' => return skipToStringTerminator(bytes, i + 1, true),
-        // DCS, SOS, PM, APC: end at ST.
-        'P', 'X', '^', '_' => return skipToStringTerminator(bytes, i + 1, false),
-        // Everything else is a two-byte escape, character set selection
-        // included: ESC ( B and friends take one more byte.
-        '(', ')', '*', '+' => return @min(i + 2, bytes.len),
-        else => return i + 1,
-    }
-}
-
-fn skipToStringTerminator(bytes: []const u8, from: usize, bel_ends: bool) usize {
-    var i = from;
-    while (i < bytes.len) {
-        if (bel_ends and bytes[i] == 0x07) return i + 1;
-        if (bytes[i] == 0x1b and i + 1 < bytes.len and bytes[i + 1] == '\\') return i + 2;
-        i += 1;
-    }
-    return bytes.len;
-}
-
-/// Within a line, everything before the last carriage return was overwritten
-/// on screen and never seen.
-fn resolveOverwrites(text: []const u8, out: *Io.Writer) !void {
-    var lines = std.mem.splitScalar(u8, text, '\n');
-    var first = true;
-    while (lines.next()) |line| {
-        if (!first) try out.writeAll("\n");
-        first = false;
-
-        // Trailing carriage returns end the line rather than overwriting it.
-        // A pty commonly produces several: the program writes CRLF and the
-        // terminal's own newline translation adds another CR.
-        const body = std.mem.trimEnd(u8, line, "\r");
-
-        const visible = if (std.mem.lastIndexOfScalar(u8, body, '\r')) |at|
-            body[at + 1 ..]
-        else
-            body;
-        try out.writeAll(visible);
-    }
-}
-
 // --- tests -----------------------------------------------------------------
 
 fn renderToString(gpa: std.mem.Allocator, input: []const u8) ![]u8 {
@@ -180,6 +98,45 @@ fn renderToString(gpa: std.mem.Allocator, input: []const u8) ![]u8 {
     defer buf = writer.toArrayList();
     try render(gpa, input, &writer.writer);
     return writer.toOwnedSlice();
+}
+
+fn renderChunksToString(gpa: std.mem.Allocator, input: []const u8, chunk_size: usize) ![]u8 {
+    var buf: std.ArrayList(u8) = .empty;
+    errdefer buf.deinit(gpa);
+    var writer = Io.Writer.Allocating.fromArrayList(gpa, &buf);
+    defer buf = writer.toArrayList();
+
+    var renderer = Renderer.init(gpa);
+    defer renderer.deinit();
+    var offset: usize = 0;
+    while (offset < input.len) {
+        const end = @min(offset + chunk_size, input.len);
+        try renderer.feed(input[offset..end], &writer.writer);
+        offset = end;
+    }
+    try renderer.finish(&writer.writer);
+    return writer.toOwnedSlice();
+}
+
+test "plain rendering is invariant across chunk boundaries" {
+    const gpa = std.testing.allocator;
+    const fixtures = [_]struct { input: []const u8, expected: []const u8 }{
+        .{ .input = "plain\nfinal line", .expected = "plain\nfinal line" },
+        .{ .input = "a\x1b[31mred\x1b[0mz\n", .expected = "aredz\n" },
+        .{ .input = "title\x1b]0;hidden\x07shown\n", .expected = "titleshown\n" },
+        .{ .input = "text\x1b", .expected = "text" },
+        .{ .input = "one\r\ntwo\r\n", .expected = "one\ntwo\n" },
+        .{ .input = "N\x08NA\x08AM\x08ME\x08E\n", .expected = "NAME\n" },
+        .{ .input = "10%\r50%\r100%\ndone", .expected = "100%\ndone" },
+    };
+
+    for (fixtures) |fixture| {
+        for ([_]usize{ 1, 2, 3, 64 }) |chunk_size| {
+            const result = try renderChunksToString(gpa, fixture.input, chunk_size);
+            defer gpa.free(result);
+            try std.testing.expectEqualStrings(fixture.expected, result);
+        }
+    }
 }
 
 test "plain text is left alone" {

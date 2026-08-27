@@ -299,9 +299,7 @@ fn listWithin(
 
 // --- reading resources ------------------------------------------------------
 
-/// `out` files can be large; this is the point at which tj gives up rather
-/// than trying to hold one in memory.
-const max_resource = 64 * 1024 * 1024;
+const read_chunk_size = 64 * 1024;
 
 /// `tj cat @42` - print what an interaction recorded, without needing the
 /// shell integration to expand anything. Useful from bash, from a script, or
@@ -341,51 +339,56 @@ fn catResource(
     defer root.close(io);
 
     for (refs.items) |text| {
-        if (as_written and window == .all) {
-            var file = try openTarget(gpa, io, root, text);
-            defer file.close(io);
-            try copyFile(io, file, out);
-            continue;
-        }
-        const bytes = try readTarget(gpa, io, root, text);
-        defer gpa.free(bytes);
+        var file = try openTarget(gpa, io, root, text);
+        defer file.close(io);
 
-        // Rendering first means a line count is a count of lines the caller
-        // will actually see, not of lines in the recording.
-        var rendered: std.ArrayList(u8) = .empty;
-        defer rendered.deinit(gpa);
+        // Rendering feeds the same window as raw bytes, so line counts always
+        // describe what the caller sees rather than terminal control traffic.
+        var sink = WindowSink.init(gpa, window, out);
+        defer sink.deinit();
         if (as_written) {
-            try rendered.appendSlice(gpa, bytes);
+            try copyFile(io, file, &sink);
         } else {
-            var writer = Io.Writer.Allocating.fromArrayList(gpa, &rendered);
-            defer rendered = writer.toArrayList();
-            try plain.render(gpa, bytes, &writer.writer);
+            try renderFile(gpa, io, file, &sink);
         }
-
-        const shown = window.apply(rendered.items);
-        try out.writeAll(shown);
+        try sink.finish();
 
         // Silence about what was left out would let a reader - a person or an
         // agent - take a fragment for the whole thing. It goes to stderr so
         // that stdout stays exactly what was asked for.
-        if (shown.len < rendered.items.len) {
+        if (sink.shownLines() < sink.totalLines()) {
             note("tj: {s}: showing {d} of {d} lines\n", .{
                 text,
-                countLines(shown),
-                countLines(rendered.items),
+                sink.shownLines(),
+                sink.totalLines(),
             });
         }
     }
 }
 
-fn copyFile(io: Io, file: Io.File, out: *Io.Writer) !void {
-    var buffer: [64 * 1024]u8 = undefined;
-    var reader = file.readerStreaming(io, &buffer);
+fn copyFile(io: Io, file: Io.File, out: anytype) !void {
+    var reader_buffer: [read_chunk_size]u8 = undefined;
+    var bytes: [read_chunk_size]u8 = undefined;
+    var reader = file.readerStreaming(io, &reader_buffer);
     while (true) {
-        const n = try reader.interface.readSliceShort(&buffer);
+        const n = try reader.interface.readSliceShort(&bytes);
         if (n == 0) break;
-        try out.writeAll(buffer[0..n]);
+        try out.writeAll(bytes[0..n]);
     }
+}
+
+fn renderFile(gpa: std.mem.Allocator, io: Io, file: Io.File, out: anytype) !void {
+    var renderer = plain.Renderer.init(gpa);
+    defer renderer.deinit();
+    var reader_buffer: [read_chunk_size]u8 = undefined;
+    var bytes: [read_chunk_size]u8 = undefined;
+    var reader = file.readerStreaming(io, &reader_buffer);
+    while (true) {
+        const n = try reader.interface.readSliceShort(&bytes);
+        if (n == 0) break;
+        try renderer.feed(bytes[0..n], out);
+    }
+    try renderer.finish(out);
 }
 
 /// How much of a resource to print.
@@ -393,56 +396,100 @@ const Window = union(enum) {
     all,
     head: usize,
     tail: usize,
+};
 
-    fn apply(self: Window, text: []const u8) []const u8 {
-        return switch (self) {
-            .all => text,
-            .head => |n| text[0..lineBoundary(text, n, .from_start)],
-            .tail => |n| text[lineBoundary(text, n, .from_end)..],
+/// Applies a line window without retaining bytes that cannot be returned.
+/// Tail storage is proportional to the requested final lines, not the file.
+const WindowSink = struct {
+    gpa: std.mem.Allocator,
+    window: Window,
+    out: *Io.Writer,
+    tail: std.ArrayList(u8) = .empty,
+    tail_lines: usize = 0,
+    head_newlines: usize = 0,
+    total_newlines: u64 = 0,
+    total_any: bool = false,
+    total_ends_newline: bool = false,
+
+    fn init(gpa: std.mem.Allocator, window: Window, out: *Io.Writer) WindowSink {
+        return .{ .gpa = gpa, .window = window, .out = out };
+    }
+
+    fn deinit(self: *WindowSink) void {
+        self.tail.deinit(self.gpa);
+    }
+
+    pub fn writeAll(self: *WindowSink, bytes: []const u8) !void {
+        if (bytes.len == 0) return;
+        self.total_any = true;
+        self.total_ends_newline = bytes[bytes.len - 1] == '\n';
+        self.total_newlines = std.math.add(
+            u64,
+            self.total_newlines,
+            @as(u64, @intCast(std.mem.count(u8, bytes, "\n"))),
+        ) catch return error.ResourceTooLarge;
+
+        switch (self.window) {
+            .all => try self.out.writeAll(bytes),
+            .head => |n| try self.writeHead(n, bytes),
+            .tail => |n| try self.writeTail(n, bytes),
+        }
+    }
+
+    fn writeHead(self: *WindowSink, n: usize, bytes: []const u8) !void {
+        if (n == 0 or self.head_newlines >= n) return;
+
+        var end = bytes.len;
+        var offset: usize = 0;
+        while (std.mem.indexOfScalar(u8, bytes[offset..], '\n')) |relative| {
+            const newline = offset + relative;
+            self.head_newlines += 1;
+            if (self.head_newlines == n) {
+                end = newline + 1;
+                break;
+            }
+            offset = newline + 1;
+        }
+        try self.out.writeAll(bytes[0..end]);
+    }
+
+    fn writeTail(self: *WindowSink, n: usize, bytes: []const u8) !void {
+        if (n == 0) return;
+        for (bytes) |byte| {
+            if (self.tail.items.len == 0) {
+                self.tail_lines = 1;
+            } else if (self.tail.items[self.tail.items.len - 1] == '\n') {
+                if (self.tail_lines == n) self.dropFirstTailLine();
+                self.tail_lines += 1;
+            }
+            try self.tail.append(self.gpa, byte);
+        }
+    }
+
+    fn dropFirstTailLine(self: *WindowSink) void {
+        const cut = (std.mem.indexOfScalar(u8, self.tail.items, '\n') orelse unreachable) + 1;
+        const remaining = self.tail.items.len - cut;
+        std.mem.copyForwards(u8, self.tail.items[0..remaining], self.tail.items[cut..]);
+        self.tail.items.len = remaining;
+        self.tail_lines -= 1;
+    }
+
+    fn finish(self: *WindowSink) !void {
+        if (self.window == .tail) try self.out.writeAll(self.tail.items);
+    }
+
+    fn totalLines(self: *const WindowSink) u64 {
+        return self.total_newlines + @intFromBool(self.total_any and !self.total_ends_newline);
+    }
+
+    fn shownLines(self: *const WindowSink) u64 {
+        return switch (self.window) {
+            .all => self.totalLines(),
+            .head => |n| @min(self.totalLines(), @as(u64, @intCast(n))),
+            .tail => |n| @min(self.totalLines(), @as(u64, @intCast(n))),
         };
     }
 };
-
-const Direction = enum { from_start, from_end };
-
-/// The offset that keeps `n` lines from one end of `text`.
-fn lineBoundary(text: []const u8, n: usize, direction: Direction) usize {
-    if (n == 0) return switch (direction) {
-        .from_start => 0,
-        .from_end => text.len,
-    };
-
-    var seen: usize = 0;
-    switch (direction) {
-        .from_start => {
-            var i: usize = 0;
-            while (i < text.len) : (i += 1) {
-                if (text[i] != '\n') continue;
-                seen += 1;
-                if (seen == n) return i + 1;
-            }
-            return text.len;
-        },
-        .from_end => {
-            // A trailing newline ends the last line rather than starting one.
-            var i: usize = text.len;
-            if (i > 0 and text[i - 1] == '\n') i -= 1;
-            while (i > 0) : (i -= 1) {
-                if (text[i - 1] != '\n') continue;
-                seen += 1;
-                if (seen == n) return i;
-            }
-            return 0;
-        },
-    }
-}
-
-fn countLines(text: []const u8) usize {
-    if (text.len == 0) return 0;
-    var count = std.mem.count(u8, text, "\n");
-    if (text[text.len - 1] != '\n') count += 1;
-    return count;
-}
 
 fn takeCount(args: []const []const u8, i: *usize, comptime name: []const u8) !?usize {
     const arg = args[i.*];
@@ -465,34 +512,61 @@ fn note(comptime fmt: []const u8, args: anytype) void {
     sys.writeAll(2, text) catch {};
 }
 
-test "a head window keeps whole lines from the front" {
-    const text = "one\ntwo\nthree\n";
-    try std.testing.expectEqualStrings("one\ntwo\n", (Window{ .head = 2 }).apply(text));
-    try std.testing.expectEqualStrings("one\n", (Window{ .head = 1 }).apply(text));
-    try std.testing.expectEqualStrings(text, (Window{ .head = 9 }).apply(text));
-    try std.testing.expectEqualStrings("", (Window{ .head = 0 }).apply(text));
+fn applyWindow(gpa: std.mem.Allocator, window: Window, text: []const u8, chunk_size: usize) !struct {
+    bytes: []u8,
+    shown_lines: u64,
+    total_lines: u64,
+} {
+    var result: std.ArrayList(u8) = .empty;
+    errdefer result.deinit(gpa);
+    var writer = Io.Writer.Allocating.fromArrayList(gpa, &result);
+    defer result = writer.toArrayList();
+    var sink = WindowSink.init(gpa, window, &writer.writer);
+    defer sink.deinit();
+
+    var offset: usize = 0;
+    while (offset < text.len) {
+        const end = @min(offset + chunk_size, text.len);
+        try sink.writeAll(text[offset..end]);
+        offset = end;
+    }
+    try sink.finish();
+    return .{
+        .bytes = try writer.toOwnedSlice(),
+        .shown_lines = sink.shownLines(),
+        .total_lines = sink.totalLines(),
+    };
 }
 
-test "a tail window keeps whole lines from the end" {
-    const text = "one\ntwo\nthree\n";
-    try std.testing.expectEqualStrings("three\n", (Window{ .tail = 1 }).apply(text));
-    try std.testing.expectEqualStrings("two\nthree\n", (Window{ .tail = 2 }).apply(text));
-    try std.testing.expectEqualStrings(text, (Window{ .tail = 9 }).apply(text));
-}
+test "streaming windows keep whole lines across chunk boundaries" {
+    const gpa = std.testing.allocator;
+    const cases = [_]struct {
+        window: Window,
+        input: []const u8,
+        expected: []const u8,
+        shown: u64,
+        total: u64,
+    }{
+        .{ .window = .all, .input = "one\ntwo\nthree\n", .expected = "one\ntwo\nthree\n", .shown = 3, .total = 3 },
+        .{ .window = .{ .head = 2 }, .input = "one\ntwo\nthree\n", .expected = "one\ntwo\n", .shown = 2, .total = 3 },
+        .{ .window = .{ .tail = 2 }, .input = "one\ntwo\nthree\n", .expected = "two\nthree\n", .shown = 2, .total = 3 },
+        .{ .window = .{ .head = 0 }, .input = "one\ntwo", .expected = "", .shown = 0, .total = 2 },
+        .{ .window = .{ .tail = 0 }, .input = "one\ntwo", .expected = "", .shown = 0, .total = 2 },
+        .{ .window = .{ .head = 1 }, .input = "one\ntwo", .expected = "one\n", .shown = 1, .total = 2 },
+        .{ .window = .{ .tail = 1 }, .input = "one\ntwo", .expected = "two", .shown = 1, .total = 2 },
+        .{ .window = .{ .tail = 2 }, .input = "one\ntwo", .expected = "one\ntwo", .shown = 2, .total = 2 },
+        .{ .window = .{ .tail = 2 }, .input = "", .expected = "", .shown = 0, .total = 0 },
+    };
 
-test "windows cope with no trailing newline" {
-    const text = "one\ntwo";
-    try std.testing.expectEqualStrings("one\n", (Window{ .head = 1 }).apply(text));
-    try std.testing.expectEqualStrings("two", (Window{ .tail = 1 }).apply(text));
-    try std.testing.expectEqualStrings(text, (Window{ .tail = 2 }).apply(text));
-}
-
-test "counting lines matches what a window kept" {
-    try std.testing.expectEqual(@as(usize, 0), countLines(""));
-    try std.testing.expectEqual(@as(usize, 1), countLines("one"));
-    try std.testing.expectEqual(@as(usize, 1), countLines("one\n"));
-    try std.testing.expectEqual(@as(usize, 2), countLines("one\ntwo"));
-    try std.testing.expectEqual(@as(usize, 3), countLines("one\ntwo\nthree\n"));
+    for (cases) |case| {
+        for ([_]usize{ 1, 2, 3, 64 }) |chunk_size| {
+            const result = try applyWindow(gpa, case.window, case.input, chunk_size);
+            defer gpa.free(result.bytes);
+            try std.testing.expectEqualStrings(case.expected, result.bytes);
+            try std.testing.expectEqual(case.shown, result.shown_lines);
+            try std.testing.expectEqual(case.total, result.total_lines);
+        }
+    }
 }
 
 /// Accepts a reference or a path to the same thing.
@@ -501,18 +575,7 @@ test "counting lines matches what a window kept" {
 /// into a path by the time tj is executed, so insisting on a reference would
 /// make `tj cat @42` work everywhere except the place it is most likely to be
 /// typed. Outside a session there is nothing to rewrite and the reference is
-/// resolved here instead. Either way it ends at the same file.
-fn readTarget(gpa: std.mem.Allocator, io: Io, root: store.Dir, text: []const u8) ![]u8 {
-    var file = try openTarget(gpa, io, root, text);
-    defer file.close(io);
-    var bytes: std.ArrayList(u8) = .empty;
-    errdefer bytes.deinit(gpa);
-    var writer = Io.Writer.Allocating.fromArrayList(gpa, &bytes);
-    defer bytes = writer.toArrayList();
-    try copyFile(io, file, &writer.writer);
-    return writer.toOwnedSlice();
-}
-
+/// resolved here instead. Either way it ends at the same open file.
 fn openTarget(gpa: std.mem.Allocator, io: Io, root: store.Dir, text: []const u8) !Io.File {
     var path_buf: [std.fs.max_path_bytes]u8 = undefined;
     var path: []const u8 = text;
@@ -538,7 +601,10 @@ fn openTarget(gpa: std.mem.Allocator, io: Io, root: store.Dir, text: []const u8)
         path = std.fmt.bufPrint(&path_buf, "{s}/out", .{path}) catch return error.BadReference;
     }
 
-    return store.Dir.cwd().openFile(io, path, .{}) catch error.NoSuchResource;
+    return store.Dir.cwd().openFile(io, path, .{}) catch |err| switch (err) {
+        error.FileNotFound => error.NoSuchResource,
+        else => |other| other,
+    };
 }
 
 fn isDirectory(io: Io, path: []const u8) bool {
@@ -703,7 +769,7 @@ fn replaySession(
         }
 
         if (!replay.duration_only) try out.writeAll(replay.prompt);
-        try addDuration(&total_ms, try typeOut(gpa, io, root, session, number, replay, out));
+        try addDuration(&total_ms, try typeOut(io, root, session, number, replay, out));
 
         // Then the command runs, which took as long as it took.
         if (timing) |t| try addDuration(&total_ms, try replay.wait(t.duration()));
@@ -722,7 +788,6 @@ fn replaySession(
 
 /// Types the command line out a character at a time, the way it was typed.
 fn typeOut(
-    gpa: std.mem.Allocator,
     io: Io,
     root: store.Dir,
     session: []const u8,
@@ -732,21 +797,36 @@ fn typeOut(
 ) !u64 {
     var path_buf: [64]u8 = undefined;
     const sub = try std.fmt.bufPrint(&path_buf, "{s}/{d}/cmd", .{ session, number });
-    const cmd = root.readFileAlloc(io, sub, gpa, .limited(max_resource)) catch "";
-    defer if (cmd.len > 0) gpa.free(cmd);
-
     const per_char: u64 = if (replay.typing_ms == 0) 0 else try scaleMillis(replay.typing_ms, replay.speed);
+    var file = root.openFile(io, sub, .{}) catch |err| switch (err) {
+        error.FileNotFound => {
+            if (!replay.duration_only) {
+                try out.writeAll("\r\n");
+                try out.flush();
+            }
+            return 0;
+        },
+        else => |other| return other,
+    };
+    defer file.close(io);
 
-    const total = try typingDuration(per_char, @intCast(cmd.len));
+    const total = try typingDuration(per_char, (try file.stat(io)).size);
     if (replay.duration_only) return total;
 
     if (per_char == 0) {
-        try out.writeAll(cmd);
+        try copyFile(io, file, out);
     } else {
-        for (cmd) |char| {
-            try out.writeAll(&[_]u8{char});
-            try out.flush();
-            sys.sleepMs(per_char);
+        var reader_buffer: [read_chunk_size]u8 = undefined;
+        var bytes: [read_chunk_size]u8 = undefined;
+        var reader = file.readerStreaming(io, &reader_buffer);
+        while (true) {
+            const n = try reader.interface.readSliceShort(&bytes);
+            if (n == 0) break;
+            for (bytes[0..n]) |char| {
+                try out.writeAll(&[_]u8{char});
+                try out.flush();
+                sys.sleepMs(per_char);
+            }
         }
     }
     try out.writeAll("\r\n");
@@ -835,7 +915,10 @@ fn writeResource(
 ) !void {
     var path_buf: [64]u8 = undefined;
     const sub = try std.fmt.bufPrint(&path_buf, "{s}/{d}/{s}", .{ session, number, name });
-    var file = root.openFile(io, sub, .{}) catch return;
+    var file = root.openFile(io, sub, .{}) catch |err| switch (err) {
+        error.FileNotFound => return,
+        else => |other| return other,
+    };
     defer file.close(io);
     try copyFile(io, file, out);
 }
