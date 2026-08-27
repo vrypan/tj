@@ -177,12 +177,32 @@ being told, and without anything being pasted or re-run. `$TJ_SESSION`,
 `$TJ` and `$TJ_HOME` are already in its environment; the journal is plain
 files; `tj hist` is a few hundred tokens and says what exists.
 
-[skill/SKILL.md](skill/SKILL.md) teaches that. For Claude Code:
+[skill/SKILL.md](skill/SKILL.md) teaches that. For Claude Code, from inside
+your clone, so the path is right:
 
 ```sh
 mkdir -p ~/.claude/skills/tj
-ln -s ~/src/tj/skill/SKILL.md ~/.claude/skills/tj/SKILL.md
+ln -sfn "$PWD/skill/SKILL.md" ~/.claude/skills/tj/SKILL.md
+ls -l ~/.claude/skills/tj/SKILL.md    # check it resolves; a dangling
+                                      # symlink fails silently
 ```
+
+Then wrap the agent. Two details are load-bearing:
+
+```sh
+cl() { claude -p "$*" --allowedTools Bash; }
+```
+
+`--allowedTools` is **variadic**: it swallows every following word, so a
+prompt placed after it disappears and Claude reports "Input must be provided
+either through stdin or as a prompt argument". Put the prompt first.
+
+And it needs permission to run `tj` at all. A narrow `Bash(tj *)` pattern did
+not match what the skill actually invokes, so the journal stayed unreadable
+while the agent politely explained that it could not read it. Plain `Bash`
+works.
+
+Quote a prompt containing `?` or `*`, or zsh will try to glob it.
 
 With it loaded, a reference is optional. `@-` is the last *completed*
 interaction, and the agent's own invocation is still running, so it reliably

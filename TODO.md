@@ -85,6 +85,12 @@ is implemented. Revisit only if it turns out not to be enough.
 
 ## Smaller notes
 
+- The skill tells an agent to invoke `"$TJ"`, an absolute path. Claude
+  Code's `--allowedTools "Bash(tj *)"` does not match that, and neither did
+  the absolute path spelled out in the pattern; only a bare `Bash` worked.
+  Worth finding the pattern that does match, so an agent reading the journal
+  can be given exactly that permission and nothing else.
+
 - `test "signals sent to tj are forwarded to the shell"` is timing
   dependent and fails occasionally under load: it waits for the shell to
   print `READY` before sending the signal, and can time out before that
