@@ -178,7 +178,7 @@ const Journal = struct {
         return self.path_buf[0..self.path_len];
     }
 
-    fn open(gpa: std.mem.Allocator) !Journal {
+    fn open(_: std.mem.Allocator) !Journal {
         var self: Journal = .{
             .tmp = std.testing.tmpDir(.{}),
             .root = undefined,
@@ -188,14 +188,6 @@ const Journal = struct {
         const io = std.testing.io;
 
         const len = try self.tmp.dir.realPath(io, &self.path_buf);
-
-        // zsh only loads our plugin if it reads a .zshrc we control.
-        var rc: std.ArrayList(u8) = .empty;
-        defer rc.deinit(gpa);
-        try rc.appendSlice(gpa, "PS1='TJ_TEST_PROMPT> '\nsource ");
-        try rc.appendSlice(gpa, options.plugin);
-        try rc.append(gpa, '\n');
-        try self.tmp.dir.writeFile(io, .{ .sub_path = ".zshrc", .data = rc.items });
 
         try self.tmp.dir.createDirPath(io, "journal");
         self.root = try self.tmp.dir.openDir(io, "journal", .{});
@@ -256,14 +248,35 @@ const Journal = struct {
     }
 };
 
-/// Starts zsh with only the fixture's startup file.  This avoids inheriting a
-/// developer's ZDOTDIR while keeping the plugin setup visible in the fixture.
+/// Starts zsh with every startup file disabled. The fixture loads exactly the
+/// plugin it needs through the PTY, so system zsh configuration cannot change
+/// the prompt or install competing hooks.
 fn spawnJournalZsh(gpa: std.mem.Allocator, journal: *const Journal) !harness.Session {
     const home = try journal.homeArg(gpa);
     defer gpa.free(home);
-    const zdotdir = try std.fmt.allocPrint(gpa, "ZDOTDIR={s}", .{journal.path()});
-    defer gpa.free(zdotdir);
-    return spawnTj(gpa, &.{ tj, "--home", home, "run", "--", "/usr/bin/env", zdotdir, "/bin/zsh", "-i" }, 24, 80);
+    return spawnTj(gpa, &.{ tj, "--home", home, "run", "--", "/bin/zsh", "-f", "-i" }, 24, 80);
+}
+
+fn appendShellQuoted(gpa: std.mem.Allocator, out: *std.ArrayList(u8), text: []const u8) !void {
+    try out.append(gpa, '\'');
+    for (text) |byte| {
+        if (byte == '\'') {
+            try out.appendSlice(gpa, "'\\''");
+        } else {
+            try out.append(gpa, byte);
+        }
+    }
+    try out.append(gpa, '\'');
+}
+
+fn setupJournalZsh(gpa: std.mem.Allocator, session: harness.Session, out: *std.ArrayList(u8)) !void {
+    var command: std.ArrayList(u8) = .empty;
+    defer command.deinit(gpa);
+    try command.appendSlice(gpa, "source -- ");
+    try appendShellQuoted(gpa, &command, options.plugin);
+    try command.appendSlice(gpa, "; PS1='TJ_TEST_PROMPT> '\n");
+    try session.write(command.items);
+    if (!try session.readUntil(gpa, out, test_prompt, timeout_ms)) return error.ShellNotReady;
 }
 
 fn haveZsh() bool {
@@ -279,8 +292,7 @@ fn recordSession(gpa: std.mem.Allocator, journal: *Journal, script: []const []co
     var out: std.ArrayList(u8) = .empty;
     defer out.deinit(gpa);
 
-    // Wait for the fixture's prompt so the plugin's hooks are installed.
-    if (!try session.readUntil(gpa, &out, test_prompt, timeout_ms)) return error.ShellNotReady;
+    try setupJournalZsh(gpa, session, &out);
     for (script) |line| {
         const from = out.items.len;
         try session.write(line);
@@ -332,7 +344,7 @@ test "tj's own control sequences never reach the terminal" {
     var out: std.ArrayList(u8) = .empty;
     defer out.deinit(gpa);
 
-    try std.testing.expect(try session.readUntil(gpa, &out, test_prompt, timeout_ms));
+    try setupJournalZsh(gpa, session, &out);
     const from = out.items.len;
     try session.write("echo marker\n");
     try std.testing.expect(try session.readUntilFrom(gpa, &out, from, test_prompt, timeout_ms));
@@ -374,10 +386,12 @@ test "an interrupted session leaves the interaction without an rc" {
     var out: std.ArrayList(u8) = .empty;
     defer out.deinit(gpa);
 
-    try std.testing.expect(try session.readUntil(gpa, &out, test_prompt, timeout_ms));
+    try setupJournalZsh(gpa, session, &out);
     const from = out.items.len;
     try session.write("sleep 30\n");
-    try std.testing.expect(try session.readUntilFrom(gpa, &out, from, "sleep 30", timeout_ms));
+    // The echoed input arrives before preexec. Wait for the plugin's command
+    // boundary so the proxy has opened the interaction before interrupting it.
+    try std.testing.expect(try session.readUntilFrom(gpa, &out, from, "133;C", timeout_ms));
     _ = std.c.kill(session.pid, posix.SIG.TERM);
     _ = try session.finish(gpa, &out, timeout_ms);
 
@@ -571,7 +585,7 @@ test "the terminal still sees the full-screen program" {
     var out: std.ArrayList(u8) = .empty;
     defer out.deinit(gpa);
 
-    try std.testing.expect(try session.readUntil(gpa, &out, test_prompt, timeout_ms));
+    try setupJournalZsh(gpa, session, &out);
     const from = out.items.len;
     try session.write("printf '\\033[?1049hHIDDEN-PAINTING\\033[?1049l'\n");
     try std.testing.expect(try session.readUntilFrom(gpa, &out, from, test_prompt, timeout_ms));
