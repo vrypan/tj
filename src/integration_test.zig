@@ -116,7 +116,7 @@ test "resizing the outer terminal resizes the inner one" {
     const gpa = std.testing.allocator;
     const session = try spawnTj(
         gpa,
-        &.{ tj, "run", "--", "/bin/sh", "-c", "trap 'stty size; exit 0' WINCH; echo READY; sleep 5" },
+        &.{ tj, "run", "--", "/bin/sh", "-c", "trap 'stty size; exit 0' WINCH; echo READY; while :; do sleep 1; done" },
         24,
         80,
     );
