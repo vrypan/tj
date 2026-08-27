@@ -12,13 +12,22 @@ without asking them to paste anything and without running it again.
 ## Is there a journal?
 
 `$TJ_SESSION` is set inside a recorded session. If it is empty, there is no
-journal: answer from what you were told. Use `$TJ` rather than `tj`, since it
-points at the build that started the session and may not be on `$PATH`.
+journal: answer from what you were told.
+
+Run **`tj`** by its plain name, one command per call, with no pipe and no
+`;`. Not `"$TJ"`, not `tj ... | tail`. A wrapper may grant permission to run
+`tj` and nothing else, and a rule like `Bash(tj *)` matches only the literal
+name in a simple command — a pipeline or an expanded variable does not match
+it, and the journal silently stays unreadable. Every window you might want a
+pipe for, `tj` already has as a flag.
+
+If `tj` is genuinely not on `$PATH`, `$TJ` holds its full path, but prefer
+the plain name.
 
 ## Start with the index, not the output
 
 ```sh
-"$TJ" hist
+tj hist
 ```
 
 ```
@@ -35,11 +44,14 @@ deliberately.**
 Then take only what you need:
 
 ```sh
-"$TJ" cat @2              # what interaction 2 printed
-"$TJ" cat --tail 20 @2    # just the end, where errors are
-"$TJ" cat --head 5 @2     # just the beginning
-"$TJ" cat @2/cmd          # the command line as it was typed
+tj cat @2              # what interaction 2 printed
+tj cat --tail 20 @2    # just the end, where errors are
+tj cat --head 5 @2     # just the beginning
+tj cat @2/cmd          # the command line as it was typed
 ```
+
+Use `--tail` and `--head` rather than piping to `tail` or `head`: a pipeline
+is a compound command, and a narrow permission rule will refuse it.
 
 When a window hides something, `tj` says so on stderr: `showing 20 of 431
 lines`. If you see that, you are looking at a fragment - fetch more before
@@ -52,8 +64,8 @@ running, so `@-` is reliably the command the user just ran, which is almost
 always what "this" means.
 
 ```sh
-"$TJ" cat @-/cmd          # what they just ran
-"$TJ" cat @-              # what it printed
+tj cat @-/cmd          # what they just ran
+tj cat @-              # what it printed
 ```
 
 When you infer a referent, **say which one in a single line** before
@@ -105,23 +117,23 @@ A program can mark part of its output as a named file, which then appears
 under the interaction:
 
 ```sh
-"$TJ" cat @42/files/data.csv
+tj cat @42/files/data.csv
 ```
 
 `tj hist` does not list these. Check `@42/meta.json` for a `resources` map,
-or run `"$TJ" complete '@42/'` to see what an interaction holds.
+or run `tj complete '@42/'` to see what an interaction holds.
 
 ## Rules
 
-- **Use `"$TJ" cat`, never `cat @N/out`.** The second replays the whole
+- **Use `tj cat`, never `cat @N/out`.** The second replays the whole
   recording to the terminal, which is slow, makes a mess of the screen, and
   gets recorded again as a new interaction - a 50K one. This is the single
   most expensive mistake available here.
 - **Do not fetch everything.** Fetching every interaction's output costs
   hundreds of times what the index costs and is almost never worth it.
 - **Quote references** when passing them to `tj` from inside a session:
-  `"$TJ" cat '@1'`. The shell integration rewrites unquoted `@` words into
-  paths before `tj` runs.
+  `tj cat '@1'`. The shell integration rewrites unquoted `@` words into paths
+  before `tj` runs.
 - The journal records **what happened, not what the user was trying to do**.
   It has no intent, no reasoning, and no record of what was already ruled
   out. If the goal matters and the prompt does not say it, ask.

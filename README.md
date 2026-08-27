@@ -187,22 +187,31 @@ ls -l ~/.claude/skills/tj/SKILL.md    # check it resolves; a dangling
                                       # symlink fails silently
 ```
 
-Then wrap the agent. Two details are load-bearing:
+Then let the agent run `tj`, and nothing else. Either per invocation:
 
 ```sh
-cl() { claude -p "$*" --allowedTools Bash; }
+cl() { claude -p "$*" --allowedTools "Bash(tj *)"; }
 ```
 
-`--allowedTools` is **variadic**: it swallows every following word, so a
-prompt placed after it disappears and Claude reports "Input must be provided
-either through stdin or as a prompt argument". Put the prompt first.
+or once, in `~/.claude/settings.json`, after which the wrapper is just
+`claude -p "$*"`:
 
-And it needs permission to run `tj` at all. A narrow `Bash(tj *)` pattern did
-not match what the skill actually invokes, so the journal stayed unreadable
-while the agent politely explained that it could not read it. Plain `Bash`
-works.
+```json
+{ "permissions": { "allow": ["Bash(tj *)"] } }
+```
 
-Quote a prompt containing `?` or `*`, or zsh will try to glob it.
+Three details are load-bearing, each of which fails quietly:
+
+- **`tj` must be on `$PATH`.** The rule matches the literal name, so an
+  agent invoking `"$TJ"` — an expanded variable — never matches it.
+- **The prompt goes before `--allowedTools`.** That flag is variadic and
+  swallows every word after it, leaving no prompt: Claude then reports
+  "Input must be provided either through stdin or as a prompt argument".
+- **Quote a prompt containing `?` or `*`**, or zsh globs it and the command
+  never runs.
+
+A pipeline does not match a narrow rule either, which is why the skill tells
+the agent to use `tj cat --tail 20` rather than piping to `tail`.
 
 With it loaded, a reference is optional. `@-` is the last *completed*
 interaction, and the agent's own invocation is still running, so it reliably
