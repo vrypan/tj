@@ -213,6 +213,36 @@ Three details are load-bearing, each of which fails quietly:
 A pipeline does not match a narrow rule either, which is why the skill tells
 the agent to use `tj cat --tail 20` rather than piping to `tail`.
 
+### Other agents
+
+The journal is not Claude-specific; only the wrapper is. For
+[pi](https://pi.dev):
+
+```sh
+ask() {
+  command pi -p \
+    --append-system-prompt ~/Devel/tj/skill/SKILL.md \
+    --tools bash \
+    -- "$*"
+}
+```
+
+Three differences from the Claude wrapper:
+
+- **Load the skill with `--append-system-prompt <file>`, not `--skill`.**
+  `--skill` accepted a path that did not exist without complaining, and the
+  model then answered from invention; `--append-system-prompt` puts the file
+  in front of it and the answers come out right.
+- **`--tools` allowlists by tool name, not by command.** `--tools bash` is
+  the narrowest it goes, so pi cannot be given `tj` and nothing else the way
+  `Bash(tj *)` does for Claude Code.
+- **`--` before the prompt**, since messages are positional there. Name the
+  function something other than `pi`, or call `command pi` inside it, or it
+  recurses.
+
+pi has its own `@file` syntax, which does not collide: the shell integration
+rewrites `@42/out` into a plain path before pi ever sees the word.
+
 With it loaded, a reference is optional. `@-` is the last *completed*
 interaction, and the agent's own invocation is still running, so it reliably
 names the command you just ran:
