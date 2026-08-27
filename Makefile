@@ -37,7 +37,9 @@ install: build
 	@echo "installed tj, tj-fence and tj-tape in $(PREFIX)/bin"
 
 test:
-	$(ZIG) build test
+	# The PTY integration fixture shares process-global environment variables.
+	# Keep Zig's build runner single-threaded so its tests cannot overlap.
+	$(ZIG) build -j1 test
 
 fmt:
 	$(ZIG) fmt .
