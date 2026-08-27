@@ -20,6 +20,7 @@ pub const Error = error{
     BadReference,
     NoSuchInteraction,
     NoSuchResource,
+    BadCount,
 };
 
 pub fn run(
@@ -95,7 +96,13 @@ fn listInteractions(gpa: std.mem.Allocator, io: Io, home: ?[]const u8, args: []c
             std.fmt.bufPrint(&status_buf, "{d}", .{code}) catch "?"
         else
             "-";
-        try out.print("{d: >5}  {s: <3}  {s}\n", .{ info.number, status, firstLine(info.command) });
+        var size_buf: [8]u8 = undefined;
+        try out.print("{d: >5}  {s: <3}  {s: >5}  {s}\n", .{
+            info.number,
+            status,
+            humanSize(info.out_bytes, &size_buf),
+            firstLine(info.command),
+        });
     }
 }
 
@@ -108,6 +115,23 @@ fn printLast(gpa: std.mem.Allocator, io: Io, home: ?[]const u8, out: *Io.Writer)
     const number = try store.lastCompleted(gpa, io, root, session) orelse
         return error.NothingRecorded;
     try out.print("{d}\n", .{number});
+}
+
+/// Sizes are for judging at a glance whether an output is worth fetching, so
+/// three significant characters is plenty.
+fn humanSize(bytes: u64, buf: []u8) []const u8 {
+    if (bytes < 1024) return std.fmt.bufPrint(buf, "{d}", .{bytes}) catch "?";
+    if (bytes < 1024 * 1024) return std.fmt.bufPrint(buf, "{d}K", .{bytes / 1024}) catch "?";
+    return std.fmt.bufPrint(buf, "{d}M", .{bytes / (1024 * 1024)}) catch "?";
+}
+
+test "sizes read at a glance" {
+    var buf: [8]u8 = undefined;
+    try std.testing.expectEqualStrings("0", humanSize(0, &buf));
+    try std.testing.expectEqualStrings("185", humanSize(185, &buf));
+    try std.testing.expectEqualStrings("1K", humanSize(1024, &buf));
+    try std.testing.expectEqualStrings("53K", humanSize(54418, &buf));
+    try std.testing.expectEqualStrings("2M", humanSize(2 * 1024 * 1024, &buf));
 }
 
 /// Multi-line commands are real; a listing shows only the first line of one.
@@ -289,14 +313,21 @@ fn catResource(
     // Terminals can render escape sequences, pipes cannot. Follow the usual
     // convention and let either flag settle it explicitly.
     var as_written = sys.isTty(1);
+    var window: Window = .all;
     var refs: std.ArrayList([]const u8) = .empty;
     defer refs.deinit(gpa);
 
-    for (args) |arg| {
+    var i: usize = 0;
+    while (i < args.len) : (i += 1) {
+        const arg = args[i];
         if (std.mem.eql(u8, arg, "--raw") or std.mem.eql(u8, arg, "-r")) {
             as_written = true;
         } else if (std.mem.eql(u8, arg, "--plain") or std.mem.eql(u8, arg, "-p")) {
             as_written = false;
+        } else if (try takeCount(args, &i, "--head")) |n| {
+            window = .{ .head = n };
+        } else if (try takeCount(args, &i, "--tail")) |n| {
+            window = .{ .tail = n };
         } else {
             try refs.append(gpa, arg);
         }
@@ -309,8 +340,140 @@ fn catResource(
     for (refs.items) |text| {
         const bytes = try readTarget(gpa, io, root, text);
         defer gpa.free(bytes);
-        if (as_written) try out.writeAll(bytes) else try plain.render(gpa, bytes, out);
+
+        // Rendering first means a line count is a count of lines the caller
+        // will actually see, not of lines in the recording.
+        var rendered: std.ArrayList(u8) = .empty;
+        defer rendered.deinit(gpa);
+        if (as_written) {
+            try rendered.appendSlice(gpa, bytes);
+        } else {
+            var writer = Io.Writer.Allocating.fromArrayList(gpa, &rendered);
+            defer rendered = writer.toArrayList();
+            try plain.render(gpa, bytes, &writer.writer);
+        }
+
+        const shown = window.apply(rendered.items);
+        try out.writeAll(shown);
+
+        // Silence about what was left out would let a reader - a person or an
+        // agent - take a fragment for the whole thing. It goes to stderr so
+        // that stdout stays exactly what was asked for.
+        if (shown.len < rendered.items.len) {
+            note("tj: {s}: showing {d} of {d} lines\n", .{
+                text,
+                countLines(shown),
+                countLines(rendered.items),
+            });
+        }
     }
+}
+
+/// How much of a resource to print.
+const Window = union(enum) {
+    all,
+    head: usize,
+    tail: usize,
+
+    fn apply(self: Window, text: []const u8) []const u8 {
+        return switch (self) {
+            .all => text,
+            .head => |n| text[0..lineBoundary(text, n, .from_start)],
+            .tail => |n| text[lineBoundary(text, n, .from_end)..],
+        };
+    }
+};
+
+const Direction = enum { from_start, from_end };
+
+/// The offset that keeps `n` lines from one end of `text`.
+fn lineBoundary(text: []const u8, n: usize, direction: Direction) usize {
+    if (n == 0) return switch (direction) {
+        .from_start => 0,
+        .from_end => text.len,
+    };
+
+    var seen: usize = 0;
+    switch (direction) {
+        .from_start => {
+            var i: usize = 0;
+            while (i < text.len) : (i += 1) {
+                if (text[i] != '\n') continue;
+                seen += 1;
+                if (seen == n) return i + 1;
+            }
+            return text.len;
+        },
+        .from_end => {
+            // A trailing newline ends the last line rather than starting one.
+            var i: usize = text.len;
+            if (i > 0 and text[i - 1] == '\n') i -= 1;
+            while (i > 0) : (i -= 1) {
+                if (text[i - 1] != '\n') continue;
+                seen += 1;
+                if (seen == n) return i;
+            }
+            return 0;
+        },
+    }
+}
+
+fn countLines(text: []const u8) usize {
+    if (text.len == 0) return 0;
+    var count = std.mem.count(u8, text, "\n");
+    if (text[text.len - 1] != '\n') count += 1;
+    return count;
+}
+
+fn takeCount(args: []const []const u8, i: *usize, comptime name: []const u8) !?usize {
+    const arg = args[i.*];
+    var text: []const u8 = undefined;
+
+    if (std.mem.eql(u8, arg, name)) {
+        if (i.* + 1 >= args.len) return error.MissingFlagValue;
+        i.* += 1;
+        text = args[i.*];
+    } else if (std.mem.startsWith(u8, arg, name ++ "=")) {
+        text = arg[name.len + 1 ..];
+    } else return null;
+
+    return std.fmt.parseInt(usize, text, 10) catch error.BadCount;
+}
+
+fn note(comptime fmt: []const u8, args: anytype) void {
+    var buf: [512]u8 = undefined;
+    const text = std.fmt.bufPrint(&buf, fmt, args) catch return;
+    sys.writeAll(2, text) catch {};
+}
+
+test "a head window keeps whole lines from the front" {
+    const text = "one\ntwo\nthree\n";
+    try std.testing.expectEqualStrings("one\ntwo\n", (Window{ .head = 2 }).apply(text));
+    try std.testing.expectEqualStrings("one\n", (Window{ .head = 1 }).apply(text));
+    try std.testing.expectEqualStrings(text, (Window{ .head = 9 }).apply(text));
+    try std.testing.expectEqualStrings("", (Window{ .head = 0 }).apply(text));
+}
+
+test "a tail window keeps whole lines from the end" {
+    const text = "one\ntwo\nthree\n";
+    try std.testing.expectEqualStrings("three\n", (Window{ .tail = 1 }).apply(text));
+    try std.testing.expectEqualStrings("two\nthree\n", (Window{ .tail = 2 }).apply(text));
+    try std.testing.expectEqualStrings(text, (Window{ .tail = 9 }).apply(text));
+}
+
+test "windows cope with no trailing newline" {
+    const text = "one\ntwo";
+    try std.testing.expectEqualStrings("one\n", (Window{ .head = 1 }).apply(text));
+    try std.testing.expectEqualStrings("two", (Window{ .tail = 1 }).apply(text));
+    try std.testing.expectEqualStrings(text, (Window{ .tail = 2 }).apply(text));
+}
+
+test "counting lines matches what a window kept" {
+    try std.testing.expectEqual(@as(usize, 0), countLines(""));
+    try std.testing.expectEqual(@as(usize, 1), countLines("one"));
+    try std.testing.expectEqual(@as(usize, 1), countLines("one\n"));
+    try std.testing.expectEqual(@as(usize, 2), countLines("one\ntwo"));
+    try std.testing.expectEqual(@as(usize, 3), countLines("one\ntwo\nthree\n"));
 }
 
 /// Accepts a reference or a path to the same thing.

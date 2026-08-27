@@ -96,6 +96,9 @@ is implemented. Revisit only if it turns out not to be enough.
   semicolons and newlines in a command line cannot break the sequence
   framing, and zsh has no builtin for it, but it could be done with
   parameter expansion instead.
+- `tj hist` has no machine-readable form. Not needed while an agent reads it
+  through the skill - a model parses the table fine, and JSON measured 2.1x
+  the size. It would matter if a wrapper script ever builds prompts.
 - Completion does not offer session suffixes: `@pg<TAB>` produces nothing.
   `SPEC.md` §8.3 does not ask for it, and full ULIDs make poor candidates,
   but it is a gap when working across sessions.

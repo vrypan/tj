@@ -27,7 +27,8 @@ const usage =
     \\  sessions       every session, newest first
     \\  current        this session's id
     \\  last           the last interaction that completed
-    \\  cat <ref>...   print what a reference names (--raw / --plain)
+    \\  cat <ref>...   print what a reference names
+    \\                 (--raw / --plain, --head N / --tail N)
     \\  resolve <ref>  print the path a reference names
     \\  complete <ref> completion candidates for a partial reference
     \\
@@ -82,6 +83,7 @@ pub fn main(init: std.process.Init) !u8 {
                     error.NothingRecorded, error.NothingCompleted => "tj: nothing recorded yet\n",
                     error.MissingArgument => "tj: this subcommand needs an argument\n",
                     error.BadReference => "tj: not a journal reference\n",
+                    error.BadCount => "tj: --head and --tail need a number of lines\n",
                     error.NoSuchInteraction => "tj: no such interaction\n",
                     error.NoSuchResource => "tj: no such resource or file\n",
                     error.FileNotFound => "tj: no journal yet\n",

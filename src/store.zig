@@ -510,6 +510,8 @@ pub const InteractionInfo = struct {
     /// Absent means the interaction never completed.
     exit_code: ?u8,
     command: []const u8,
+    /// So a reader can tell what fetching `out` would cost before doing it.
+    out_bytes: u64,
 
     pub fn deinit(self: InteractionInfo, gpa: std.mem.Allocator) void {
         gpa.free(self.command);
@@ -543,6 +545,11 @@ pub fn listInteractions(gpa: std.mem.Allocator, io: Io, root: Dir, session: []co
             .number = number,
             .exit_code = readExitCode(io, interaction),
             .command = command,
+            .out_bytes = blk: {
+                const file = interaction.openFile(io, "out", .{}) catch break :blk 0;
+                defer file.close(io);
+                break :blk file.length(io) catch 0;
+            },
         });
     }
 

@@ -9,6 +9,7 @@
         "build.zig.zon",
         "src",
         "tj.plugin.zsh",
+        "skill",
         "TJ-spec.md",
         "README.md",
         "TODO.md",

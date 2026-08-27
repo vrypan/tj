@@ -170,6 +170,39 @@ PS1='[${TJ_REF}] '"$PS1"
 
 Scrolling back, every command is then headed by the reference that names it.
 
+## Giving an agent the journal
+
+An agent invoked from a recorded session can find out what happened without
+being told, and without anything being pasted or re-run. `$TJ_SESSION`,
+`$TJ` and `$TJ_HOME` are already in its environment; the journal is plain
+files; `tj hist` is a few hundred tokens and says what exists.
+
+[skill/SKILL.md](skill/SKILL.md) teaches that. For Claude Code:
+
+```sh
+mkdir -p ~/.claude/skills/tj
+ln -s ~/src/tj/skill/SKILL.md ~/.claude/skills/tj/SKILL.md
+```
+
+With it loaded, a reference is optional. `@-` is the last *completed*
+interaction, and the agent's own invocation is still running, so it reliably
+names the command you just ran:
+
+```sh
+$ curl -s https://api.example.com/thing | jq .items
+$ pi what does this mean?
+```
+
+The economics are the reason to read the index first: across one journal
+here, every command and status came to about 340 tokens, while every
+interaction's output came to 69,000. The median interaction is 185 bytes and
+a handful are 50K, which is what `tj hist`'s size column and `tj cat --tail`
+are for.
+
+What the journal cannot supply is intent. It records what happened, not what
+you were trying to do or what you already ruled out — so the prompt still
+carries the goal, exactly as in `pi explain @42`.
+
 ## Reading a recording
 
 `tj cat` prints what a reference names, resolving it itself — so it works
@@ -178,8 +211,14 @@ from bash, from a script, or from a shell that is not running under tj:
 ```sh
 tj cat @42                # what interaction 42 printed
 tj cat @42/cmd            # the command line
+tj cat --tail 20 @42      # just the end, where errors are
+tj cat --head 5 @42       # just the beginning
 tj cat @41 @43 | diff - -
 ```
+
+`--head` and `--tail` count lines of what you would have seen. When they hide
+something, tj says so on stderr, so a fragment is never mistaken for the
+whole.
 
 Piped, it renders the recording as text a person would have read: escape
 sequences removed, and a progress meter that rewrote its line thirty times
