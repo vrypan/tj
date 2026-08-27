@@ -30,6 +30,14 @@ fn isolateJournal() void {
     sys.setEnv("TJ_SESSION", "");
 }
 
+/// Tests share one process, so a test that entered a session leaves
+/// TJ_SESSION set for whatever runs next. Replay refuses to run inside a
+/// session, so its tests have to say they are outside one.
+fn leaveSession() void {
+    isolateJournal();
+    sys.setEnv("TJ_SESSION", "");
+}
+
 fn spawnTj(gpa: std.mem.Allocator, args: []const []const u8, rows: u16, cols: u16) !harness.Session {
     isolateJournal();
     return harness.spawn(gpa, args, rows, cols);
@@ -939,7 +947,7 @@ test "a session replays the commands and output it recorded" {
     var journal = try Journal.open(gpa);
     defer journal.close();
     try recordSession(gpa, &journal, &.{ "echo first-marker", "echo second-marker" });
-    try journal.enter(gpa);
+    leaveSession();
 
     const home = try journal.homeArg(gpa);
     defer gpa.free(home);
@@ -968,7 +976,7 @@ test "replay can be narrowed to a range of interactions" {
     var journal = try Journal.open(gpa);
     defer journal.close();
     try recordSession(gpa, &journal, &.{ "echo alpha", "echo beta", "echo gamma" });
-    try journal.enter(gpa);
+    leaveSession();
 
     const home = try journal.homeArg(gpa);
     defer gpa.free(home);
@@ -990,6 +998,7 @@ test "replay names a session by suffix, like every other reference" {
     var journal = try Journal.open(gpa);
     defer journal.close();
     try recordSession(gpa, &journal, &.{"echo by-suffix"});
+    leaveSession();
 
     const name = try journal.sessionName(gpa);
     defer gpa.free(name);
@@ -1001,4 +1010,48 @@ test "replay names a session by suffix, like every other reference" {
     }, 24, 80);
     defer r.out.deinit(gpa);
     try std.testing.expect(std.mem.indexOf(u8, r.out.items, "echo by-suffix") != null);
+}
+
+test "replay refuses to run inside a session" {
+    if (!haveZsh()) return error.SkipZigTest;
+    const gpa = std.testing.allocator;
+
+    var journal = try Journal.open(gpa);
+    defer journal.close();
+    try recordSession(gpa, &journal, &.{"echo recorded"});
+    // Being "inside a session" is exactly what TJ_SESSION means.
+    try journal.enter(gpa);
+
+    const home = try journal.homeArg(gpa);
+    defer gpa.free(home);
+
+    var refused = try run(gpa, &.{ "--home", home, "replay", "--typing", "0" }, 24, 80);
+    defer refused.out.deinit(gpa);
+    try std.testing.expectEqual(@as(u8, 1), refused.code);
+    // The recording must not have been replayed into the live session.
+    try std.testing.expect(std.mem.indexOf(u8, refused.out.items, "echo recorded") == null);
+
+    // Asking only how long it would take prints no recording, so it is allowed:
+    // tj-tape needs it, and is usually run from inside a session.
+    var duration = try run(gpa, &.{ "--home", home, "replay", "--duration" }, 24, 80);
+    defer duration.out.deinit(gpa);
+    try std.testing.expectEqual(@as(u8, 0), duration.code);
+}
+
+test "replay with no session named plays the most recent one" {
+    if (!haveZsh()) return error.SkipZigTest;
+    const gpa = std.testing.allocator;
+
+    var journal = try Journal.open(gpa);
+    defer journal.close();
+    try recordSession(gpa, &journal, &.{"echo only-session"});
+    leaveSession();
+
+    const home = try journal.homeArg(gpa);
+    defer gpa.free(home);
+
+    // Deliberately not inside a session, which is the only way replay runs.
+    var r = try run(gpa, &.{ "--home", home, "replay", "--typing", "0", "--max-pause", "0" }, 24, 80);
+    defer r.out.deinit(gpa);
+    try std.testing.expect(std.mem.indexOf(u8, r.out.items, "echo only-session") != null);
 }

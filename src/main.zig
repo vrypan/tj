@@ -29,7 +29,7 @@ const usage =
     \\  last           the last interaction that completed
     \\  cat <ref>...   print what a reference names
     \\                 (--raw / --plain, --head N / --tail N)
-    \\  replay [sess]  play a session back into the terminal
+    \\  replay [sess]  play a session back into the terminal (outside a session)
     \\                 (--speed X, --typing MS, --max-pause MS, --prompt S,
     \\                  --from N, --to N)
     \\  resolve <ref>  print the path a reference names
@@ -89,6 +89,7 @@ pub fn main(init: std.process.Init) !u8 {
                     error.BadCount => "tj: --head and --tail need a number of lines\n",
                     error.NoSuchInteraction => "tj: no such interaction\n",
                     error.NoSuchResource => "tj: no such resource or file\n",
+                    error.InsideSession => "tj: cannot replay inside a tj session, because the session would record the replay; run it from a shell that is not under tj\n",
                     error.FileNotFound => "tj: no journal yet\n",
                     else => "tj: cannot read the journal\n",
                 });

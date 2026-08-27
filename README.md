@@ -396,6 +396,13 @@ tj replay fgpc                # another, by a suffix of its id
 tj replay fgpc --from 4 --to 9 --speed 2
 ```
 
+**Replay only runs outside a session.** Inside one, the recording would be
+fed back into the journal: the replayed shell-integration markers read as
+real command boundaries, which truncates the recording of the replay itself
+and pins the replayed exit status onto it — and `tj hist` shows a
+plausible-looking entry, so nothing tells you. So exit the session first, or
+replay from another pane. With no session named, the most recent one plays.
+
 Nothing is re-executed. What cannot be reconstructed is *when* each byte
 arrived, since only the start and end of each interaction were recorded — so
 output appears at once, and the pacing comes from the real command durations
@@ -410,7 +417,7 @@ does not make a watchable demo.
 | `--max-pause MS` | longest single pause, however long the real one was |
 | `--prompt S` | the prompt to draw; tj never records one |
 | `--from N` `--to N` | replay part of a session |
-| `--duration` | print the seconds it would take, and play nothing |
+| `--duration` | print the seconds it would take, and play nothing; allowed inside a session, since it emits no recording |
 
 For a GIF, [contrib/tj-tape](contrib/tj-tape) emits a
 [vhs](https://github.com/charmbracelet/vhs) tape that records the replay:

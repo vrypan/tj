@@ -21,6 +21,7 @@ pub const Error = error{
     NoSuchInteraction,
     NoSuchResource,
     BadCount,
+    InsideSession,
 };
 
 pub fn run(
@@ -596,15 +597,35 @@ fn replaySession(
         }
     }
 
+    // Replaying into a live session would feed the recording back into the
+    // journal: the replayed shell-integration markers read as real command
+    // boundaries, which truncates the recording of the replay itself and
+    // pins the replayed exit status onto it. Asking for the duration prints
+    // no recording, so it stays allowed - `tj-tape` needs it.
+    if (!replay.duration_only and sys.env("TJ_SESSION") != null) return error.InsideSession;
+
     var root = try store.openRoot(io, home);
     defer root.close(io);
 
-    // A suffix works here as it does anywhere else a session is named.
+    // A suffix works here as it does anywhere else a session is named. With
+    // no session named, the most recent one: there is no current session to
+    // fall back on, since replay only runs outside one.
+    var owned: ?[]u8 = null;
+    defer if (owned) |name| gpa.free(name);
+
     const session: []const u8 = if (wanted) |name| blk: {
-        if (try store.findSession(gpa, io, root, name)) |found| break :blk found;
-        return error.NoSuchSession;
-    } else try currentSession();
-    defer if (wanted != null) gpa.free(@constCast(session));
+        owned = try store.findSession(gpa, io, root, name) orelse return error.NoSuchSession;
+        break :blk owned.?;
+    } else blk: {
+        const sessions = try store.listSessions(gpa, io, root);
+        defer {
+            for (sessions) |name| gpa.free(name);
+            gpa.free(sessions);
+        }
+        if (sessions.len == 0) return error.NothingRecorded;
+        owned = try gpa.dupe(u8, sessions[0]);
+        break :blk owned.?;
+    };
 
     const numbers = store.listNumbers(gpa, io, root, session) catch return error.NoSuchSession;
     defer gpa.free(numbers);
