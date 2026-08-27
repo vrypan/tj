@@ -33,7 +33,8 @@ install: build
 	install -d $(PREFIX)/bin
 	install -m 755 zig-out/bin/tj $(PREFIX)/bin/
 	install -m 755 contrib/tj-fence $(PREFIX)/bin/
-	@echo "installed tj and tj-fence in $(PREFIX)/bin"
+	install -m 755 contrib/tj-tape $(PREFIX)/bin/
+	@echo "installed tj, tj-fence and tj-tape in $(PREFIX)/bin"
 
 test:
 	$(ZIG) build test

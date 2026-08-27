@@ -943,3 +943,100 @@ test "a carriage return at the very end of a resource is kept" {
 
     try std.testing.expectEqualStrings("ends with cr\r", text);
 }
+
+// --- reading back what a session recorded ------------------------------------
+
+/// When an interaction ran, as milliseconds since the epoch.
+pub const Timing = struct {
+    started: i64,
+    ended: i64,
+
+    /// How long the command itself took.
+    pub fn duration(self: Timing) i64 {
+        return @max(0, self.ended - self.started);
+    }
+};
+
+/// Reads the timings an interaction recorded. Absent or unparseable metadata
+/// is not an error: replaying without pacing is better than not replaying.
+pub fn readTiming(gpa: std.mem.Allocator, io: Io, root: Dir, session: []const u8, number: u32) ?Timing {
+    var path_buf: [64]u8 = undefined;
+    const sub = std.fmt.bufPrint(&path_buf, "{s}/{d}/meta.json", .{ session, number }) catch return null;
+
+    const text = root.readFileAlloc(io, sub, gpa, .limited(64 * 1024)) catch return null;
+    defer gpa.free(text);
+
+    const Meta = struct { started: []const u8 = "", ended: []const u8 = "" };
+    const parsed = std.json.parseFromSlice(Meta, gpa, text, .{ .ignore_unknown_fields = true }) catch return null;
+    defer parsed.deinit();
+
+    return .{
+        .started = parseTimestamp(parsed.value.started) orelse return null,
+        .ended = parseTimestamp(parsed.value.ended) orelse return null,
+    };
+}
+
+/// The inverse of `formatTimestamp`. Only the exact shape tj writes is
+/// accepted: `2026-08-27T16:15:10.502Z`.
+pub fn parseTimestamp(text: []const u8) ?i64 {
+    if (text.len != 24 or text[4] != '-' or text[7] != '-' or text[10] != 'T') return null;
+    if (text[13] != ':' or text[16] != ':' or text[19] != '.' or text[23] != 'Z') return null;
+
+    const year = parseDigits(text[0..4]) orelse return null;
+    const month = parseDigits(text[5..7]) orelse return null;
+    const day = parseDigits(text[8..10]) orelse return null;
+    const hour = parseDigits(text[11..13]) orelse return null;
+    const minute = parseDigits(text[14..16]) orelse return null;
+    const second = parseDigits(text[17..19]) orelse return null;
+    const millis = parseDigits(text[20..23]) orelse return null;
+
+    if (month < 1 or month > 12 or day < 1 or day > 31) return null;
+    if (hour > 23 or minute > 59 or second > 60) return null;
+
+    const days = daysFromCivil(year, @intCast(month), @intCast(day));
+    return ((days * 24 + hour) * 60 + minute) * 60 * 1000 + second * 1000 + millis;
+}
+
+fn parseDigits(text: []const u8) ?i64 {
+    var value: i64 = 0;
+    for (text) |char| {
+        if (!std.ascii.isDigit(char)) return null;
+        value = value * 10 + (char - '0');
+    }
+    return value;
+}
+
+/// Days since 1970-01-01, by Howard Hinnant's civil-date algorithm: it shifts
+/// the year to start in March so the leap day falls at the end, which removes
+/// every special case.
+fn daysFromCivil(year: i64, month: u32, day: u32) i64 {
+    const shifted = year - @as(i64, if (month <= 2) 1 else 0);
+    const era = @divFloor(if (shifted >= 0) shifted else shifted - 399, 400);
+    const year_of_era = shifted - era * 400;
+    const month_shift: i64 = if (month > 2) -3 else 9;
+    const day_of_year = @divFloor(153 * (@as(i64, month) + month_shift) + 2, 5) + @as(i64, day) - 1;
+    const day_of_era = year_of_era * 365 + @divFloor(year_of_era, 4) - @divFloor(year_of_era, 100) + day_of_year;
+    return era * 146097 + day_of_era - 719468;
+}
+
+test "a timestamp survives the round trip the journal puts it through" {
+    var buf: [32]u8 = undefined;
+    for ([_]i64{ 0, 1000, 1787753002117, 1709208000500, 1767225599999 }) |millis| {
+        try std.testing.expectEqual(millis, parseTimestamp(formatTimestamp(millis, &buf)).?);
+    }
+}
+
+test "malformed timestamps are refused rather than guessed at" {
+    for ([_][]const u8{
+        "",
+        "2026-08-27",
+        "2026-08-27T16:15:10Z",
+        "2026-08-27 16:15:10.502Z",
+        "20x6-08-27T16:15:10.502Z",
+        "2026-13-27T16:15:10.502Z",
+        "2026-08-00T16:15:10.502Z",
+        "2026-08-27T25:15:10.502Z",
+    }) |text| {
+        try std.testing.expect(parseTimestamp(text) == null);
+    }
+}

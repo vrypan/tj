@@ -929,3 +929,76 @@ test "a published resource survives arbitrary bytes" {
     // carriage return the data really contained comes back.
     try std.testing.expectEqualSlices(u8, blob.items, recovered);
 }
+
+// --- replay -------------------------------------------------------------------
+
+test "a session replays the commands and output it recorded" {
+    if (!haveZsh()) return error.SkipZigTest;
+    const gpa = std.testing.allocator;
+
+    var journal = try Journal.open(gpa);
+    defer journal.close();
+    try recordSession(gpa, &journal, &.{ "echo first-marker", "echo second-marker" });
+    try journal.enter(gpa);
+
+    const home = try journal.homeArg(gpa);
+    defer gpa.free(home);
+
+    // No pacing: a test must not wait for a demo to play out.
+    var r = try run(gpa, &.{
+        "--home", home, "replay", "--typing", "0", "--max-pause", "0", "--prompt", "% ",
+    }, 24, 80);
+    defer r.out.deinit(gpa);
+
+    // Each command is shown, then what it printed, in the order they ran.
+    const first_cmd = std.mem.indexOf(u8, r.out.items, "echo first-marker") orelse return error.TestUnexpectedResult;
+    const first_out = std.mem.indexOf(u8, r.out.items, "first-marker\r") orelse return error.TestUnexpectedResult;
+    const second_cmd = std.mem.indexOf(u8, r.out.items, "echo second-marker") orelse return error.TestUnexpectedResult;
+    try std.testing.expect(first_cmd < first_out);
+    try std.testing.expect(first_out < second_cmd);
+
+    // The synthesised prompt appears, since the journal never recorded one.
+    try std.testing.expect(std.mem.indexOf(u8, r.out.items, "% ") != null);
+}
+
+test "replay can be narrowed to a range of interactions" {
+    if (!haveZsh()) return error.SkipZigTest;
+    const gpa = std.testing.allocator;
+
+    var journal = try Journal.open(gpa);
+    defer journal.close();
+    try recordSession(gpa, &journal, &.{ "echo alpha", "echo beta", "echo gamma" });
+    try journal.enter(gpa);
+
+    const home = try journal.homeArg(gpa);
+    defer gpa.free(home);
+
+    var r = try run(gpa, &.{
+        "--home", home, "replay", "--typing", "0", "--max-pause", "0", "--from", "2", "--to", "2",
+    }, 24, 80);
+    defer r.out.deinit(gpa);
+
+    try std.testing.expect(std.mem.indexOf(u8, r.out.items, "echo beta") != null);
+    try std.testing.expect(std.mem.indexOf(u8, r.out.items, "alpha") == null);
+    try std.testing.expect(std.mem.indexOf(u8, r.out.items, "gamma") == null);
+}
+
+test "replay names a session by suffix, like every other reference" {
+    if (!haveZsh()) return error.SkipZigTest;
+    const gpa = std.testing.allocator;
+
+    var journal = try Journal.open(gpa);
+    defer journal.close();
+    try recordSession(gpa, &journal, &.{"echo by-suffix"});
+
+    const name = try journal.sessionName(gpa);
+    defer gpa.free(name);
+    const home = try journal.homeArg(gpa);
+    defer gpa.free(home);
+
+    var r = try run(gpa, &.{
+        "--home", home, "replay", name[name.len - 4 ..], "--typing", "0", "--max-pause", "0",
+    }, 24, 80);
+    defer r.out.deinit(gpa);
+    try std.testing.expect(std.mem.indexOf(u8, r.out.items, "echo by-suffix") != null);
+}

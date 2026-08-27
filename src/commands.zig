@@ -39,6 +39,7 @@ pub fn run(
         .resolve => try resolveReference(gpa, io, sub.home, sub.args, out),
         .complete => try completeReference(gpa, io, sub.home, sub.args, out),
         .cat => try catResource(gpa, io, sub.home, sub.args, out),
+        .replay => try replaySession(gpa, io, sub.home, sub.args, out),
     }
 }
 
@@ -516,4 +517,206 @@ fn isDirectory(io: Io, path: []const u8) bool {
     var dir = store.Dir.cwd().openDir(io, path, .{}) catch return false;
     dir.close(io);
     return true;
+}
+
+// --- replaying a session -----------------------------------------------------
+
+/// How a recording is played back. The recorded timings give the rhythm; the
+/// defaults keep it watchable, since a real session has gaps where somebody
+/// was reading something for a minute.
+const Replay = struct {
+    /// Divides every delay. 2 means twice as fast.
+    speed: f64 = 1.0,
+    /// Per character of the command line. 0 shows it at once.
+    typing_ms: u64 = 35,
+    /// No single pause runs longer than this, however long the real one was.
+    max_pause_ms: u64 = 2000,
+    prompt: []const u8 = "$ ",
+    from: u32 = 1,
+    to: u32 = std.math.maxInt(u32),
+    /// Report how long the replay would take instead of playing it, so a
+    /// generated vhs tape can wait exactly that long and no longer.
+    duration_only: bool = false,
+
+    /// A recorded gap, capped and scaled into something watchable.
+    fn delay(self: Replay, millis: i64) u64 {
+        if (millis <= 0) return 0;
+        const capped = @min(@as(u64, @intCast(millis)), self.max_pause_ms);
+        return @intFromFloat(@as(f64, @floatFromInt(capped)) / self.speed);
+    }
+
+    /// Sleeps unless only the total was asked for. Returns what it cost
+    /// either way, so the two paths cannot drift apart.
+    fn wait(self: Replay, millis: i64) u64 {
+        const ms = self.delay(millis);
+        if (!self.duration_only) sys.sleepMs(ms);
+        return ms;
+    }
+};
+
+/// `tj replay <session>` - play a recording back into the terminal.
+///
+/// Nothing is re-executed: this is the output that was captured, escape
+/// sequences and all, so it looks the way it looked. What cannot be
+/// reconstructed is when each byte arrived, since only the start and end of
+/// each interaction were recorded - so output appears at once, and the pacing
+/// comes from the real durations and the real gaps between commands.
+fn replaySession(
+    gpa: std.mem.Allocator,
+    io: Io,
+    home: ?[]const u8,
+    args: []const []const u8,
+    out: *Io.Writer,
+) !void {
+    var replay: Replay = .{};
+    var wanted: ?[]const u8 = null;
+
+    var i: usize = 0;
+    while (i < args.len) : (i += 1) {
+        const arg = args[i];
+        if (try takeCount(args, &i, "--typing")) |n| {
+            replay.typing_ms = n;
+        } else if (try takeCount(args, &i, "--max-pause")) |n| {
+            replay.max_pause_ms = n;
+        } else if (try takeCount(args, &i, "--from")) |n| {
+            replay.from = @intCast(n);
+        } else if (try takeCount(args, &i, "--to")) |n| {
+            replay.to = @intCast(n);
+        } else if (try takeText(args, &i, "--prompt")) |text| {
+            replay.prompt = text;
+        } else if (try takeText(args, &i, "--speed")) |text| {
+            replay.speed = std.fmt.parseFloat(f64, text) catch return error.BadCount;
+            if (replay.speed <= 0) return error.BadCount;
+        } else if (std.mem.eql(u8, arg, "--duration")) {
+            replay.duration_only = true;
+        } else if (std.mem.startsWith(u8, arg, "-")) {
+            return error.UnknownFlag;
+        } else {
+            wanted = arg;
+        }
+    }
+
+    var root = try store.openRoot(io, home);
+    defer root.close(io);
+
+    // A suffix works here as it does anywhere else a session is named.
+    const session: []const u8 = if (wanted) |name| blk: {
+        if (try store.findSession(gpa, io, root, name)) |found| break :blk found;
+        return error.NoSuchSession;
+    } else try currentSession();
+    defer if (wanted != null) gpa.free(@constCast(session));
+
+    const numbers = store.listNumbers(gpa, io, root, session) catch return error.NoSuchSession;
+    defer gpa.free(numbers);
+
+    var previous_end: ?i64 = null;
+    var total_ms: u64 = 0;
+
+    for (numbers) |number| {
+        if (number < replay.from or number > replay.to) continue;
+
+        const timing = store.readTiming(gpa, io, root, session, number);
+
+        // The gap since the last command finished is the time somebody spent
+        // reading it and typing the next one.
+        if (previous_end) |ended| {
+            if (timing) |t| total_ms += replay.wait(t.started - ended);
+        }
+
+        if (!replay.duration_only) try out.writeAll(replay.prompt);
+        total_ms += try typeOut(gpa, io, root, session, number, replay, out);
+
+        // Then the command runs, which took as long as it took.
+        if (timing) |t| total_ms += replay.wait(t.duration());
+
+        if (!replay.duration_only) {
+            try writeResource(gpa, io, root, session, number, "out", out);
+            try out.flush();
+        }
+
+        previous_end = if (timing) |t| t.ended else null;
+    }
+
+    // Rounded up, so a tape that waits this long never cuts the end off.
+    if (replay.duration_only) try out.print("{d}\n", .{(total_ms + 999) / 1000});
+}
+
+/// Types the command line out a character at a time, the way it was typed.
+fn typeOut(
+    gpa: std.mem.Allocator,
+    io: Io,
+    root: store.Dir,
+    session: []const u8,
+    number: u32,
+    replay: Replay,
+    out: *Io.Writer,
+) !u64 {
+    var path_buf: [64]u8 = undefined;
+    const sub = try std.fmt.bufPrint(&path_buf, "{s}/{d}/cmd", .{ session, number });
+    const cmd = root.readFileAlloc(io, sub, gpa, .limited(max_resource)) catch "";
+    defer if (cmd.len > 0) gpa.free(cmd);
+
+    const per_char: u64 = if (replay.typing_ms == 0) 0 else @intFromFloat(
+        @as(f64, @floatFromInt(replay.typing_ms)) / replay.speed,
+    );
+
+    if (replay.duration_only) return per_char * cmd.len;
+
+    if (per_char == 0) {
+        try out.writeAll(cmd);
+    } else {
+        for (cmd) |char| {
+            try out.writeAll(&[_]u8{char});
+            try out.flush();
+            sys.sleepMs(per_char);
+        }
+    }
+    try out.writeAll("\r\n");
+    try out.flush();
+    return per_char * cmd.len;
+}
+
+/// Writes a recorded resource through verbatim. `out` is what the terminal
+/// saw, so replaying it raw is what makes the colours come back.
+fn writeResource(
+    gpa: std.mem.Allocator,
+    io: Io,
+    root: store.Dir,
+    session: []const u8,
+    number: u32,
+    name: []const u8,
+    out: *Io.Writer,
+) !void {
+    var path_buf: [64]u8 = undefined;
+    const sub = try std.fmt.bufPrint(&path_buf, "{s}/{d}/{s}", .{ session, number, name });
+    const bytes = root.readFileAlloc(io, sub, gpa, .limited(max_resource)) catch return;
+    defer gpa.free(bytes);
+    try out.writeAll(bytes);
+}
+
+fn takeText(args: []const []const u8, i: *usize, comptime name: []const u8) !?[]const u8 {
+    const arg = args[i.*];
+    if (std.mem.eql(u8, arg, name)) {
+        if (i.* + 1 >= args.len) return error.MissingFlagValue;
+        i.* += 1;
+        return args[i.*];
+    }
+    if (std.mem.startsWith(u8, arg, name ++ "=")) return arg[name.len + 1 ..];
+    return null;
+}
+
+test "a recorded gap is capped so a demo stays watchable" {
+    const replay: Replay = .{ .max_pause_ms = 2000, .speed = 1.0 };
+    try std.testing.expectEqual(@as(u64, 0), replay.delay(0));
+    try std.testing.expectEqual(@as(u64, 0), replay.delay(-5));
+    try std.testing.expectEqual(@as(u64, 500), replay.delay(500));
+    // A minute of somebody reading the screen becomes two seconds.
+    try std.testing.expectEqual(@as(u64, 2000), replay.delay(60_000));
+}
+
+test "speed divides every delay" {
+    const fast: Replay = .{ .max_pause_ms = 4000, .speed = 4.0 };
+    try std.testing.expectEqual(@as(u64, 250), fast.delay(1000));
+    const slow: Replay = .{ .max_pause_ms = 4000, .speed = 0.5 };
+    try std.testing.expectEqual(@as(u64, 2000), slow.delay(1000));
 }

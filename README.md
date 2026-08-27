@@ -10,7 +10,7 @@ Building needs Zig 0.16.0. Running tj needs nothing.
 ```sh
 git clone <this repo> ~/src/tj
 cd ~/src/tj
-make install                          # tj and tj-fence into ~/.local/bin
+make install                          # tj, tj-fence, tj-tape into ~/.local/bin
 ```
 
 `PREFIX=/usr/local make install` to put them elsewhere; anywhere on your
@@ -384,6 +384,46 @@ ends the resource there, which no in-band protocol without escaping can
 avoid; and a terminal with `oxtabs` set expands tabs before tj sees them,
 which cannot be undone. The bytes still reach your screen and will make a
 mess of it, exactly as they would without tj.
+
+## Replaying a session
+
+`tj replay` plays a recording back into the terminal — the prompt, the command
+typing itself out, then the output exactly as it was captured, colours and all:
+
+```sh
+tj replay                     # this session
+tj replay fgpc                # another, by a suffix of its id
+tj replay fgpc --from 4 --to 9 --speed 2
+```
+
+Nothing is re-executed. What cannot be reconstructed is *when* each byte
+arrived, since only the start and end of each interaction were recorded — so
+output appears at once, and the pacing comes from the real command durations
+and the real gaps between commands. Those gaps get capped (`--max-pause`,
+default 2s), because a session where you stared at the screen for a minute
+does not make a watchable demo.
+
+| | |
+|---|---|
+| `--speed X` | divide every delay |
+| `--typing MS` | per character of the command line; `0` shows it at once |
+| `--max-pause MS` | longest single pause, however long the real one was |
+| `--prompt S` | the prompt to draw; tj never records one |
+| `--from N` `--to N` | replay part of a session |
+| `--duration` | print the seconds it would take, and play nothing |
+
+For a GIF, [contrib/tj-tape](contrib/tj-tape) emits a
+[vhs](https://github.com/charmbracelet/vhs) tape that records the replay:
+
+```sh
+tj-tape fgpc demo.gif --speed 2 --from 4 --to 9 > demo.tape
+vhs demo.tape
+```
+
+The tape plays the recording rather than re-running the commands, so the GIF
+shows what actually happened — and a session containing `rm -rf` does not
+re-run it to make a demo. It asks `tj replay --duration` how long the replay
+takes, since vhs cannot wait for a process to exit.
 
 ## Storage
 

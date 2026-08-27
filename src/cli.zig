@@ -17,6 +17,7 @@ pub const Subcommand = enum {
     current,
     last,
     cat,
+    replay,
     resolve,
     complete,
 

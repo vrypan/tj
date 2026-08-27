@@ -29,6 +29,9 @@ const usage =
     \\  last           the last interaction that completed
     \\  cat <ref>...   print what a reference names
     \\                 (--raw / --plain, --head N / --tail N)
+    \\  replay [sess]  play a session back into the terminal
+    \\                 (--speed X, --typing MS, --max-pause MS, --prompt S,
+    \\                  --from N, --to N)
     \\  resolve <ref>  print the path a reference names
     \\  complete <ref> completion candidates for a partial reference
     \\
