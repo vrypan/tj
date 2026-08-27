@@ -190,7 +190,7 @@ ls -l ~/.claude/skills/tj/SKILL.md    # check it resolves; a dangling
 Then let the agent run `tj`, and nothing else. Either per invocation:
 
 ```sh
-cl() { claude -p "$*" --allowedTools "Bash(tj *)"; }
+cl() { claude -p "$*" --allowedTools "Bash(tj *)" | tj-fence; }
 ```
 
 or once, in `~/.claude/settings.json`, after which the wrapper is just
@@ -223,7 +223,7 @@ ask() {
   command pi -p \
     --append-system-prompt ~/Devel/tj/skill/SKILL.md \
     --tools bash \
-    -- "$*"
+    -- "$*" | tj-fence
 }
 ```
 
@@ -266,11 +266,8 @@ carries the goal, exactly as in `pi explain @42`.
 
 An agent's reply is usually markdown, and the fenced blocks in it are exactly
 the parts worth keeping as files. [contrib/tj-fence](contrib/tj-fence) turns
-them into published resources:
-
-```sh
-cl() { claude -p "$*" --allowedTools "Bash(tj *)" | tj-fence; }
-```
+them into published resources, which is the `| tj-fence` in the wrappers
+above:
 
 ```
 $ cl give me a 3-row csv of fruit and price, and a command that sums them
