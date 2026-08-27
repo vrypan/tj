@@ -302,6 +302,8 @@ const Recorder = struct {
             // Ends whatever is still open; a no-op right after `command_end`,
             // which is the usual case since the shell reports both at once.
             .prompt_start => store.finish(null),
+            .resource_begin => |r| store.beginResource(r.path, r.mime),
+            .resource_end => store.endResource(),
             .protocol_error => |payload| store.warn("ignored tj sequence: {s}", .{payload}),
         }
     }

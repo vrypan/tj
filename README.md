@@ -212,6 +212,40 @@ names, so it also covers `git log` paging through `less` and your own
 tools. It applies to recording only: the program renders exactly as it
 would without tj.
 
+## Publishing resources
+
+A program can mark spans of its own output as named files. The output still
+appears on the terminal exactly as it would; tj additionally exposes the
+marked spans under the interaction.
+
+```sh
+printf '\033]5107;tj;begin;files/data.csv;text/csv\033\\'
+printf 'date,amount\n2026-08-01,12.50\n'
+printf '\033]5107;tj;end\033\\'
+```
+
+That interaction then holds `@42/files/data.csv`, addressable and
+completable like any other resource, and usable by anything:
+
+```sh
+sh @42/files/script.sh < @42/files/data.csv
+```
+
+The point is that a program which prints a table, a diff or a script can
+make it directly reusable without inventing a side channel or a structured
+output mode. Plain text stays the interchange format; the marks only add
+addressability.
+
+Names are the program's choice, so they are checked: a name cannot escape
+its interaction directory, and cannot be `cmd`, `out`, `rc`, `meta.json` or
+`log`. Refusals are recorded in the session log. `files/` is a convention,
+not a rule — `err` is a resource too.
+
+Line endings are normalised: a program writes `\n`, the terminal turns it
+into `\r\n` in transit, and the resource gets back the `\n` the program
+meant, so a published script is executable. This channel carries text; a
+pty mangles binary regardless, so binary must be encoded by the program.
+
 ## Storage
 
 The journal is plain files under `~/.tj` (override with `$TJ_HOME` or
@@ -277,6 +311,6 @@ plain proxy.
 Full-screen programs are kept out of the journal, and `tj cat` reads a
 recording back as either bytes or plain text.
 
-Still to come: OSC 5107 semantic output resources, which let a program mark
-spans of its own output as named files under `@42/files/`. [TODO.md](TODO.md)
-keeps that and the other open ends.
+Programs can publish spans of their output as named resources. All four
+milestones in the implementation spec are done; [TODO.md](TODO.md) keeps the
+remaining open ends.

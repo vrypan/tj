@@ -33,6 +33,17 @@ const file_permissions: File.Permissions = @enumFromInt(0o600);
 
 const out_buffer_size = 64 * 1024;
 
+/// Past this a resource stops growing and is flagged truncated. `out` itself
+/// is uncapped: a program can only publish what it also printed.
+const max_resource_bytes = 64 * 1024 * 1024;
+
+/// Per interaction. A program publishing more than this is misbehaving.
+const max_resources = 32;
+
+/// tj's own bookkeeping, which a program may not overwrite by publishing a
+/// resource with the same name.
+const reserved_names = [_][]const u8{ "cmd", "out", "rc", "meta.json", "log" };
+
 pub const Store = struct {
     io: Io,
     gpa: std.mem.Allocator,
@@ -57,6 +68,28 @@ pub const Store = struct {
         /// Keeps full-screen programs out of `out`, the way the alternate
         /// screen keeps them out of the terminal's scrollback.
         fullscreen: altscreen.Filter = .{},
+
+        /// The resource currently being published, if any.
+        open_resource: ?OpenResource = null,
+        published: [max_resources]Published = undefined,
+        published_count: usize = 0,
+    };
+
+    const OpenResource = struct {
+        file: File,
+        written: u64 = 0,
+        /// Index into `published`, whose entry this is filling in.
+        entry: usize,
+        /// A carriage return held back because the next byte decides whether
+        /// it was a line ending. See `writeResource`.
+        pending_cr: bool = false,
+    };
+
+    const Published = struct {
+        path: []u8,
+        mime: []u8,
+        /// The program never closed it, or it hit the size cap.
+        truncated: bool = false,
     };
 
     /// Creates a new session. `home_override` wins over `$TJ_HOME`, which wins
@@ -153,8 +186,160 @@ pub const Store = struct {
     /// Buffered: the poll loop must not wait on the disk to forward a byte.
     pub fn append(self: *Store, bytes: []const u8) void {
         const current = &(self.current orelse return);
+
+        // Before the full-screen filter, not after: publishing a resource is a
+        // deliberate act by the program, so it is kept whatever the screen was
+        // doing at the time.
+        self.appendResource(current, bytes);
+
         var sink: OutputSink = .{ .store = self, .interaction = current };
         current.fullscreen.feed(bytes, &sink);
+    }
+
+    /// Starts capturing output as a named resource of this interaction. The
+    /// bytes stay in `out` as well; the resource is a span of it.
+    pub fn beginResource(self: *Store, path: []const u8, mime: []const u8) void {
+        if (self.disabled) return;
+        const current = &(self.current orelse {
+            // Printed by precmd, or by something outside any command.
+            self.warn("resource {s} published with no interaction open", .{path});
+            return;
+        });
+
+        if (current.open_resource != null) {
+            // No nesting in v1. The open one keeps going.
+            self.warn("resource {s} published while another is open", .{path});
+            return;
+        }
+        if (!validResourcePath(path)) {
+            self.warn("refused resource name {s}", .{path});
+            return;
+        }
+
+        self.openResource(current, path, mime) catch |err| {
+            self.warn("cannot publish resource {s}: {t}", .{ path, err });
+        };
+    }
+
+    fn openResource(self: *Store, current: *Interaction, path: []const u8, mime: []const u8) !void {
+        if (std.mem.lastIndexOfScalar(u8, path, '/')) |cut| {
+            try current.dir.createDirPath(self.io, path[0..cut]);
+        }
+        const file = try current.dir.createFile(self.io, path, .{ .permissions = file_permissions });
+        errdefer file.close(self.io);
+
+        current.open_resource = .{
+            .file = file,
+            .entry = try self.recordPublished(current, path, mime),
+        };
+    }
+
+    /// Finds or makes the `meta.json` entry for this path. Publishing the same
+    /// name twice within one interaction means the last one wins.
+    fn recordPublished(self: *Store, current: *Interaction, path: []const u8, mime: []const u8) !usize {
+        for (current.published[0..current.published_count], 0..) |*entry, i| {
+            if (!std.mem.eql(u8, entry.path, path)) continue;
+            self.warn("resource {s} published twice; keeping the last", .{path});
+            self.gpa.free(entry.mime);
+            entry.mime = try self.gpa.dupe(u8, mime);
+            entry.truncated = false;
+            return i;
+        }
+
+        if (current.published_count == current.published.len) return error.TooManyResources;
+        current.published[current.published_count] = .{
+            .path = try self.gpa.dupe(u8, path),
+            .mime = try self.gpa.dupe(u8, mime),
+        };
+        current.published_count += 1;
+        return current.published_count - 1;
+    }
+
+    fn appendResource(self: *Store, current: *Interaction, bytes: []const u8) void {
+        const open = &(current.open_resource orelse return);
+        const entry = &current.published[open.entry];
+
+        const room = max_resource_bytes - @min(open.written, max_resource_bytes);
+        const take = @min(bytes.len, room);
+        if (take < bytes.len and !entry.truncated) {
+            entry.truncated = true;
+            self.warn("resource {s} hit the size cap", .{entry.path});
+        }
+        if (take == 0) return;
+
+        self.writeResource(current, open, bytes[0..take]) catch |err| {
+            self.warn("cannot write resource {s}: {t}", .{ entry.path, err });
+            entry.truncated = true;
+            open.file.close(self.io);
+            current.open_resource = null;
+        };
+    }
+
+    /// Writes resource bytes, undoing the terminal's newline translation.
+    ///
+    /// A program writes "\n" and the pty turns it into "\r\n" on the way out,
+    /// so that is what tj sees. `out` keeps it, because that is what the
+    /// terminal saw. A resource is different: it is published to be used as a
+    /// file, and the design's own example is a shell script, which will not
+    /// run with a carriage return on its shebang line. The "\r" is an artifact
+    /// of the transport, not something the program wrote.
+    ///
+    /// A lone "\r" is kept: only the pair is translation.
+    fn writeResource(self: *Store, current: *Interaction, open: *OpenResource, bytes: []const u8) !void {
+        var i: usize = 0;
+        while (i < bytes.len) {
+            if (open.pending_cr) {
+                open.pending_cr = false;
+                // Not a line ending after all, so the carriage return was real.
+                if (bytes[i] != '\n') try self.emitResource(open, "\r");
+            }
+
+            const start = i;
+            while (i < bytes.len and bytes[i] != '\r') i += 1;
+            if (i > start) try self.emitResource(open, bytes[start..i]);
+
+            if (i < bytes.len) {
+                // Hold it: the byte that decides may be in the next read.
+                open.pending_cr = true;
+                i += 1;
+            }
+        }
+        _ = current;
+    }
+
+    fn emitResource(self: *Store, open: *OpenResource, bytes: []const u8) !void {
+        try open.file.writePositionalAll(self.io, bytes, open.written);
+        open.written += bytes.len;
+    }
+
+    /// A carriage return held to the very end was never part of a line ending.
+    fn flushResourceTail(self: *Store, open: *OpenResource) void {
+        if (!open.pending_cr) return;
+        open.pending_cr = false;
+        self.emitResource(open, "\r") catch {};
+    }
+
+    pub fn endResource(self: *Store) void {
+        const current = &(self.current orelse return);
+        if (current.open_resource == null) {
+            self.warn("resource end with none open", .{});
+            return;
+        }
+        const open = &current.open_resource.?;
+        self.flushResourceTail(open);
+        open.file.close(self.io);
+        current.open_resource = null;
+    }
+
+    /// A resource the program never closed. The interaction is ending, so what
+    /// was captured is all there will be.
+    fn closeOpenResource(self: *Store, current: *Interaction) void {
+        if (current.open_resource == null) return;
+        const open = &current.open_resource.?;
+        self.flushResourceTail(open);
+        current.published[open.entry].truncated = true;
+        open.file.close(self.io);
+        current.open_resource = null;
     }
 
     /// Called on the periodic tick so `tail -f` on a running command's `out`
@@ -175,6 +360,7 @@ pub const Store = struct {
         self.current = null;
         if (code) |value| current.exit_code = value;
 
+        self.closeOpenResource(&current);
         current.writer.interface.flush() catch {};
         current.file.close(self.io);
 
@@ -190,6 +376,10 @@ pub const Store = struct {
 
         self.writeMeta(&current) catch |err| self.warn("cannot write meta.json: {t}", .{err});
         if (current.expanded) |text| self.gpa.free(text);
+        for (current.published[0..current.published_count]) |entry| {
+            self.gpa.free(entry.path);
+            self.gpa.free(entry.mime);
+        }
         current.dir.close(self.io);
     }
 
@@ -218,6 +408,19 @@ pub const Store = struct {
                 current.fullscreen.suppressed,
             });
         }
+        if (current.published_count > 0) {
+            try writer.writeAll(",\"resources\":{");
+            for (current.published[0..current.published_count], 0..) |entry, i| {
+                if (i > 0) try writer.writeAll(",");
+                // Paths and mime types come from the program, so both are
+                // escaped rather than trusted to be plain.
+                try std.json.Stringify.encodeJsonString(entry.path, .{}, &writer);
+                try writer.writeAll(":{\"mime\":");
+                try std.json.Stringify.encodeJsonString(entry.mime, .{}, &writer);
+                try writer.print(",\"truncated\":{}}}", .{entry.truncated});
+            }
+            try writer.writeAll("}");
+        }
         try writer.writeAll("}\n");
 
         try current.dir.writeFile(self.io, .{
@@ -230,6 +433,7 @@ pub const Store = struct {
     fn disable(self: *Store) void {
         self.disabled = true;
         if (self.current) |*current| {
+            self.closeOpenResource(current);
             current.file.close(self.io);
             current.dir.close(self.io);
             self.current = null;
@@ -246,8 +450,10 @@ pub const Store = struct {
             .permissions = file_permissions,
         }) catch return;
         defer file.close(self.io);
-        _ = file.length(self.io) catch {};
-        file.writeStreamingAll(self.io, line) catch {};
+        // Opening without truncating still starts writing at zero, so each
+        // warning has to be placed after the last one deliberately.
+        const end = file.length(self.io) catch return;
+        file.writePositionalAll(self.io, line, end) catch {};
     }
 };
 
@@ -605,3 +811,128 @@ const OutputSink = struct {
         };
     }
 };
+
+// --- resources published by programs ----------------------------------------
+
+/// A resource name comes from the program, so this is a boundary rather than
+/// a nicety: it decides what a program can write inside the journal.
+pub fn validResourcePath(path: []const u8) bool {
+    if (path.len == 0 or path.len > 256) return false;
+    if (path[0] == '/') return false;
+
+    for (reserved_names) |name| {
+        if (std.mem.eql(u8, path, name)) return false;
+    }
+
+    var segments = std.mem.splitScalar(u8, path, '/');
+    while (segments.next()) |segment| {
+        if (segment.len == 0) return false;
+        if (std.mem.eql(u8, segment, ".") or std.mem.eql(u8, segment, "..")) return false;
+        for (segment) |char| if (char < 0x20) return false;
+    }
+    return true;
+}
+
+test "resource paths that programs may use" {
+    for ([_][]const u8{ "err", "files/data.csv", "a/b/c.txt", "files/.hidden" }) |path| {
+        try std.testing.expect(validResourcePath(path));
+    }
+}
+
+test "resource paths that must be refused" {
+    for ([_][]const u8{
+        // Escaping the interaction directory.
+        "../out", "files/../../etc/passwd", "/etc/passwd", "a//b",
+        "./x",    "..",
+        // Overwriting tj's own bookkeeping.
+                            "cmd",         "out",
+        "rc",     "meta.json",              "log",
+        // Nothing, or control characters.
+                "",
+        "a\x00b", "a\nb",
+    }) |path| {
+        try std.testing.expect(!validResourcePath(path));
+    }
+}
+
+test "a reserved name is only reserved whole" {
+    // `cmd` is tj's; `files/cmd` and `cmd.txt` are the program's business.
+    try std.testing.expect(validResourcePath("files/cmd"));
+    try std.testing.expect(validResourcePath("cmd.txt"));
+}
+
+test "every warning is kept, not written over the last one" {
+    const io = std.testing.io;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+
+    var path_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const len = try tmp.dir.realPath(io, &path_buf);
+
+    var store = try Store.create(std.testing.allocator, io, path_buf[0..len]);
+    store.warn("first warning, which is a long one", .{});
+    store.warn("second", .{});
+    store.warn("third", .{});
+
+    const text = try store.session_dir.readFileAlloc(io, "log", std.testing.allocator, .limited(4096));
+    defer std.testing.allocator.free(text);
+    store.close();
+
+    try std.testing.expectEqualStrings(
+        "first warning, which is a long one\nsecond\nthird\n",
+        text,
+    );
+}
+
+test "a resource keeps the newlines the program wrote, not the pty's" {
+    const io = std.testing.io;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var path_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const len = try tmp.dir.realPath(io, &path_buf);
+
+    // Fed one byte at a time, so a CRLF straddling two reads is covered too.
+    for ([_]usize{ 1, 2, 3, 64 }) |chunk| {
+        var store = try Store.create(std.testing.allocator, io, path_buf[0..len]);
+        store.begin("demo", null);
+        store.beginResource("script.sh", "text/x-shellscript");
+
+        const written = "#!/bin/sh\r\necho hi\r\n\rlone cr\r\n";
+        var i: usize = 0;
+        while (i < written.len) {
+            const end = @min(i + chunk, written.len);
+            store.append(written[i..end]);
+            i = end;
+        }
+        store.endResource();
+
+        const text = try store.current.?.dir.readFileAlloc(io, "script.sh", std.testing.allocator, .limited(4096));
+        defer std.testing.allocator.free(text);
+        store.finish(0);
+        store.close();
+
+        // Line endings normalised; the lone carriage return survives.
+        try std.testing.expectEqualStrings("#!/bin/sh\necho hi\n\rlone cr\n", text);
+    }
+}
+
+test "a carriage return at the very end of a resource is kept" {
+    const io = std.testing.io;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var path_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const len = try tmp.dir.realPath(io, &path_buf);
+
+    var store = try Store.create(std.testing.allocator, io, path_buf[0..len]);
+    store.begin("demo", null);
+    store.beginResource("trailing", "text/plain");
+    store.append("ends with cr\r");
+    store.endResource();
+
+    const text = try store.current.?.dir.readFileAlloc(io, "trailing", std.testing.allocator, .limited(4096));
+    defer std.testing.allocator.free(text);
+    store.finish(0);
+    store.close();
+
+    try std.testing.expectEqualStrings("ends with cr\r", text);
+}

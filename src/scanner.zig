@@ -27,6 +27,9 @@ const bel = 0x07;
 pub const max_osc = 8192;
 
 const tj_prefix = "5107;tj;";
+
+/// What a resource is assumed to hold when the program does not say.
+pub const default_mime = "application/octet-stream";
 const osc133_prefix = "133;";
 
 pub const Event = union(enum) {
@@ -42,6 +45,11 @@ pub const Event = union(enum) {
     command_run,
     /// `OSC 133;D[;rc]` - the command finished.
     command_end: ?u8,
+    /// `OSC 5107;tj;begin;<path>[;<mime>]` - the output that follows is also a
+    /// named resource of this interaction.
+    resource_begin: struct { path: []const u8, mime: []const u8 },
+    /// `OSC 5107;tj;end` - that resource is complete.
+    resource_end,
     /// A malformed or unsupported tj sequence. Carries the payload for the
     /// session log; the sequence itself is dropped.
     protocol_error: []const u8,
@@ -295,9 +303,28 @@ pub const Scanner = struct {
             return;
         }
 
-        // `begin` and `end` publish output resources; not implemented yet, but
-        // already stripped from the stream so programs can emit them safely.
-        if (std.mem.startsWith(u8, rest, "begin;") or std.mem.eql(u8, rest, "end")) return;
+        if (std.mem.startsWith(u8, rest, "begin;")) {
+            const fields = rest["begin;".len..];
+            // Everything past the first separator is the mime type, which may
+            // itself contain separators.
+            const cut = std.mem.indexOfScalar(u8, fields, ';');
+            const path = if (cut) |at| fields[0..at] else fields;
+            const mime = if (cut) |at| fields[at + 1 ..] else "";
+            if (path.len == 0) {
+                sink.event(.{ .protocol_error = payload });
+                return;
+            }
+            sink.event(.{ .resource_begin = .{
+                .path = path,
+                .mime = if (mime.len > 0) mime else default_mime,
+            } });
+            return;
+        }
+
+        if (std.mem.eql(u8, rest, "end")) {
+            sink.event(.resource_end);
+            return;
+        }
 
         sink.event(.{ .protocol_error = payload });
     }
@@ -334,6 +361,10 @@ const Recorder = struct {
     fn deinit(self: *Recorder) void {
         for (self.events.items) |recorded_event| switch (recorded_event) {
             .command_line, .command_expanded, .protocol_error => |text| self.gpa.free(text),
+            .resource_begin => |r| {
+                self.gpa.free(r.path);
+                self.gpa.free(r.mime);
+            },
             else => {},
         };
         self.forwarded.deinit(self.gpa);
@@ -355,6 +386,10 @@ const Recorder = struct {
         const owned: Event = switch (ev) {
             .command_line => |text| .{ .command_line = self.gpa.dupe(u8, text) catch unreachable },
             .command_expanded => |text| .{ .command_expanded = self.gpa.dupe(u8, text) catch unreachable },
+            .resource_begin => |r| .{ .resource_begin = .{
+                .path = self.gpa.dupe(u8, r.path) catch unreachable,
+                .mime = self.gpa.dupe(u8, r.mime) catch unreachable,
+            } },
             .protocol_error => |text| .{ .protocol_error = self.gpa.dupe(u8, text) catch unreachable },
             else => ev,
         };
@@ -526,5 +561,58 @@ test "the forwarded stream is byte-identical to the input when nothing is ours" 
         var r = run(gpa, input, chunk, false);
         defer r.deinit();
         try std.testing.expectEqualStrings(input, r.forwarded.items);
+    }
+}
+
+test "a published resource is announced and stripped" {
+    const gpa = std.testing.allocator;
+    const input = "a\x1b]5107;tj;begin;files/data.csv;text/csv\x1b\\1,2\r\n\x1b]5107;tj;end\x1b\\b";
+    var r = run(gpa, input, input.len, false);
+    defer r.deinit();
+
+    // The content stays in the stream; only the markers go.
+    try std.testing.expectEqualStrings("a1,2\r\nb", r.forwarded.items);
+    try std.testing.expectEqual(@as(usize, 2), r.events.items.len);
+    try std.testing.expectEqualStrings("files/data.csv", r.events.items[0].resource_begin.path);
+    try std.testing.expectEqualStrings("text/csv", r.events.items[0].resource_begin.mime);
+    try std.testing.expect(r.events.items[1] == .resource_end);
+}
+
+test "a resource with no mime type gets the default" {
+    const gpa = std.testing.allocator;
+    const input = "\x1b]5107;tj;begin;err\x1b\\oops\x1b]5107;tj;end\x1b\\";
+    var r = run(gpa, input, input.len, false);
+    defer r.deinit();
+    try std.testing.expectEqualStrings("err", r.events.items[0].resource_begin.path);
+    try std.testing.expectEqualStrings(default_mime, r.events.items[0].resource_begin.mime);
+    try std.testing.expectEqualStrings("oops", r.forwarded.items);
+}
+
+test "begin without a path is a protocol error" {
+    const gpa = std.testing.allocator;
+    const input = "\x1b]5107;tj;begin;\x1b\\";
+    var r = run(gpa, input, input.len, false);
+    defer r.deinit();
+    try std.testing.expectEqual(@as(usize, 1), r.events.items.len);
+    try std.testing.expect(r.events.items[0] == .protocol_error);
+}
+
+test "resource markers survive any chunking" {
+    const gpa = std.testing.allocator;
+    const input =
+        "before\x1b]5107;tj;begin;files/a.txt;text/plain\x1b\\content\x1b]5107;tj;end\x1b\\after";
+    var whole = run(gpa, input, input.len, false);
+    defer whole.deinit();
+
+    var chunk: usize = 1;
+    while (chunk <= input.len) : (chunk += 1) {
+        var piece = run(gpa, input, chunk, false);
+        defer piece.deinit();
+        try std.testing.expectEqualStrings(whole.forwarded.items, piece.forwarded.items);
+        try std.testing.expectEqual(whole.events.items.len, piece.events.items.len);
+        try std.testing.expectEqualStrings(
+            whole.events.items[0].resource_begin.path,
+            piece.events.items[0].resource_begin.path,
+        );
     }
 }

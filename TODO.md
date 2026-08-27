@@ -47,19 +47,6 @@ running under an integration it does not own, so it is worth having.
 
 ## Larger, and deliberately deferred
 
-### M4 - OSC 5107 output resources
-
-The remaining milestone from `SPEC.md` §11. A program marks spans of its own
-output as named resources, which show up as `@42/files/data.csv`.
-
-Partly in place already: the scanner recognises `begin` and `end` and strips
-them from the stream, so a program can emit them today without corrupting
-anything. What is missing is materialising the spans as files, the
-`resources` map in `meta.json`, and the completion of `@42/files/<TAB>`.
-
-`SPEC.md` §5 has the full protocol, including the path validation rules,
-which are a security boundary: the program chooses the name.
-
 ### Retention
 
 Sessions persist indefinitely. `TJ-spec.md` lists retention and redaction as
@@ -97,6 +84,12 @@ is implemented. Revisit only if it turns out not to be enough.
 ---
 
 ## Smaller notes
+
+- `test "signals sent to tj are forwarded to the shell"` is timing
+  dependent and fails occasionally under load: it waits for the shell to
+  print `READY` before sending the signal, and can time out before that
+  arrives. Passed 3/3 on a re-run. Worth making it wait properly rather
+  than on a deadline.
 
 - `tj.plugin.zsh` forks `base64` once per command, in `preexec`. A few
   milliseconds on every interactive command. Encoding is needed so that

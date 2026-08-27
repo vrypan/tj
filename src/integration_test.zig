@@ -756,3 +756,133 @@ test "a session that could not record but said why is kept" {
 
     try std.testing.expectEqual(@as(usize, 1), try scratch.sessions());
 }
+
+// --- resources published by programs ----------------------------------------
+
+/// Emits the OSC 5107 sequences a cooperating program would, from a plain sh
+/// script, so the test does not depend on any program that happens to.
+fn publisher(gpa: std.mem.Allocator, body: []const u8) ![]u8 {
+    return std.fmt.allocPrint(gpa, "printf '{s}'", .{body});
+}
+
+test "a program can publish parts of its output as named resources" {
+    if (!haveZsh()) return error.SkipZigTest;
+    const gpa = std.testing.allocator;
+
+    var journal = try Journal.open(gpa);
+    defer journal.close();
+
+    const script = try publisher(gpa, "before\\n" ++
+        "\\033]5107;tj;begin;files/data.csv;text/csv\\033\\\\" ++
+        "date,amount\\n2026-08-01,12.50\\n" ++
+        "\\033]5107;tj;end\\033\\\\" ++
+        "after\\n");
+    defer gpa.free(script);
+    try recordSession(gpa, &journal, &.{script});
+
+    const resource = try journal.read(gpa, "1/files/data.csv");
+    defer gpa.free(resource);
+    try std.testing.expectEqualStrings("date,amount\n2026-08-01,12.50\n", resource);
+
+    // The resource is a span of the output, not a replacement for it.
+    const out = try journal.read(gpa, "1/out");
+    defer gpa.free(out);
+    try std.testing.expect(std.mem.indexOf(u8, out, "2026-08-01,12.50") != null);
+    try std.testing.expect(std.mem.indexOf(u8, out, "before") != null);
+    try std.testing.expect(std.mem.indexOf(u8, out, "after") != null);
+    // The markers themselves are protocol, not output.
+    try std.testing.expect(std.mem.indexOf(u8, out, "5107") == null);
+
+    const meta = try journal.read(gpa, "1/meta.json");
+    defer gpa.free(meta);
+    try std.testing.expect(std.mem.indexOf(u8, meta, "\"files/data.csv\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, meta, "\"text/csv\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, meta, "\"truncated\":false") != null);
+}
+
+test "a resource name cannot escape the interaction or overwrite tj's own files" {
+    if (!haveZsh()) return error.SkipZigTest;
+    const gpa = std.testing.allocator;
+
+    var journal = try Journal.open(gpa);
+    defer journal.close();
+
+    const script = try publisher(gpa, "\\033]5107;tj;begin;../../escape\\033\\\\PWNED\\033]5107;tj;end\\033\\\\" ++
+        "\\033]5107;tj;begin;out\\033\\\\CLOBBER\\033]5107;tj;end\\033\\\\" ++
+        "\\033]5107;tj;begin;/etc/passwd\\033\\\\ROOT\\033]5107;tj;end\\033\\\\" ++
+        "\\033]5107;tj;begin;ok/kept.txt\\033\\\\legit\\033]5107;tj;end\\033\\\\");
+    defer gpa.free(script);
+    try recordSession(gpa, &journal, &.{script});
+
+    // The one valid name is published.
+    const kept = try journal.read(gpa, "1/ok/kept.txt");
+    defer gpa.free(kept);
+    try std.testing.expectEqualStrings("legit", kept);
+
+    // The rest are refused, and `out` still holds what tj put there.
+    var dir = try journal.sessionDir();
+    defer dir.close(std.testing.io);
+    try std.testing.expectError(error.FileNotFound, dir.openFile(std.testing.io, "1/escape", .{}));
+
+    const out = try journal.read(gpa, "1/out");
+    defer gpa.free(out);
+    // Present as output, because the program printed it; not as the file.
+    try std.testing.expect(std.mem.indexOf(u8, out, "CLOBBER") != null);
+    try std.testing.expect(std.mem.indexOf(u8, out, "PWNED") != null);
+
+    // And every refusal is on the record.
+    const log = try journal.read(gpa, "log");
+    defer gpa.free(log);
+    try std.testing.expect(std.mem.indexOf(u8, log, "../../escape") != null);
+    try std.testing.expect(std.mem.indexOf(u8, log, "refused resource name out") != null);
+    try std.testing.expect(std.mem.indexOf(u8, log, "/etc/passwd") != null);
+}
+
+test "a resource the program never closed is flagged truncated" {
+    if (!haveZsh()) return error.SkipZigTest;
+    const gpa = std.testing.allocator;
+
+    var journal = try Journal.open(gpa);
+    defer journal.close();
+
+    const script = try publisher(gpa, "\\033]5107;tj;begin;partial\\033\\\\half a file");
+    defer gpa.free(script);
+    try recordSession(gpa, &journal, &.{script});
+
+    const resource = try journal.read(gpa, "1/partial");
+    defer gpa.free(resource);
+    try std.testing.expect(std.mem.indexOf(u8, resource, "half a file") != null);
+
+    const meta = try journal.read(gpa, "1/meta.json");
+    defer gpa.free(meta);
+    try std.testing.expect(std.mem.indexOf(u8, meta, "\"truncated\":true") != null);
+}
+
+test "published resources are addressable and completable" {
+    if (!haveZsh()) return error.SkipZigTest;
+    const gpa = std.testing.allocator;
+
+    var journal = try Journal.open(gpa);
+    defer journal.close();
+
+    const script = try publisher(gpa, "\\033]5107;tj;begin;files/note.txt;text/plain\\033\\\\hello resource\\033]5107;tj;end\\033\\\\");
+    defer gpa.free(script);
+    try recordSession(gpa, &journal, &.{script});
+    try journal.enter(gpa);
+
+    const home = try journal.homeArg(gpa);
+    defer gpa.free(home);
+
+    var read = try run(gpa, &.{ "--home", home, "cat", "@1/files/note.txt" }, 24, 80);
+    defer read.out.deinit(gpa);
+    try std.testing.expect(std.mem.indexOf(u8, read.out.items, "hello resource") != null);
+
+    var offered = try run(gpa, &.{ "--home", home, "complete", "@1/files/" }, 24, 80);
+    defer offered.out.deinit(gpa);
+    try std.testing.expect(std.mem.indexOf(u8, offered.out.items, "@1/files/note.txt") != null);
+
+    // `files/` shows up as a directory alongside the core resources.
+    var top = try run(gpa, &.{ "--home", home, "complete", "@1/" }, 24, 80);
+    defer top.out.deinit(gpa);
+    try std.testing.expect(std.mem.indexOf(u8, top.out.items, "@1/files/") != null);
+}
