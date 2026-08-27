@@ -41,7 +41,7 @@ unconditionally is safe, and it costs nothing in shells that never run under
 tj.
 
 **Without this line tj still runs and your terminal still behaves normally,
-but nothing is recorded** and `tj list` comes back empty. That is the one
+but nothing is recorded** and `tj hist` comes back empty. That is the one
 setup step worth not skipping.
 
 ## Use
@@ -49,23 +49,27 @@ setup step worth not skipping.
 Start a session:
 
 ```sh
-tj                        # run $SHELL under the journal
-tj -- zsh -f              # run a specific command instead
+tj run                    # run $SHELL under the journal
+tj run -- zsh -f          # run a specific command instead
 ```
+
+Starting a session takes an explicit `run`: a session changes what the shell
+you are typing into is, and `tj` on its own prints help rather than putting
+you somewhere you did not mean to be.
 
 Everything inside behaves as it always did. Check that recording works:
 
 ```sh
 echo hello
-tj list                   # 1  0    echo hello
+tj hist                   # 1  0    echo hello
 tj cat @1                 # hello
 ```
 
 Each command becomes a numbered interaction:
 
 ```sh
+tj hist                   # interactions of this session: number, status, command
 tj sessions               # every session, newest first
-tj list                   # interactions of this session: number, status, command
 tj current                # this session's id
 tj last                   # the last interaction that completed
 ```
@@ -252,7 +256,7 @@ cross builds dependency-free.
 
 ## Status
 
-The proxy is transparent: `tj -- <command>` is indistinguishable from
+The proxy is transparent: `tj run -- <command>` is indistinguishable from
 running the command directly. The pty is allocated and sized from the outer
 terminal, both byte streams are forwarded unchanged, `SIGWINCH` propagates,
 signals sent to `tj` reach the shell, and the terminal is handed back with

@@ -31,7 +31,9 @@ pub fn run(
     switch (sub.which) {
         .current => try out.print("{s}\n", .{try currentSession()}),
         .sessions => try listSessions(gpa, io, sub.home, out),
-        .list => try listInteractions(gpa, io, sub.home, sub.args, out),
+        .hist => try listInteractions(gpa, io, sub.home, sub.args, out),
+        // Handled as the proxy, never as a journal query.
+        .run => unreachable,
         .last => try printLast(gpa, io, sub.home, out),
         .resolve => try resolveReference(gpa, io, sub.home, sub.args, out),
         .complete => try completeReference(gpa, io, sub.home, sub.args, out),

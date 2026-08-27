@@ -33,7 +33,7 @@ test "exit status of the wrapped command is tj's exit status" {
     for ([_]u8{ 0, 3, 42 }) |want| {
         var script_buf: [32]u8 = undefined;
         const script = try std.fmt.bufPrint(&script_buf, "exit {d}", .{want});
-        var r = try run(gpa, &.{ "--", "/bin/sh", "-c", script }, 24, 80);
+        var r = try run(gpa, &.{ "run", "--", "/bin/sh", "-c", script }, 24, 80);
         defer r.out.deinit(gpa);
         try std.testing.expectEqual(want, r.code);
     }
@@ -41,35 +41,35 @@ test "exit status of the wrapped command is tj's exit status" {
 
 test "a command killed by a signal reports 128+signal" {
     const gpa = std.testing.allocator;
-    var r = try run(gpa, &.{ "--", "/bin/sh", "-c", "kill -TERM $$" }, 24, 80);
+    var r = try run(gpa, &.{ "run", "--", "/bin/sh", "-c", "kill -TERM $$" }, 24, 80);
     defer r.out.deinit(gpa);
     try std.testing.expectEqual(@as(u8, 128 + 15), r.code);
 }
 
 test "the outer window size reaches the wrapped command" {
     const gpa = std.testing.allocator;
-    var r = try run(gpa, &.{ "--", "/bin/sh", "-c", "stty size" }, 31, 113);
+    var r = try run(gpa, &.{ "run", "--", "/bin/sh", "-c", "stty size" }, 31, 113);
     defer r.out.deinit(gpa);
     try std.testing.expect(std.mem.indexOf(u8, r.out.items, "31 113") != null);
 }
 
 test "the wrapped command sees a tty" {
     const gpa = std.testing.allocator;
-    var r = try run(gpa, &.{ "--", "/bin/sh", "-c", "test -t 0 && test -t 1 && echo ISTTY" }, 24, 80);
+    var r = try run(gpa, &.{ "run", "--", "/bin/sh", "-c", "test -t 0 && test -t 1 && echo ISTTY" }, 24, 80);
     defer r.out.deinit(gpa);
     try std.testing.expect(std.mem.indexOf(u8, r.out.items, "ISTTY") != null);
 }
 
 test "a command that cannot be executed exits 127" {
     const gpa = std.testing.allocator;
-    var r = try run(gpa, &.{ "--", "/nonexistent/program" }, 24, 80);
+    var r = try run(gpa, &.{ "run", "--", "/nonexistent/program" }, 24, 80);
     defer r.out.deinit(gpa);
     try std.testing.expectEqual(@as(u8, 127), r.code);
 }
 
 test "input typed at the outer terminal reaches the shell" {
     const gpa = std.testing.allocator;
-    const session = try harness.spawn(gpa, &.{ tj, "--", "/bin/sh" }, 24, 80);
+    const session = try harness.spawn(gpa, &.{ tj, "run", "--", "/bin/sh" }, 24, 80);
     var out: std.ArrayList(u8) = .empty;
     defer out.deinit(gpa);
 
@@ -85,7 +85,7 @@ test "resizing the outer terminal resizes the inner one" {
     const gpa = std.testing.allocator;
     const session = try harness.spawn(
         gpa,
-        &.{ tj, "--", "/bin/sh", "-c", "trap 'stty size; exit 0' WINCH; echo READY; sleep 5" },
+        &.{ tj, "run", "--", "/bin/sh", "-c", "trap 'stty size; exit 0' WINCH; echo READY; sleep 5" },
         24,
         80,
     );
@@ -103,7 +103,7 @@ test "signals sent to tj are forwarded to the shell" {
     const gpa = std.testing.allocator;
     const session = try harness.spawn(
         gpa,
-        &.{ tj, "--", "/bin/sh", "-c", "trap 'echo GOTTERM; exit 9' TERM; echo READY; sleep 5" },
+        &.{ tj, "run", "--", "/bin/sh", "-c", "trap 'echo GOTTERM; exit 9' TERM; echo READY; sleep 5" },
         24,
         80,
     );
@@ -237,7 +237,7 @@ fn recordSession(gpa: std.mem.Allocator, journal: *Journal, script: []const []co
     const home = try journal.homeArg(gpa);
     defer gpa.free(home);
 
-    const session = try harness.spawn(gpa, &.{ tj, "--home", home, "--", "/bin/zsh", "-i" }, 24, 80);
+    const session = try harness.spawn(gpa, &.{ tj, "--home", home, "run", "--", "/bin/zsh", "-i" }, 24, 80);
     var out: std.ArrayList(u8) = .empty;
     defer out.deinit(gpa);
 
@@ -294,7 +294,7 @@ test "tj's own control sequences never reach the terminal" {
     const home = try journal.homeArg(gpa);
     defer gpa.free(home);
 
-    const session = try harness.spawn(gpa, &.{ tj, "--home", home, "--", "/bin/zsh", "-i" }, 24, 80);
+    const session = try harness.spawn(gpa, &.{ tj, "--home", home, "run", "--", "/bin/zsh", "-i" }, 24, 80);
     var out: std.ArrayList(u8) = .empty;
     defer out.deinit(gpa);
 
@@ -338,7 +338,7 @@ test "an interrupted session leaves the interaction without an rc" {
     const home = try journal.homeArg(gpa);
     defer gpa.free(home);
 
-    const session = try harness.spawn(gpa, &.{ tj, "--home", home, "--", "/bin/zsh", "-i" }, 24, 80);
+    const session = try harness.spawn(gpa, &.{ tj, "--home", home, "run", "--", "/bin/zsh", "-i" }, 24, 80);
     var out: std.ArrayList(u8) = .empty;
     defer out.deinit(gpa);
 
@@ -537,7 +537,7 @@ test "the terminal still sees the full-screen program" {
     const home = try journal.homeArg(gpa);
     defer gpa.free(home);
 
-    const session = try harness.spawn(gpa, &.{ tj, "--home", home, "--", "/bin/zsh", "-i" }, 24, 80);
+    const session = try harness.spawn(gpa, &.{ tj, "--home", home, "run", "--", "/bin/zsh", "-i" }, 24, 80);
     var out: std.ArrayList(u8) = .empty;
     defer out.deinit(gpa);
 

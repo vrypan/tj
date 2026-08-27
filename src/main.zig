@@ -18,23 +18,24 @@ const usage =
     \\tj - Terminal Journal
     \\
     \\Usage:
-    \\  tj [flags] [-- command ...]   run a shell (default: $SHELL) under the journal
-    \\  tj <subcommand> [args ...]    query the journal
+    \\  tj run [flags] [-- command ...]   start a session, recording what happens in it
+    \\  tj <subcommand> [args ...]        work with what was recorded
+    \\
+    \\Subcommands:
+    \\  run            run $SHELL, or a given command, under the journal
+    \\  hist           the interactions of this session (also: history)
+    \\  sessions       every session, newest first
+    \\  current        this session's id
+    \\  last           the last interaction that completed
+    \\  cat <ref>...   print what a reference names (--raw / --plain)
+    \\  resolve <ref>  print the path a reference names
+    \\  complete <ref> completion candidates for a partial reference
     \\
     \\Flags:
     \\  --home <dir>   journal location (default: $TJ_HOME, else ~/.tj)
-    \\  --keep-osc     forward OSC 5107 sequences to the terminal instead of stripping them
+    \\  --keep-osc     forward tj's own control sequences instead of stripping them
     \\  -h, --help     show this help
     \\  -V, --version  show the version
-    \\
-    \\Subcommands:
-    \\  current        print the current session id
-    \\  last           print the last completed interaction number
-    \\  list [session] list the interactions of a session
-    \\  sessions       list sessions, newest first
-    \\  cat <ref>...   print what a reference names (--raw / --plain)
-    \\  resolve <ref>  print the path a journal reference names
-    \\  complete <ref> completion candidates for a partial reference
     \\
     \\References name previous computations the way paths name files:
     \\  @42/out        interaction 42 of this session
@@ -52,9 +53,12 @@ pub fn main(init: std.process.Init) !u8 {
 
     const command = cli.parse(args[1..]) catch |err| {
         try write(init.io, .stderr(), switch (err) {
-            error.UnknownFlag => "tj: unrecognised argument (use `tj -- <command>` to run a program)\n",
-            error.MissingFlagValue => "tj: --home needs a directory\n",
+            error.UnknownFlag => "tj: unrecognised flag\n\n",
+            error.MissingFlagValue => "tj: --home needs a directory\n\n",
+            error.UnknownSubcommand => "tj: unknown subcommand\n\n",
+            error.MissingRun => "tj: to run something under the journal, say `tj run -- <command>`\n\n",
         });
+        try write(init.io, .stderr(), usage);
         return 2;
     };
 
