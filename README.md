@@ -15,7 +15,7 @@ Building needs Zig 0.16.0. Running tj needs nothing.
 ```sh
 git clone <this repo> ~/src/tj
 cd ~/src/tj
-make install                          # tj, tj-fence, tj-tape into ~/.local/bin
+make install                          # tj and contrib tools into ~/.local/bin
 ```
 
 `PREFIX=/usr/local make install` to put them elsewhere; anywhere on your

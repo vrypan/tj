@@ -1,0 +1,253 @@
+#!/usr/bin/env bash
+
+usage() {
+    cat <<'EOF'
+Usage: tj-grep [TJ_OPTIONS] [RG_OPTIONS] PATTERN
+
+Search the terminal journal with ripgrep.
+
+TJ options:
+  -a, --all    Search all journals
+      --cmd    Search commands only
+      --out    Search output only
+  -h, --help   Show this help
+
+TJ options must precede ripgrep options.
+
+Examples:
+  tj-grep panic
+  tj-grep --cmd -i docker
+  tj-grep --out -C 2 'connection refused'
+  tj-grep --all -F 'example.com'
+  tj-grep -- --pattern-starting-with-a-dash
+EOF
+}
+
+command -v rg >/dev/null 2>&1 || {
+    echo "tj-grep: ripgrep (rg) is required" >&2
+    exit 127
+}
+
+search_all=false
+search_cmd=true
+search_out=true
+resource_selected=false
+
+while (($#)); do
+    case "$1" in
+        -a|--all)
+            search_all=true
+            shift
+            ;;
+        --cmd)
+            if ! $resource_selected; then
+                search_cmd=false
+                search_out=false
+                resource_selected=true
+            fi
+            search_cmd=true
+            shift
+            ;;
+        --out)
+            if ! $resource_selected; then
+                search_cmd=false
+                search_out=false
+                resource_selected=true
+            fi
+            search_out=true
+            shift
+            ;;
+        -h|--help)
+            usage
+            exit 0
+            ;;
+        --)
+            # Keep -- so rg also stops parsing options.
+            break
+            ;;
+        *)
+            # Remaining arguments belong to rg.
+            break
+            ;;
+    esac
+done
+
+(($#)) || {
+    usage >&2
+    exit 2
+}
+
+tj_home=${TJ_HOME:-"$HOME/.tj"}
+
+[[ -d "$tj_home" ]] || {
+    echo "tj-grep: journal home not found: $tj_home" >&2
+    exit 1
+}
+
+scopes=()
+
+if $search_all; then
+    scopes=(.)
+else
+    [[ -n ${TJ_JOURNAL:-} ]] || {
+        echo "tj-grep: not inside a tj journal writer; use --all" >&2
+        exit 2
+    }
+
+    [[ -d "$tj_home/$TJ_JOURNAL" ]] || {
+        echo "tj-grep: current journal not found: $TJ_JOURNAL" >&2
+        exit 1
+    }
+
+    scopes=("$TJ_JOURNAL")
+fi
+
+globs=()
+
+$search_cmd && globs+=(--glob cmd)
+$search_out && globs+=(--glob out)
+
+rg_color=never
+if [[ -t 1 && -z ${NO_COLOR+x} ]]; then
+    rg_color=always
+fi
+
+current_journal=${TJ_JOURNAL:-}
+current_entry=
+
+# The zsh preexec hook opens this interaction, then advances TJ_NEXT. Exclude
+# the interaction running tj-grep so its own command and partial out cannot
+# become search results.
+if [[ ${TJ_NEXT:-} =~ ^[0-9]+$ ]] && ((TJ_NEXT > 1)); then
+    current_entry=$((TJ_NEXT - 1))
+fi
+
+# When results are going directly to the terminal inside a writer, wrap only
+# the result lines in a noout region. The OSC markers travel in the same stream
+# as the results, preserving their order. Redirected output stays plain data.
+noout_begin=
+noout_end=
+if [[ -n $current_journal && -t 1 ]]; then
+    noout_begin=$'\033]5107;tj;noout\033\\'
+    noout_end=$'\033]5107;tj;end\033\\'
+fi
+
+(
+    cd "$tj_home" || exit 1
+
+    rg \
+        --text \
+        --no-line-number \
+        --with-filename \
+        --no-heading \
+        --color "$rg_color" \
+        --colors 'path:none' \
+        --colors 'line:none' \
+        --colors 'column:none' \
+        --colors 'match:fg:red' \
+        --colors 'match:style:bold' \
+        "${globs[@]}" \
+        "$@" \
+        "${scopes[@]}"
+) |
+awk \
+    -v show_journal="$search_all" \
+    -v current_journal="$current_journal" \
+    -v current_entry="$current_entry" \
+    -v noout_begin="$noout_begin" \
+    -v noout_end="$noout_end" '
+function print_result(line) {
+    if (!noout_started && noout_begin != "") {
+        printf "%s", noout_begin
+        noout_started = 1
+    }
+    print line
+}
+
+function emit(line,    path, journal, entry, resource, rest, ref, tail) {
+    path = line
+    sub(/^\.\//, "", path)
+
+    journal = path
+    sub(/\/.*/, "", journal)
+
+    rest = path
+    sub("^[^/]+/", "", rest)
+
+    entry = rest
+    sub(/\/.*/, "", entry)
+
+    sub("^[^/]+/", "", rest)
+
+    if (rest ~ /^cmd[:-]/)
+        resource = "cmd"
+    else if (rest ~ /^out[:-]/)
+        resource = "out"
+    else {
+        if (separator && found)
+            print_result("--")
+
+        separator = 0
+        print_result(line)
+        found = 1
+        return
+    }
+
+    if (journal == current_journal && entry == current_entry)
+        return
+
+    # Preserve rg delimiters:
+    #
+    #   :text    matching line
+    #   -text    context line
+    tail = substr(rest, length(resource) + 1)
+
+    if (show_journal == "true")
+        ref = "@" journal "." entry "/" resource
+    else
+        ref = "@" entry "/" resource
+
+    if (substr(tail, 1, 1) == ":")
+        tail = ": " substr(tail, 2)
+    else if (substr(tail, 1, 1) == "-")
+        tail = "- " substr(tail, 2)
+
+    if (separator && found)
+        print_result("--")
+
+    separator = 0
+    print_result(ref tail)
+    found = 1
+}
+
+$0 == "--" {
+    separator = 1
+    next
+}
+
+{
+    emit($0)
+}
+
+END {
+    if (noout_started)
+        printf "%s", noout_end
+    if (!found)
+        exit 1
+}
+'
+
+statuses=("${PIPESTATUS[@]}")
+
+rg_status=${statuses[0]}
+filter_status=${statuses[1]}
+
+# rg returns:
+#   0  matches found
+#   1  no matches
+#   >1 error
+if ((rg_status > 1)); then
+    exit "$rg_status"
+fi
+
+exit "$filter_status"

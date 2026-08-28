@@ -27,14 +27,15 @@ PREFIX ?= $(HOME)/.local
 build:
 	$(ZIG) build
 
-# Both, because the agent wrappers pipe one into the other and a missing
-# tj-fence fails as an unhelpful "command not found".
+# Install the companion tools with the binary so documented workflows do not
+# depend on reaching back into a source checkout.
 install: build
 	install -d $(PREFIX)/bin
 	install -m 755 zig-out/bin/tj $(PREFIX)/bin/
 	install -m 755 contrib/tj-fence $(PREFIX)/bin/
+	install -m 755 contrib/tj-grep $(PREFIX)/bin/
 	install -m 755 contrib/tj-tape $(PREFIX)/bin/
-	@echo "installed tj, tj-fence and tj-tape in $(PREFIX)/bin"
+	@echo "installed tj, tj-fence, tj-grep and tj-tape in $(PREFIX)/bin"
 
 test:
 	$(ZIG) build test
