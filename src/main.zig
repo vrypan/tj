@@ -45,6 +45,8 @@ const usage =
     \\                  tag, query, remove, or list interaction tags
     \\  pin [@ref | --remove @ref]
     \\                  pin, unpin, or list pinned interactions
+    \\  grep [--all] [--cmd] [--out] [-i] [--color[=WHEN]] [--] PATTERN
+    \\                  search journal commands and output for a literal
     \\  rm <@ref | @ref/out | @N..@M>
     \\  rm --journal <id> [--force]
     \\                  remove recorded data or an inactive journal
@@ -110,7 +112,7 @@ pub fn main(init: std.process.Init) !u8 {
         .subcommand => |sub| {
             var buf: [4096]u8 = undefined;
             var writer: Io.File.Writer = .init(.stdout(), init.io, &buf);
-            commands.run(arena, init.io, sub, &writer.interface) catch |err| {
+            const status = commands.run(arena, init.io, sub, &writer.interface) catch |err| {
                 writer.interface.flush() catch {};
                 try write(init.io, .stderr(), switch (err) {
                     error.NotInJournal => "tj: not inside a tj journal writer\n",
@@ -147,7 +149,7 @@ pub fn main(init: std.process.Init) !u8 {
                 return if (err == error.NoSuchInteraction) 2 else 1;
             };
             try writer.interface.flush();
-            return 0;
+            return status;
         },
         .proxy => |opts| {
             const result = proxy.run(arena, init.io, opts) catch |err| {
@@ -182,6 +184,7 @@ test {
     _ = @import("altscreen.zig");
     _ = @import("plain.zig");
     _ = @import("store.zig");
+    _ = @import("search.zig");
     _ = commands;
     _ = noout;
 }

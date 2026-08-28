@@ -43,6 +43,20 @@ The whole index is a few hundred tokens even for a long journal. The output
 of a single interaction can be 50K. **Read the index first and fetch
 deliberately.**
 
+When the user gives a distinctive literal rather than an interaction number,
+search narrowly instead of opening many outputs:
+
+```sh
+tj grep --out 'connection refused'
+tj grep --cmd 'docker compose'
+```
+
+Native grep is fixed-string search; it does not interpret regular expressions.
+Use `tj hist` to browse, and use `tj grep --all LITERAL` only when evidence from
+other journals is relevant. Search results are deliberately omitted from the
+current interaction when displayed in its terminal, so they do not become the
+next search's output matches.
+
 Then take only what you need:
 
 ```sh

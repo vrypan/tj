@@ -74,6 +74,31 @@ fn runNonTty(gpa: std.mem.Allocator, args: []const []const u8) !std.process.RunR
     });
 }
 
+fn runNonTtyInJournal(
+    gpa: std.mem.Allocator,
+    args: []const []const u8,
+    journal: []const u8,
+    next: []const u8,
+) !std.process.RunResult {
+    var argv: std.ArrayList([]const u8) = .empty;
+    defer argv.deinit(gpa);
+    try argv.append(gpa, tj);
+    try argv.appendSlice(gpa, args);
+    var environ = try std.process.Environ.createMap(std.testing.environ, gpa);
+    defer environ.deinit();
+    try environ.put("TJ_JOURNAL", journal);
+    try environ.put("TJ_NEXT", next);
+    // The native command must not depend on the optional ripgrep companion.
+    try environ.put("PATH", "");
+    try environ.put("GREP_COLORS", "mt=01;31");
+    return std.process.run(gpa, std.testing.io, .{
+        .argv = argv.items,
+        .environ_map = &environ,
+        .stdout_limit = .limited(1 << 20),
+        .stderr_limit = .limited(1 << 20),
+    });
+}
+
 /// Drains a large PTY transcript without retaining bytes that precede its
 /// final marker. This keeps the large-file regression honest about memory.
 fn finishKeepingTail(
@@ -1882,6 +1907,221 @@ test "tj noout syntax and journal preconditions fail without emitting OSC" {
     try std.testing.expectEqual(@as(u8, 1), outside.term.exited);
     try std.testing.expect(std.mem.indexOf(u8, outside.stdout, "5107;tj") == null);
     try std.testing.expect(std.mem.indexOf(u8, outside.stderr, "inside a tj journal writer") != null);
+}
+
+test "native grep searches literal command and output lines with stable statuses" {
+    if (!haveZsh()) return error.SkipZigTest;
+    const gpa = std.testing.allocator;
+    const io = std.testing.io;
+    var journal = try Journal.open(gpa);
+    defer journal.close();
+    const producer = try journal.fixture(gpa, "grep-producer.sh", "printf 'OUTPUT_LITERAL_012\\nMixedAscii012\\n'\n");
+    defer gpa.free(producer);
+    const producer_command = try std.fmt.allocPrint(gpa, "/bin/sh '{s}'", .{producer});
+    defer gpa.free(producer_command);
+    try recordJournal(gpa, &journal, &.{ ": COMMAND_LITERAL_012", producer_command, ": '[x].*'", "printf 'BOTH_LITERAL_012\\n'" });
+    try journal.enter(gpa);
+    defer leaveJournal();
+    sys.setEnv("TJ_NEXT", "");
+    const home = try journal.homeArg(gpa);
+    defer gpa.free(home);
+    const id = try journal.journalName(gpa);
+    defer gpa.free(id);
+
+    const command_only = try runNonTtyInJournal(gpa, &.{ "--home", home, "grep", "--cmd", "COMMAND_LITERAL_012" }, id, "");
+    defer gpa.free(command_only.stdout);
+    defer gpa.free(command_only.stderr);
+    try std.testing.expectEqual(@as(u8, 0), command_only.term.exited);
+    try std.testing.expectEqualStrings("@1/cmd: : COMMAND_LITERAL_012\n", command_only.stdout);
+    try std.testing.expectEqualStrings("", command_only.stderr);
+
+    const automatic_pipe = try runNonTtyInJournal(gpa, &.{ "--home", home, "grep", "--cmd", "--color", "COMMAND_LITERAL_012" }, id, "");
+    defer gpa.free(automatic_pipe.stdout);
+    defer gpa.free(automatic_pipe.stderr);
+    try std.testing.expectEqualStrings(command_only.stdout, automatic_pipe.stdout);
+
+    const forced_color = try runNonTtyInJournal(gpa, &.{ "--home", home, "grep", "--cmd", "--color=always", "COMMAND_LITERAL_012" }, id, "");
+    defer gpa.free(forced_color.stdout);
+    defer gpa.free(forced_color.stderr);
+    try std.testing.expectEqualStrings("@1/cmd: : \x1b[01;31mCOMMAND_LITERAL_012\x1b[m\n", forced_color.stdout);
+
+    const disabled_color = try runNonTtyInJournal(gpa, &.{ "--home", home, "grep", "--cmd", "--color=never", "COMMAND_LITERAL_012" }, id, "");
+    defer gpa.free(disabled_color.stdout);
+    defer gpa.free(disabled_color.stderr);
+    try std.testing.expectEqualStrings(command_only.stdout, disabled_color.stdout);
+
+    const output_only = try runNonTtyInJournal(gpa, &.{ "--home", home, "grep", "--out", "OUTPUT_LITERAL_012" }, id, "");
+    defer gpa.free(output_only.stdout);
+    defer gpa.free(output_only.stderr);
+    try std.testing.expectEqual(@as(u8, 0), output_only.term.exited);
+    try std.testing.expectEqualStrings("@2/out: OUTPUT_LITERAL_012\r\n", output_only.stdout);
+
+    const folded = try runNonTtyInJournal(gpa, &.{ "--home", home, "grep", "-i", "mixedascii012" }, id, "");
+    defer gpa.free(folded.stdout);
+    defer gpa.free(folded.stderr);
+    try std.testing.expectEqual(@as(u8, 0), folded.term.exited);
+    try std.testing.expect(std.mem.indexOf(u8, folded.stdout, "@2/out: MixedAscii012") != null);
+
+    const literal = try runNonTtyInJournal(gpa, &.{ "--home", home, "grep", "--cmd", "[x].*" }, id, "");
+    defer gpa.free(literal.stdout);
+    defer gpa.free(literal.stderr);
+    try std.testing.expectEqual(@as(u8, 0), literal.term.exited);
+    try std.testing.expectEqualStrings("@3/cmd: : '[x].*'\n", literal.stdout);
+
+    const missing = try runNonTtyInJournal(gpa, &.{ "--home", home, "grep", "absent-literal-012" }, id, "");
+    defer gpa.free(missing.stdout);
+    defer gpa.free(missing.stderr);
+    try std.testing.expectEqual(@as(u8, 1), missing.term.exited);
+    try std.testing.expectEqualStrings("", missing.stdout);
+    try std.testing.expectEqualStrings("", missing.stderr);
+
+    const bad = try runNonTtyInJournal(gpa, &.{ "--home", home, "grep", "--unknown", "x" }, id, "");
+    defer gpa.free(bad.stdout);
+    defer gpa.free(bad.stderr);
+    try std.testing.expectEqual(@as(u8, 2), bad.term.exited);
+    try std.testing.expect(std.mem.indexOf(u8, bad.stderr, "Usage: tj grep") != null);
+
+    const leading = try runNonTtyInJournal(gpa, &.{ "--home", home, "grep", "--", "-not-present" }, id, "");
+    defer gpa.free(leading.stdout);
+    defer gpa.free(leading.stderr);
+    try std.testing.expectEqual(@as(u8, 1), leading.term.exited);
+
+    const both = try runNonTtyInJournal(gpa, &.{ "--home", home, "grep", "--cmd", "--out", "BOTH_LITERAL_012" }, id, "");
+    defer gpa.free(both.stdout);
+    defer gpa.free(both.stderr);
+    try std.testing.expectEqual(@as(u8, 0), both.term.exited);
+    try std.testing.expect(std.mem.indexOf(u8, both.stdout, "@4/cmd:") != null);
+    try std.testing.expect(std.mem.indexOf(u8, both.stdout, "@4/out:") != null);
+
+    const outside = try runNonTtyInJournal(gpa, &.{ "--home", home, "grep", "x" }, "", "");
+    defer gpa.free(outside.stdout);
+    defer gpa.free(outside.stderr);
+    try std.testing.expectEqual(@as(u8, 2), outside.term.exited);
+    try std.testing.expectEqualStrings("tj grep: no current journal; use --all\n", outside.stderr);
+
+    const help = try runNonTtyInJournal(gpa, &.{ "grep", "--help" }, "", "");
+    defer gpa.free(help.stdout);
+    defer gpa.free(help.stderr);
+    try std.testing.expectEqual(@as(u8, 0), help.term.exited);
+    try std.testing.expect(std.mem.startsWith(u8, help.stdout, "Usage: tj grep"));
+
+    var dir = try journal.journalDir();
+    defer dir.close(io);
+    try dir.deleteFile(io, "2/out");
+    try dir.deleteTree(io, "3");
+    const removed = try runNonTtyInJournal(gpa, &.{ "--home", home, "grep", "OUTPUT_LITERAL_012" }, id, "");
+    defer gpa.free(removed.stdout);
+    defer gpa.free(removed.stderr);
+    try std.testing.expectEqual(@as(u8, 1), removed.term.exited);
+}
+
+test "native grep all qualifies full journal ids and orders newest first" {
+    if (!haveZsh()) return error.SkipZigTest;
+    const gpa = std.testing.allocator;
+    const io = std.testing.io;
+    var journal = try Journal.open(gpa);
+    defer journal.close();
+    try recordJournal(gpa, &journal, &.{": SHARED_GREP_012"});
+    const older = try journal.journalName(gpa);
+    defer gpa.free(older);
+    const newest = ulid.encode(std.math.maxInt(u48), .{0} ** 10);
+
+    var root = try journal.tmp.dir.openDir(io, journal_dir, .{});
+    defer root.close(io);
+    try root.createDir(io, &newest, @enumFromInt(0o700));
+    var newest_dir = try root.openDir(io, &newest, .{});
+    defer newest_dir.close(io);
+    try newest_dir.createDir(io, "1", @enumFromInt(0o700));
+    var interaction = try newest_dir.openDir(io, "1", .{});
+    defer interaction.close(io);
+    try interaction.writeFile(io, .{ .sub_path = "cmd", .data = ": SHARED_GREP_012" });
+    try interaction.writeFile(io, .{ .sub_path = "out", .data = "SHARED_GREP_012\n" });
+    try interaction.writeFile(io, .{ .sub_path = "rc", .data = "0\n" });
+
+    leaveJournal();
+    const home = try journal.homeArg(gpa);
+    defer gpa.free(home);
+    const result = try runNonTtyInJournal(gpa, &.{ "--home", home, "grep", "--all", "SHARED_GREP_012" }, "", "");
+    defer gpa.free(result.stdout);
+    defer gpa.free(result.stderr);
+    try std.testing.expectEqual(@as(u8, 0), result.term.exited);
+    const expected = try std.fmt.allocPrint(
+        gpa,
+        "@{s}.1/cmd: : SHARED_GREP_012\n" ++
+            "@{s}.1/out: SHARED_GREP_012\n" ++
+            "@{s}.1/cmd: : SHARED_GREP_012\n",
+        .{ &newest, &newest, older },
+    );
+    defer gpa.free(expected);
+    try std.testing.expectEqualStrings(expected, result.stdout);
+}
+
+test "terminal native grep omits its results while redirected output stays plain" {
+    if (!haveZsh()) return error.SkipZigTest;
+    const gpa = std.testing.allocator;
+    var journal = try Journal.open(gpa);
+    defer journal.close();
+    const producer = try journal.fixture(gpa, "native-grep-producer.sh", "printf 'NOOUT_GREP_PAYLOAD_012\\n'\n");
+    defer gpa.free(producer);
+    const redirected_path = try journal.fixture(gpa, "redirected-grep", "");
+    defer gpa.free(redirected_path);
+
+    const child = try spawnJournalZsh(gpa, &journal);
+    var transcript: std.ArrayList(u8) = .empty;
+    defer transcript.deinit(gpa);
+    try setupJournalZsh(gpa, child, &transcript);
+    const command = try std.fmt.allocPrint(gpa, "/bin/sh '{s}'", .{producer});
+    defer gpa.free(command);
+    var from = transcript.items.len;
+    try child.write(command);
+    try child.write("\n");
+    try std.testing.expect(try child.readUntilFrom(gpa, &transcript, from, test_prompt, timeout_ms));
+
+    from = transcript.items.len;
+    try child.write("TERM=xterm-256color GREP_COLORS='mt=4;32' command \"$TJ\" grep --color --out NOOUT_GREP_PAYLOAD_012\n");
+    try std.testing.expect(try child.readUntilFrom(gpa, &transcript, from, "\x1b[4;32mNOOUT_GREP_PAYLOAD_012\x1b[m", timeout_ms));
+    try std.testing.expect(try child.readUntilFrom(gpa, &transcript, from, test_prompt, timeout_ms));
+
+    from = transcript.items.len;
+    try child.write("command \"$TJ\" grep --out NOOUT_GREP_PAYLOAD_012\n");
+    try std.testing.expect(try child.readUntilFrom(gpa, &transcript, from, test_prompt, timeout_ms));
+
+    const redirect_command = try std.fmt.allocPrint(
+        gpa,
+        "command \"$TJ\" grep --out NOOUT_GREP_PAYLOAD_012 >'{s}'",
+        .{redirected_path},
+    );
+    defer gpa.free(redirect_command);
+    from = transcript.items.len;
+    try child.write(redirect_command);
+    try child.write("\n");
+    try std.testing.expect(try child.readUntilFrom(gpa, &transcript, from, test_prompt, timeout_ms));
+
+    from = transcript.items.len;
+    try child.write("command \"$TJ\" grep --cmd SELF_ONLY_GREP_012; printf 'SELF-STATUS=%s\\n' $?\n");
+    try std.testing.expect(try child.readUntilFrom(gpa, &transcript, from, "SELF-STATUS=1", timeout_ms));
+    try std.testing.expect(try child.readUntilFrom(gpa, &transcript, from, test_prompt, timeout_ms));
+    try child.write("exit 0\n");
+    try std.testing.expectEqual(@as(u8, 0), try child.finish(gpa, &transcript, timeout_ms));
+
+    for ([_][]const u8{ "2/out", "3/out" }) |path| {
+        const recorded = try journal.read(gpa, path);
+        defer gpa.free(recorded);
+        try std.testing.expect(std.mem.indexOf(u8, recorded, "<tj:noout>") != null);
+        try std.testing.expect(std.mem.indexOf(u8, recorded, "NOOUT_GREP_PAYLOAD_012") == null);
+        try std.testing.expect(std.mem.indexOf(u8, recorded, "5107;tj") == null);
+    }
+    const redirected = try journal.tmp.dir.readFileAlloc(std.testing.io, "redirected-grep", gpa, .limited(4096));
+    defer gpa.free(redirected);
+    try std.testing.expectEqualStrings("@1/out: NOOUT_GREP_PAYLOAD_012\r\n", redirected);
+    const redirected_out = try journal.read(gpa, "4/out");
+    defer gpa.free(redirected_out);
+    try std.testing.expect(std.mem.indexOf(u8, redirected_out, "<tj:noout>") == null);
+    try std.testing.expect(std.mem.indexOf(u8, redirected_out, "5107;tj") == null);
+    const self_out = try journal.read(gpa, "5/out");
+    defer gpa.free(self_out);
+    try std.testing.expect(std.mem.indexOf(u8, self_out, "SELF-STATUS=1") != null);
+    try std.testing.expect(std.mem.indexOf(u8, self_out, "<tj:noout>") == null);
 }
 
 test "a program can publish parts of its output as named resources" {

@@ -9,6 +9,8 @@ const sys = @import("sys.zig");
 const reference = @import("reference.zig");
 const plain = @import("plain.zig");
 const annotations = @import("annotations.zig");
+const search = @import("search.zig");
+const noout = @import("noout.zig");
 
 /// The parsed subcommand, exactly as `cli` produced it.
 const Subcommand = @FieldType(cli.Command, "subcommand");
@@ -46,7 +48,7 @@ pub fn run(
     io: Io,
     sub: Subcommand,
     out: *Io.Writer,
-) !void {
+) !u8 {
     switch (sub.which) {
         .current => try out.print("{s}\n", .{try currentJournal()}),
         .journals => try listJournals(gpa, io, sub.home, out),
@@ -60,11 +62,316 @@ pub fn run(
         .tag => try tagCommand(gpa, io, sub.home, sub.args, out),
         .pin => try pinCommand(gpa, io, sub.home, sub.args, out),
         .rm => try removeCommand(gpa, io, sub.home, sub.args, out),
+        .grep => return grepCommand(gpa, io, sub.home, sub.args, out),
     }
+    return 0;
 }
 
 fn currentJournal() Error![]const u8 {
     return sys.env("TJ_JOURNAL") orelse error.NotInJournal;
+}
+
+const grep_usage =
+    \\Usage: tj grep [--all] [--cmd] [--out] [-i|--ignore-case]
+    \\               [--color[=WHEN]] [--] PATTERN
+    \\
+    \\Search journal commands and output for a literal byte string.
+    \\WHEN is never, auto, or always; the default is never.
+    \\
+;
+
+const ColorWhen = enum { never, auto, always };
+
+const GrepRequest = struct {
+    all: bool = false,
+    commands: bool = true,
+    output: bool = true,
+    ignore_case: bool = false,
+    color: ColorWhen = .never,
+    help: bool = false,
+    pattern: []const u8 = "",
+};
+
+fn parseGrepArgs(args: []const []const u8) !GrepRequest {
+    var request: GrepRequest = .{};
+    var resource_selected = false;
+    var options = true;
+    for (args) |arg| {
+        if (options and std.mem.eql(u8, arg, "--")) {
+            options = false;
+            continue;
+        }
+        if (options and std.mem.eql(u8, arg, "--help")) {
+            if (args.len != 1) return error.BadArguments;
+            request.help = true;
+            return request;
+        }
+        if (options and std.mem.eql(u8, arg, "--all")) {
+            request.all = true;
+            continue;
+        }
+        if (options and (std.mem.eql(u8, arg, "-i") or std.mem.eql(u8, arg, "--ignore-case"))) {
+            request.ignore_case = true;
+            continue;
+        }
+        if (options and (std.mem.eql(u8, arg, "--color") or std.mem.eql(u8, arg, "--colour"))) {
+            request.color = .auto;
+            continue;
+        }
+        if (options and (std.mem.startsWith(u8, arg, "--color=") or std.mem.startsWith(u8, arg, "--colour="))) {
+            const value = arg[std.mem.indexOfScalar(u8, arg, '=').? + 1 ..];
+            request.color = std.meta.stringToEnum(ColorWhen, value) orelse return error.BadArguments;
+            continue;
+        }
+        if (options and (std.mem.eql(u8, arg, "--cmd") or std.mem.eql(u8, arg, "--out"))) {
+            if (!resource_selected) {
+                request.commands = false;
+                request.output = false;
+                resource_selected = true;
+            }
+            if (std.mem.eql(u8, arg, "--cmd")) request.commands = true else request.output = true;
+            continue;
+        }
+        if (options and std.mem.startsWith(u8, arg, "-")) return error.BadArguments;
+        if (request.pattern.len != 0) return error.BadArguments;
+        request.pattern = arg;
+    }
+    if (request.pattern.len == 0 or std.mem.indexOfScalar(u8, request.pattern, '\n') != null) {
+        return error.BadArguments;
+    }
+    return request;
+}
+
+const ActiveInteraction = struct {
+    journal: []const u8,
+    number: u32,
+};
+
+fn activeInteraction() ?ActiveInteraction {
+    const journal = sys.env("TJ_JOURNAL") orelse return null;
+    if (journal.len == 0) return null;
+    const next_text = sys.env("TJ_NEXT") orelse return null;
+    const next = std.fmt.parseInt(u32, next_text, 10) catch return null;
+    if (next <= 1) return null;
+    return .{ .journal = journal, .number = next - 1 };
+}
+
+fn colorEnabled(when: ColorWhen) bool {
+    return switch (when) {
+        .never => false,
+        .always => true,
+        .auto => blk: {
+            if (!sys.isTty(1)) break :blk false;
+            const term = sys.env("TERM") orelse break :blk false;
+            break :blk term.len != 0 and !std.mem.eql(u8, term, "dumb");
+        },
+    };
+}
+
+/// TJ emits only selected lines, so GNU grep's `mt`/`ms` capabilities are the
+/// relevant portion of GREP_COLORS. Later capabilities override earlier ones.
+fn selectedMatchSgr(colors: ?[]const u8) []const u8 {
+    const text = colors orelse return "01;31";
+    var selected: []const u8 = "01;31";
+    var parts = std.mem.splitScalar(u8, text, ':');
+    while (parts.next()) |part| {
+        if (!std.mem.startsWith(u8, part, "mt=") and !std.mem.startsWith(u8, part, "ms=")) continue;
+        const candidate = part[3..];
+        if (validSgr(candidate)) selected = candidate;
+    }
+    return selected;
+}
+
+fn validSgr(text: []const u8) bool {
+    for (text) |byte| if (!std.ascii.isDigit(byte) and byte != ';') return false;
+    return true;
+}
+
+const GrepOutput = struct {
+    io: Io,
+    out: *Io.Writer,
+    noout_enabled: bool,
+    match_sgr: []const u8,
+    noout_started: bool = false,
+
+    fn begin(self: *GrepOutput) !void {
+        if (self.noout_enabled and !self.noout_started) {
+            try self.out.writeAll(noout.begin_marker);
+            self.noout_started = true;
+        }
+    }
+
+    fn finish(self: *GrepOutput) void {
+        if (self.noout_started) self.out.writeAll(noout.end_marker) catch {};
+        self.noout_started = false;
+    }
+};
+
+const GrepLineSink = struct {
+    output: *GrepOutput,
+    journal: []const u8,
+    number: u32,
+    resource: []const u8,
+    qualified: bool,
+    matcher: *const search.Matcher,
+
+    fn emit(context: *anyopaque, file: Io.File, start: u64, end: u64) !void {
+        const self: *GrepLineSink = @ptrCast(@alignCast(context));
+        try self.output.begin();
+        if (self.qualified) {
+            try self.output.out.print("@{s}.{d}/{s}: ", .{ self.journal, self.number, self.resource });
+        } else {
+            try self.output.out.print("@{d}/{s}: ", .{ self.number, self.resource });
+        }
+        try search.copyHighlightedSpan(
+            self.output.io,
+            file,
+            start,
+            end,
+            self.matcher,
+            self.output.match_sgr,
+            self.output.out,
+        );
+        try self.output.out.writeAll("\n");
+    }
+};
+
+fn grepCommand(
+    gpa: std.mem.Allocator,
+    io: Io,
+    home: ?[]const u8,
+    args: []const []const u8,
+    out: *Io.Writer,
+) !u8 {
+    const request = parseGrepArgs(args) catch {
+        note("{s}", .{grep_usage});
+        return 2;
+    };
+    if (request.help) {
+        try out.writeAll(grep_usage);
+        return 0;
+    }
+
+    const current = sys.env("TJ_JOURNAL");
+    if (!request.all and (current == null or current.?.len == 0)) {
+        note("tj grep: no current journal; use --all\n", .{});
+        return 2;
+    }
+
+    var root = try store.openRoot(io, home);
+    defer root.close(io);
+    var matcher = try search.Matcher.init(gpa, request.pattern, request.ignore_case);
+    defer matcher.deinit();
+    var output: GrepOutput = .{
+        .io = io,
+        .out = out,
+        .noout_enabled = current != null and current.?.len != 0 and sys.isTty(1),
+        .match_sgr = if (colorEnabled(request.color)) selectedMatchSgr(sys.env("GREP_COLORS")) else "",
+    };
+    defer output.finish();
+    const active = activeInteraction();
+    var total: u64 = 0;
+
+    if (request.all) {
+        const journals = try store.listJournals(gpa, io, root);
+        defer {
+            for (journals) |journal| gpa.free(journal);
+            gpa.free(journals);
+        }
+        for (journals) |journal| {
+            try grepJournal(gpa, io, root, journal, request, active, &matcher, &output, &total);
+        }
+    } else {
+        try grepJournal(gpa, io, root, current.?, request, active, &matcher, &output, &total);
+    }
+    return if (total == 0) 1 else 0;
+}
+
+fn grepJournal(
+    gpa: std.mem.Allocator,
+    io: Io,
+    root: store.Dir,
+    journal: []const u8,
+    request: GrepRequest,
+    active: ?ActiveInteraction,
+    matcher: *const search.Matcher,
+    output: *GrepOutput,
+    total: *u64,
+) !void {
+    const interactions = store.listInteractions(gpa, io, root, journal) catch |err| switch (err) {
+        error.FileNotFound => return error.NoSuchJournal,
+        else => |other| return other,
+    };
+    defer {
+        for (interactions) |info| info.deinit(gpa);
+        gpa.free(interactions);
+    }
+
+    for (interactions) |info| {
+        if (active) |item| {
+            if (item.number == info.number and std.mem.eql(u8, item.journal, journal)) continue;
+        }
+        for ([_]struct { enabled: bool, name: []const u8 }{
+            .{ .enabled = request.commands, .name = "cmd" },
+            .{ .enabled = request.output, .name = "out" },
+        }) |resource| {
+            if (!resource.enabled) continue;
+            var path_buf: [96]u8 = undefined;
+            const path = try std.fmt.bufPrint(&path_buf, "{s}/{d}/{s}", .{ journal, info.number, resource.name });
+            var file = root.openFile(io, path, .{}) catch |err| switch (err) {
+                error.FileNotFound => continue,
+                else => |other| return other,
+            };
+            defer file.close(io);
+            var line_sink: GrepLineSink = .{
+                .output = output,
+                .journal = journal,
+                .number = info.number,
+                .resource = resource.name,
+                .qualified = request.all,
+                .matcher = matcher,
+            };
+            const found = try search.scanFile(io, file, matcher, .{
+                .context = &line_sink,
+                .emit = GrepLineSink.emit,
+            });
+            total.* = try std.math.add(u64, total.*, found);
+        }
+    }
+}
+
+test "grep arguments select resources and preserve literal syntax" {
+    const defaults = try parseGrepArgs(&.{"needle"});
+    try std.testing.expect(defaults.commands and defaults.output);
+
+    const selected = try parseGrepArgs(&.{ "--out", "--out", "--cmd", "-i", "[x].*" });
+    try std.testing.expect(selected.commands and selected.output and selected.ignore_case);
+    try std.testing.expectEqualStrings("[x].*", selected.pattern);
+
+    const leading = try parseGrepArgs(&.{ "--", "-needle" });
+    try std.testing.expectEqualStrings("-needle", leading.pattern);
+    try std.testing.expect((try parseGrepArgs(&.{"--help"})).help);
+
+    try std.testing.expectEqual(ColorWhen.never, (try parseGrepArgs(&.{"x"})).color);
+    try std.testing.expectEqual(ColorWhen.auto, (try parseGrepArgs(&.{ "--color", "x" })).color);
+    try std.testing.expectEqual(ColorWhen.always, (try parseGrepArgs(&.{ "--colour=always", "x" })).color);
+    try std.testing.expectEqual(ColorWhen.never, (try parseGrepArgs(&.{ "--color=never", "x" })).color);
+}
+
+test "grep rejects missing multiline extra and unknown patterns" {
+    try std.testing.expectError(error.BadArguments, parseGrepArgs(&.{}));
+    try std.testing.expectError(error.BadArguments, parseGrepArgs(&.{""}));
+    try std.testing.expectError(error.BadArguments, parseGrepArgs(&.{"a\nb"}));
+    try std.testing.expectError(error.BadArguments, parseGrepArgs(&.{ "a", "b" }));
+    try std.testing.expectError(error.BadArguments, parseGrepArgs(&.{ "--wat", "a" }));
+    try std.testing.expectError(error.BadArguments, parseGrepArgs(&.{ "--color=sometimes", "a" }));
+}
+
+test "GNU grep selected-match colors use mt and ms capabilities" {
+    try std.testing.expectEqualStrings("01;31", selectedMatchSgr(null));
+    try std.testing.expectEqualStrings("4;32", selectedMatchSgr("fn=35:mt=1;31:ms=4;32"));
+    try std.testing.expectEqualStrings("", selectedMatchSgr("mt="));
+    try std.testing.expectEqualStrings("01;31", selectedMatchSgr("mt=not-sgr"));
 }
 
 fn listJournals(gpa: std.mem.Allocator, io: Io, home: ?[]const u8, out: *Io.Writer) !void {

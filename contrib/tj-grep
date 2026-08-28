@@ -4,7 +4,11 @@ usage() {
     cat <<'EOF'
 Usage: tj-grep [TJ_OPTIONS] [RG_OPTIONS] PATTERN
 
-Search the terminal journal with ripgrep.
+Advanced journal search powered by ripgrep.
+
+For portable literal search without external dependencies, use `tj grep`.
+Use this companion for regular expressions, context, line numbers, and other rg
+options.
 
 TJ options:
   -a, --all    Search all journals

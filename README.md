@@ -397,6 +397,50 @@ from inside that tool does not reach the journal. Marking happens in the
 wrapper, on output the agent has already produced, where it needs no
 permission and no cooperation.
 
+## Searching a journal
+
+`tj grep` searches stored command and output lines for a literal byte string:
+
+```sh
+tj grep panic                    # cmd and out in this journal
+tj grep --cmd 'docker compose'   # commands only
+tj grep --out 'connection reset' # output only
+tj grep -i 'permission denied'   # ASCII-only case folding
+tj grep --color panic            # highlight on a color-capable terminal
+tj grep --all example.com        # every journal, newest first
+tj grep -- --starts-with-a-dash
+```
+
+This is fixed-string search, not regular expressions. A matching line is
+printed once with a reusable reference:
+
+```text
+@42/out: error: connection reset by peer
+```
+
+Current-journal results use short `@N/resource` references. `--all` works
+outside a writer and uses full journal IDs, such as `@01K...XYZ.42/out`, so
+saved results remain unambiguous. Use `--cmd` and `--out` together to select
+both explicitly. Exit status 0 means at least one line matched, 1 means no
+match, and 2 means invalid grep arguments or no current journal without
+`--all`.
+
+Highlighting follows GNU grep's policy. It is off by default. Bare `--color`
+(also `--colour`) means `--color=auto`, which enables match highlighting only
+when stdout is a terminal and `TERM` indicates color support.
+`--color=always` emits ANSI styling even through a pipe or redirect, while
+`--color=never` disables it. Selected matches default to bold red and honor
+the `mt` or `ms` selected-match capability in `GREP_COLORS`.
+
+When results go directly to a terminal inside a journal writer, TJ wraps them
+in a noout region: they remain visible but the current interaction records
+only `<tj:noout>`, so one search does not feed the next. Redirected and piped
+results are ordinary marker-free bytes.
+
+For regular expressions, context lines, line numbers, or other ripgrep
+options, use the optional `tj-grep` companion. It requires `rg`; native
+`tj grep` has no external dependency.
+
 ## Reading a recording
 
 `tj cat` prints what a reference names, resolving it itself — so it works

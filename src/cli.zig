@@ -25,6 +25,7 @@ pub const Subcommand = enum {
     tag,
     pin,
     rm,
+    grep,
 
     pub fn parse(name: []const u8) ?Subcommand {
         if (std.mem.eql(u8, name, "history")) return .hist;
@@ -268,6 +269,13 @@ test "subcommands are recognised and keep their arguments" {
     const cmd = try parse(&.{ "hist", "01abc" });
     try std.testing.expectEqual(Subcommand.hist, cmd.subcommand.which);
     try std.testing.expectEqualStrings("01abc", cmd.subcommand.args[0]);
+}
+
+test "grep is a subcommand and retains global home and its own options" {
+    const cmd = try parse(&.{ "--home", "/tmp/j", "grep", "--all", "needle" });
+    try std.testing.expectEqual(Subcommand.grep, cmd.subcommand.which);
+    try std.testing.expectEqualStrings("/tmp/j", cmd.subcommand.home.?);
+    try std.testing.expectEqualSlices([]const u8, &.{ "--all", "needle" }, cmd.subcommand.args);
 }
 
 test "history is the same subcommand as hist" {

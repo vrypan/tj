@@ -623,6 +623,77 @@ then takes the journal mutation lock, and refuses an active journal. Successful
 removal renames the ULID directory to root-private trash before recursive deletion. `--force` skips confirmation
 only; it never bypasses selection, locking, or validation.
 
+## Native journal search
+
+The portable search command is:
+
+``` text
+tj grep [--all] [--cmd] [--out] [-i|--ignore-case]
+        [--color[=WHEN]] [--] PATTERN
+```
+
+`PATTERN` is one non-empty literal byte string, not a regular expression. It
+must not contain a newline. `--` ends option parsing and permits a leading
+dash. Case-insensitive matching folds ASCII `A` through `Z` only; all other
+bytes compare exactly.
+
+The current journal is searched by default and `TJ_JOURNAL` is required in
+that mode. `--all` searches every persisted journal and works outside a
+writer. Both `cmd` and `out` are selected initially. The first `--cmd` or
+`--out` clears that default pair and selects its resource; later selectors
+form a union, so `--cmd --out` selects both. No other interaction files,
+published resources, annotations, private trash, or lock data are searched.
+A missing `out` is skipped.
+
+Color behavior follows GNU grep's command-line policy. With no color option,
+highlighting is disabled. `--color` and `--colour` are equivalent to
+`--color=auto`; `WHEN` may be `never`, `auto`, or `always`. Auto mode enables
+color only when stdout is a terminal and non-empty `TERM` is not `dumb`.
+Always mode emits SGR sequences even to redirected or piped stdout, and never
+mode emits none. Selected non-empty, non-overlapping matches default to bold
+red (`01;31`). When `GREP_COLORS` is set, valid decimal/semicolon `mt` and
+`ms` capabilities are applied in order, with the later selected-match value
+winning; an empty selected-match value disables match styling. TJ does not
+style its reference prefix.
+
+Iteration uses the storage model rather than recursive filesystem traversal:
+journals are newest first, interactions are numeric ascending, resources are
+`cmd` then `out`, and matching lines retain source order. Matching does not
+cross a newline. Each matching source line is emitted once even if it contains
+the literal more than once. Its bytes, excluding the terminating newline but
+including a preceding carriage return or other control bytes, are preserved
+after a canonical prefix and followed by one newline:
+
+``` text
+@42/out: matching source line
+@01K...XYZ.42/out: matching source line under --all
+```
+
+Current-journal results are unqualified. Every `--all` result uses the full
+journal ULID, including results from the writer's current journal. A final
+unterminated source line is still searchable.
+
+When `TJ_JOURNAL` is set and decimal `TJ_NEXT` is greater than one, interaction
+`TJ_NEXT - 1` in that exact journal is treated as the command currently
+executing and excluded. A missing or malformed counter does not cause another
+interaction to be guessed or excluded.
+
+Search streams each resource in fixed-size chunks with matcher state carried
+across reads and reset at line boundaries. Matching-line spans are copied by
+positional reads, so memory use is proportional to the pattern and fixed
+buffers rather than to the resource, line, or match count.
+
+When stdout is a terminal and a current journal exists, search lazily encloses
+all result lines in one OSC 5107 noout region. No markers are emitted for help,
+errors, or no matches. Redirected or piped stdout is plain marker-free data.
+The result is status 0 when any line matched, 1 for no matches, and 2 for grep
+argument errors or current-journal mode without a current journal. Storage and
+I/O errors use TJ's ordinary status-1 diagnostic path.
+
+The optional `tj-grep` companion remains the ripgrep-powered interface for
+regular expressions, context, line numbers, and arbitrary `rg` options; it is
+not part of the native fixed-string contract.
+
 ## Semantic output regions
 
 TJ can preserve structure that would otherwise be lost when a program
