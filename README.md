@@ -28,6 +28,19 @@ tj --version                          # tj 0.2.0
 tj-fence < /dev/null && echo ok       # used by the agent wrappers below
 ```
 
+`make install` also installs generated command and option completions under
+the selected prefix:
+
+```text
+share/bash-completion/completions/tj
+share/zsh/site-functions/_tj
+share/fish/vendor_completions.d/tj.fish
+```
+
+These complete static CLI syntax such as `tj <TAB>`, `tj hist --<TAB>`, and
+the values of `tj grep --color=<TAB>`. Journal-reference completion remains
+the responsibility of the zsh integration described below.
+
 ## Set up zsh
 
 tj records by watching the terminal, but a pty carries a single
@@ -41,6 +54,13 @@ Add one line to `~/.zshrc`:
 
 ```sh
 source ~/src/tj/tj.plugin.zsh
+```
+
+If your zsh setup does not already include your installation prefix's
+`site-functions` directory, add it to `fpath` before it runs `compinit`:
+
+```zsh
+fpath=(~/.local/share/zsh/site-functions $fpath)
 ```
 
 Adjust the path to wherever you cloned it. The plugin starts with a guard on
@@ -699,12 +719,16 @@ make check        # fmt + tests, the gates every change must pass
 zig build test    # the tests alone: unit, plus pty-driven end to end
 ```
 
+The build uses a host-only `tj-completion` helper to generate ready-to-install
+bash, zsh, and fish scripts in `zig-out/share`. The helper itself is neither
+installed nor included in release archives.
+
 Cross-compiles with nothing installed on the host:
 
 ```sh
 make list         # the target list
 make -j6 all      # every target -> dist/<target>/bin/tj
-make package      # the same, as dist/tj-<version>-<target>.tar.gz
+make package      # bin/ and share/ as dist/tj-<version>-<target>.tar.gz
 ```
 
 Targets: `{aarch64,x86_64}` × `{macos, linux-musl, linux-gnu}`. The musl

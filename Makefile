@@ -31,11 +31,17 @@ build:
 # depend on reaching back into a source checkout.
 install: build
 	install -d $(PREFIX)/bin
+	install -d $(PREFIX)/share/bash-completion/completions
+	install -d $(PREFIX)/share/zsh/site-functions
+	install -d $(PREFIX)/share/fish/vendor_completions.d
 	install -m 755 zig-out/bin/tj $(PREFIX)/bin/
 	install -m 755 contrib/tj-fence $(PREFIX)/bin/
 	install -m 755 contrib/tj-grep $(PREFIX)/bin/
 	install -m 755 contrib/tj-tape $(PREFIX)/bin/
-	@echo "installed tj, tj-fence, tj-grep and tj-tape in $(PREFIX)/bin"
+	install -m 644 zig-out/share/bash-completion/completions/tj $(PREFIX)/share/bash-completion/completions/
+	install -m 644 zig-out/share/zsh/site-functions/_tj $(PREFIX)/share/zsh/site-functions/
+	install -m 644 zig-out/share/fish/vendor_completions.d/tj.fish $(PREFIX)/share/fish/vendor_completions.d/
+	@echo "installed tj, companion tools, and shell completions under $(PREFIX)"
 
 test:
 	$(ZIG) build test
@@ -53,15 +59,15 @@ check: fmt-check test
 
 all: $(TARGETS)
 
-# Each target installs into its own prefix, so the binaries never overwrite
-# one another: $(DIST)/<target>/bin/tj
+# Each target installs into its own prefix, so binaries and generated shell
+# completions never overwrite another target's artifacts.
 $(TARGETS):
 	@echo "==> $@"
 	$(ZIG) build -Dtarget=$@ -Doptimize=$(OPTIMIZE) --prefix $(DIST)/$@
 
 package: all
 	@for t in $(TARGETS); do \
-		tar -czf $(DIST)/tj-$(VERSION)-$$t.tar.gz -C $(DIST)/$$t/bin tj || exit 1; \
+		tar -czf $(DIST)/tj-$(VERSION)-$$t.tar.gz -C $(DIST)/$$t bin share || exit 1; \
 		echo "$(DIST)/tj-$(VERSION)-$$t.tar.gz"; \
 	done
 

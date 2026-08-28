@@ -150,6 +150,39 @@ test "application and every command expose generated help" {
     try std.testing.expect(std.mem.indexOf(u8, grep.stdout, "default: never") != null);
 }
 
+test "build-time completions expose only the static cli grammar" {
+    const gpa = std.testing.allocator;
+    const io = std.testing.io;
+
+    const bash = try Dir.cwd().readFileAlloc(io, options.bash_completion, gpa, .limited(1 << 20));
+    defer gpa.free(bash);
+    try std.testing.expect(std.mem.indexOf(u8, bash, "complete -F _tj tj") != null);
+    try std.testing.expect(std.mem.indexOf(u8, bash, "_tj__cmd_hist()") != null);
+    try std.testing.expect(std.mem.indexOf(u8, bash, "--tag") != null);
+    try std.testing.expect(std.mem.indexOf(u8, bash, "never\\nauto\\nalways") != null);
+
+    const zsh = try Dir.cwd().readFileAlloc(io, options.zsh_completion, gpa, .limited(1 << 20));
+    defer gpa.free(zsh);
+    try std.testing.expect(std.mem.startsWith(u8, zsh, "#compdef tj\n"));
+    try std.testing.expect(std.mem.indexOf(u8, zsh, "'hist:List interactions in a journal'") != null);
+    try std.testing.expect(std.mem.indexOf(u8, zsh, "_tj__cmd_hist()") != null);
+    try std.testing.expect(std.mem.indexOf(u8, zsh, "--tag=[") != null);
+    try std.testing.expect(std.mem.indexOf(u8, zsh, "WHEN:(never auto always)") != null);
+
+    const fish = try Dir.cwd().readFileAlloc(io, options.fish_completion, gpa, .limited(1 << 20));
+    defer gpa.free(fish);
+    try std.testing.expect(std.mem.startsWith(u8, fish, "# fish completion for tj\n"));
+    try std.testing.expect(std.mem.indexOf(u8, fish, "-a 'hist' -d 'List interactions in a journal'") != null);
+    try std.testing.expect(std.mem.indexOf(u8, fish, "__tj_using_command hist history") != null);
+    try std.testing.expect(std.mem.indexOf(u8, fish, "__tj_vals_cmd_grep_f_color") != null);
+
+    // Runtime references remain the existing `tj complete`/plugin concern;
+    // no generated script invokes that command as an external completer.
+    for ([_][]const u8{ bash, zsh, fish }) |script| {
+        try std.testing.expect(std.mem.indexOf(u8, script, "'tj' 'complete'") == null);
+    }
+}
+
 test "schema errors use status two and command help" {
     const gpa = std.testing.allocator;
     leaveJournal();
@@ -2438,10 +2471,15 @@ test "zsh completion keeps special resource names as one inert argument" {
     // trust policy, so ignore insecure system entries instead of prompting.
     // Keep the readiness marker split in the typed command: terminal echo
     // must not satisfy the wait before setup actually reaches its end.
-    try child.write(
-        "autoload -Uz compinit && compinit -D -i && _tj_register_completion && " ++
-            "print -r -- TJ_COMPINIT_\"\"READY\n",
+    var completion_setup: std.ArrayList(u8) = .empty;
+    defer completion_setup.deinit(gpa);
+    try completion_setup.appendSlice(gpa, "autoload -Uz compinit && compinit -D -i && . ");
+    try appendShellQuoted(gpa, &completion_setup, options.zsh_completion);
+    try completion_setup.appendSlice(
+        gpa,
+        " && _tj_register_completion && print -r -- TJ_COMPINIT_\"\"READY\n",
     );
+    try child.write(completion_setup.items);
     if (!try child.readUntilFrom(gpa, &out, from, "TJ_COMPINIT_READY", timeout_ms)) {
         std.debug.print("completion setup did not finish; transcript follows:\n{s}\n", .{out.items[from..]});
         return error.CompletionSetupDidNotFinish;
@@ -2450,6 +2488,19 @@ test "zsh completion keeps special resource names as one inert argument" {
         std.debug.print("completion setup did not return a prompt; transcript follows:\n{s}\n", .{out.items[from..]});
         return error.CompletionPromptMissing;
     }
+
+    // Zecli's generated script owns static command and option completion.
+    from = out.items.len;
+    try child.write("tj journa");
+    try child.write("\t");
+    try std.testing.expect(try child.readUntilFrom(gpa, &out, from, "journals", timeout_ms));
+    try cancelZleLine(gpa, child, &out);
+
+    from = out.items.len;
+    try child.write("tj hist --t");
+    try child.write("\t");
+    try std.testing.expect(try child.readUntilFrom(gpa, &out, from, "--tag", timeout_ms));
+    try cancelZleLine(gpa, child, &out);
 
     from = out.items.len;
     try child.write("command \"$TJ\" name @1 build-failure\n");
