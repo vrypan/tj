@@ -45,7 +45,7 @@ const usage =
     \\                  tag, query, remove, or list interaction tags
     \\  pin [@ref | --remove @ref]
     \\                  pin, unpin, or list pinned interactions
-    \\  grep [--all] [--cmd] [--out] [-i] [--color[=WHEN]] [--] PATTERN
+    \\  grep [--all] [--cmd] [--out] [-i] [--color WHEN] [--] PATTERN
     \\                  search journal commands and output for a literal
     \\  rm <@ref | @ref/out | @N..@M>
     \\  rm --journal <id> [--force]

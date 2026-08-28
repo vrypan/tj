@@ -629,7 +629,7 @@ The portable search command is:
 
 ``` text
 tj grep [--all] [--cmd] [--out] [-i|--ignore-case]
-        [--color[=WHEN]] [--] PATTERN
+        [--color WHEN] [--] PATTERN
 ```
 
 `PATTERN` is one non-empty literal byte string, not a regular expression. It
@@ -645,16 +645,16 @@ form a union, so `--cmd --out` selects both. No other interaction files,
 published resources, annotations, private trash, or lock data are searched.
 A missing `out` is skipped.
 
-Color behavior follows GNU grep's command-line policy. With no color option,
-highlighting is disabled. `--color` and `--colour` are equivalent to
-`--color=auto`; `WHEN` may be `never`, `auto`, or `always`. Auto mode enables
-color only when stdout is a terminal and non-empty `TERM` is not `dumb`.
-Always mode emits SGR sequences even to redirected or piped stdout, and never
-mode emits none. Selected non-empty, non-overlapping matches default to bold
-red (`01;31`). When `GREP_COLORS` is set, valid decimal/semicolon `mt` and
-`ms` capabilities are applied in order, with the later selected-match value
-winning; an empty selected-match value disables match styling. TJ does not
-style its reference prefix.
+Color behavior uses GNU grep's three modes. With no color option, highlighting
+is disabled. `--color` and `--colour` require `WHEN`, supplied as the next
+argument or with `=`; bare `--color` is invalid. `WHEN` is `never`, `auto`, or
+`always`. Auto mode enables color only when stdout is a terminal and non-empty
+`TERM` is not `dumb`. Always mode emits SGR sequences even to redirected or
+piped stdout, and never mode emits none. Selected non-empty, non-overlapping
+matches default to bold red (`01;31`). When `GREP_COLORS` is set, valid
+decimal/semicolon `mt` and `ms` capabilities are applied in order, with the
+later selected-match value winning; an empty selected-match value disables
+match styling. TJ does not style its reference prefix.
 
 Iteration uses the storage model rather than recursive filesystem traversal:
 journals are newest first, interactions are numeric ascending, resources are

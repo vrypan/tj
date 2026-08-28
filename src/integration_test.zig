@@ -1935,7 +1935,7 @@ test "native grep searches literal command and output lines with stable statuses
     try std.testing.expectEqualStrings("@1/cmd: : COMMAND_LITERAL_012\n", command_only.stdout);
     try std.testing.expectEqualStrings("", command_only.stderr);
 
-    const automatic_pipe = try runNonTtyInJournal(gpa, &.{ "--home", home, "grep", "--cmd", "--color", "COMMAND_LITERAL_012" }, id, "");
+    const automatic_pipe = try runNonTtyInJournal(gpa, &.{ "--home", home, "grep", "--cmd", "--color", "auto", "COMMAND_LITERAL_012" }, id, "");
     defer gpa.free(automatic_pipe.stdout);
     defer gpa.free(automatic_pipe.stderr);
     try std.testing.expectEqualStrings(command_only.stdout, automatic_pipe.stdout);
@@ -2078,7 +2078,7 @@ test "terminal native grep omits its results while redirected output stays plain
     try std.testing.expect(try child.readUntilFrom(gpa, &transcript, from, test_prompt, timeout_ms));
 
     from = transcript.items.len;
-    try child.write("TERM=xterm-256color GREP_COLORS='mt=4;32' command \"$TJ\" grep --color --out NOOUT_GREP_PAYLOAD_012\n");
+    try child.write("TERM=xterm-256color GREP_COLORS='mt=4;32' command \"$TJ\" grep --color auto --out NOOUT_GREP_PAYLOAD_012\n");
     try std.testing.expect(try child.readUntilFrom(gpa, &transcript, from, "\x1b[4;32mNOOUT_GREP_PAYLOAD_012\x1b[m", timeout_ms));
     try std.testing.expect(try child.readUntilFrom(gpa, &transcript, from, test_prompt, timeout_ms));
 

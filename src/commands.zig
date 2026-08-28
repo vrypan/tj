@@ -73,7 +73,7 @@ fn currentJournal() Error![]const u8 {
 
 const grep_usage =
     \\Usage: tj grep [--all] [--cmd] [--out] [-i|--ignore-case]
-    \\               [--color[=WHEN]] [--] PATTERN
+    \\               [--color WHEN] [--] PATTERN
     \\
     \\Search journal commands and output for a literal byte string.
     \\WHEN is never, auto, or always; the default is never.
@@ -96,7 +96,9 @@ fn parseGrepArgs(args: []const []const u8) !GrepRequest {
     var request: GrepRequest = .{};
     var resource_selected = false;
     var options = true;
-    for (args) |arg| {
+    var i: usize = 0;
+    while (i < args.len) : (i += 1) {
+        const arg = args[i];
         if (options and std.mem.eql(u8, arg, "--")) {
             options = false;
             continue;
@@ -115,7 +117,9 @@ fn parseGrepArgs(args: []const []const u8) !GrepRequest {
             continue;
         }
         if (options and (std.mem.eql(u8, arg, "--color") or std.mem.eql(u8, arg, "--colour"))) {
-            request.color = .auto;
+            i += 1;
+            if (i >= args.len) return error.BadArguments;
+            request.color = std.meta.stringToEnum(ColorWhen, args[i]) orelse return error.BadArguments;
             continue;
         }
         if (options and (std.mem.startsWith(u8, arg, "--color=") or std.mem.startsWith(u8, arg, "--colour="))) {
@@ -353,7 +357,10 @@ test "grep arguments select resources and preserve literal syntax" {
     try std.testing.expect((try parseGrepArgs(&.{"--help"})).help);
 
     try std.testing.expectEqual(ColorWhen.never, (try parseGrepArgs(&.{"x"})).color);
-    try std.testing.expectEqual(ColorWhen.auto, (try parseGrepArgs(&.{ "--color", "x" })).color);
+    const automatic = try parseGrepArgs(&.{ "--color", "auto", "x" });
+    try std.testing.expectEqual(ColorWhen.auto, automatic.color);
+    try std.testing.expectEqualStrings("x", automatic.pattern);
+    try std.testing.expectEqual(ColorWhen.always, (try parseGrepArgs(&.{ "--color", "always", "x" })).color);
     try std.testing.expectEqual(ColorWhen.always, (try parseGrepArgs(&.{ "--colour=always", "x" })).color);
     try std.testing.expectEqual(ColorWhen.never, (try parseGrepArgs(&.{ "--color=never", "x" })).color);
 }
@@ -364,6 +371,9 @@ test "grep rejects missing multiline extra and unknown patterns" {
     try std.testing.expectError(error.BadArguments, parseGrepArgs(&.{"a\nb"}));
     try std.testing.expectError(error.BadArguments, parseGrepArgs(&.{ "a", "b" }));
     try std.testing.expectError(error.BadArguments, parseGrepArgs(&.{ "--wat", "a" }));
+    try std.testing.expectError(error.BadArguments, parseGrepArgs(&.{"--color"}));
+    try std.testing.expectError(error.BadArguments, parseGrepArgs(&.{ "--color", "a" }));
+    try std.testing.expectError(error.BadArguments, parseGrepArgs(&.{ "--color", "sometimes", "a" }));
     try std.testing.expectError(error.BadArguments, parseGrepArgs(&.{ "--color=sometimes", "a" }));
 }
 

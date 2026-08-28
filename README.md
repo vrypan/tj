@@ -406,7 +406,7 @@ tj grep panic                    # cmd and out in this journal
 tj grep --cmd 'docker compose'   # commands only
 tj grep --out 'connection reset' # output only
 tj grep -i 'permission denied'   # ASCII-only case folding
-tj grep --color panic            # highlight on a color-capable terminal
+tj grep --color auto panic       # highlight on a color-capable terminal
 tj grep --all example.com        # every journal, newest first
 tj grep -- --starts-with-a-dash
 ```
@@ -425,12 +425,13 @@ both explicitly. Exit status 0 means at least one line matched, 1 means no
 match, and 2 means invalid grep arguments or no current journal without
 `--all`.
 
-Highlighting follows GNU grep's policy. It is off by default. Bare `--color`
-(also `--colour`) means `--color=auto`, which enables match highlighting only
-when stdout is a terminal and `TERM` indicates color support.
-`--color=always` emits ANSI styling even through a pipe or redirect, while
-`--color=never` disables it. Selected matches default to bold red and honor
-the `mt` or `ms` selected-match capability in `GREP_COLORS`.
+Highlighting uses GNU grep's three color modes and is off by default. `--color`
+(also `--colour`) requires `never`, `auto`, or `always`, supplied either as the
+next argument or with `=`. Auto enables match highlighting only when stdout is
+a terminal and `TERM` indicates color support. Always emits ANSI styling even
+through a pipe or redirect, while never disables it. Selected matches default
+to bold red and honor the `mt` or `ms` selected-match capability in
+`GREP_COLORS`.
 
 When results go directly to a terminal inside a journal writer, TJ wraps them
 in a noout region: they remain visible but the current interaction records
