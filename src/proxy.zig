@@ -302,7 +302,8 @@ const Recorder = struct {
             // which is the usual case since the shell reports both at once.
             .prompt_start => self.store.finish(null),
             .resource_begin => |r| self.store.beginResource(r.path, r.mime),
-            .resource_end => self.store.endResource(),
+            .noout_begin => self.store.beginNoout(),
+            .region_end => self.store.endRegion(),
             .protocol_error => |payload| self.store.warn("ignored tj sequence: {s}", .{payload}),
         }
     }

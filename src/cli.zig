@@ -2,6 +2,7 @@
 //!
 //!     tj new [flags] [-- command...]   create and write a journal
 //!     tj continue <id> [flags] [...]  append to an existing journal
+//!     tj noout -- command...           show output without recording it
 //!     tj <subcommand> [args...]        work with the journal
 //!     tj                               help
 //!
@@ -46,6 +47,7 @@ pub const Proxy = struct {
 
 pub const Command = union(enum) {
     proxy: Proxy,
+    noout: []const []const u8,
     subcommand: struct {
         which: Subcommand,
         args: []const []const u8,
@@ -63,6 +65,8 @@ pub const ParseError = error{
     UnknownSubcommand,
     MissingLifecycle,
     MissingJournal,
+    MissingNooutSeparator,
+    MissingNooutCommand,
 };
 
 /// `args` excludes the program name.
@@ -90,6 +94,12 @@ pub fn parse(args: []const []const u8) ParseError!Command {
                 return error.MissingJournal;
             }
             return .{ .proxy = try parseProxy(rest[1..], options, .{ .existing = rest[0] }) };
+        }
+        if (std.mem.eql(u8, arg, "noout")) {
+            const rest = args[i + 1 ..];
+            if (rest.len == 0 or !std.mem.eql(u8, rest[0], "--")) return error.MissingNooutSeparator;
+            if (rest.len == 1) return error.MissingNooutCommand;
+            return .{ .noout = rest[1..] };
         }
 
         const which = Subcommand.parse(arg) orelse return error.UnknownSubcommand;
@@ -228,6 +238,26 @@ test "continue requires a journal selector" {
     try std.testing.expectError(error.MissingJournal, parse(&.{"continue"}));
     try std.testing.expectError(error.MissingJournal, parse(&.{ "continue", "--" }));
     try std.testing.expectError(error.MissingJournal, parse(&.{ "continue", "--home", "/tmp/j" }));
+}
+
+test "noout requires a separator and preserves child arguments" {
+    const cmd = try parse(&.{ "noout", "--", "printf", "--help", "two words" });
+    try std.testing.expect(cmd == .noout);
+    try std.testing.expectEqual(@as(usize, 3), cmd.noout.len);
+    try std.testing.expectEqualStrings("printf", cmd.noout[0]);
+    try std.testing.expectEqualStrings("--help", cmd.noout[1]);
+    try std.testing.expectEqualStrings("two words", cmd.noout[2]);
+}
+
+test "noout rejects an omitted separator or command" {
+    try std.testing.expectError(error.MissingNooutSeparator, parse(&.{"noout"}));
+    try std.testing.expectError(error.MissingNooutSeparator, parse(&.{ "noout", "printf" }));
+    try std.testing.expectError(error.MissingNooutCommand, parse(&.{ "noout", "--" }));
+}
+
+test "global help and version still take precedence over noout" {
+    try std.testing.expect(try parse(&.{ "--help", "noout", "--", "false" }) == .help);
+    try std.testing.expect(try parse(&.{ "--version", "noout", "--", "false" }) == .version);
 }
 
 test "a command with no lifecycle is refused rather than guessed at" {

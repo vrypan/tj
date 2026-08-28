@@ -41,6 +41,9 @@ const max_resource_bytes = 64 * 1024 * 1024;
 /// Per interaction. A program publishing more than this is misbehaving.
 const max_resources = 32;
 
+/// Recorded once for a visible region deliberately omitted from `out`.
+pub const noout_placeholder = "<tj:noout>";
+
 /// tj's own bookkeeping, which a program may not overwrite by publishing a
 /// resource with the same name.
 const reserved_names = [_][]const u8{ "cmd", "out", "rc", "meta.json", "out.removed", ".meta.tmp", "log" };
@@ -74,10 +77,15 @@ pub const Store = struct {
         /// screen keeps them out of the terminal's scrollback.
         fullscreen: altscreen.Filter = .{},
 
-        /// The resource currently being published, if any.
-        open_resource: ?OpenResource = null,
+        /// OSC 5107 permits one non-nesting resource or noout region.
+        open_region: ?OpenRegion = null,
         published: [max_resources]Published = undefined,
         published_count: usize = 0,
+    };
+
+    const OpenRegion = union(enum) {
+        resource: OpenResource,
+        noout,
     };
 
     const OpenResource = struct {
@@ -259,10 +267,15 @@ pub const Store = struct {
     pub fn append(self: *Store, bytes: []const u8) void {
         const current = &(self.current orelse return);
 
-        // Before the full-screen filter, not after: publishing a resource is a
-        // deliberate act by the program, so it is kept whatever the screen was
-        // doing at the time.
-        self.appendResource(current, bytes);
+        if (current.open_region) |*region| switch (region.*) {
+            // The proxy has already forwarded these bytes to the terminal.
+            // They bypass both resource capture and the alternate-screen
+            // filter, and deliberately leave no metadata counters behind.
+            .noout => return,
+            // Before the full-screen filter, not after: publishing a resource
+            // is deliberate, so it is kept whatever the screen was doing.
+            .resource => |*open| self.appendResource(current, open, bytes),
+        };
 
         var sink: OutputSink = .{ .store = self, .interaction = current };
         current.fullscreen.feed(bytes, &sink);
@@ -278,9 +291,9 @@ pub const Store = struct {
             return;
         });
 
-        if (current.open_resource != null) {
+        if (current.open_region != null) {
             // No nesting in v1. The open one keeps going.
-            self.warn("resource {s} published while another is open", .{path});
+            self.warn("resource {s} published while another region is open", .{path});
             return;
         }
         if (!validResourcePath(path)) {
@@ -300,10 +313,10 @@ pub const Store = struct {
         const file = try current.dir.createFile(self.io, path, .{ .permissions = file_permissions });
         errdefer file.close(self.io);
 
-        current.open_resource = .{
+        current.open_region = .{ .resource = .{
             .file = file,
             .entry = try self.recordPublished(current, path, mime),
-        };
+        } };
     }
 
     /// Finds or makes the `meta.json` entry for this path. Publishing the same
@@ -327,8 +340,7 @@ pub const Store = struct {
         return current.published_count - 1;
     }
 
-    fn appendResource(self: *Store, current: *Interaction, bytes: []const u8) void {
-        const open = &(current.open_resource orelse return);
+    fn appendResource(self: *Store, current: *Interaction, open: *OpenResource, bytes: []const u8) void {
         const entry = &current.published[open.entry];
 
         const room = max_resource_bytes - @min(open.written, max_resource_bytes);
@@ -343,7 +355,7 @@ pub const Store = struct {
             self.warn("cannot write resource {s}: {t}", .{ entry.path, err });
             entry.truncated = true;
             open.file.close(self.io);
-            current.open_resource = null;
+            current.open_region = null;
         };
     }
 
@@ -391,27 +403,57 @@ pub const Store = struct {
         self.emitResource(open, "\r") catch {};
     }
 
-    pub fn endResource(self: *Store) void {
-        const current = &(self.current orelse return);
-        if (current.open_resource == null) {
-            self.warn("resource end with none open", .{});
+    /// Starts a visible region that is represented in `out` only by the fixed
+    /// placeholder. State is opened only after that placeholder is durable in
+    /// the interaction's buffered stream.
+    pub fn beginNoout(self: *Store) void {
+        if (self.disabled) return;
+        const current = &(self.current orelse {
+            self.warn("noout region opened with no interaction open", .{});
+            return;
+        });
+        if (current.open_region != null) {
+            self.warn("noout region opened while another region is open", .{});
             return;
         }
-        const open = &current.open_resource.?;
-        self.flushResourceTail(open);
-        open.file.close(self.io);
-        current.open_resource = null;
+        current.writer.interface.writeAll(noout_placeholder) catch |err| {
+            self.warn("cannot write noout placeholder: {t}", .{err});
+            self.disable();
+            return;
+        };
+        current.open_region = .noout;
     }
 
-    /// A resource the program never closed. The interaction is ending, so what
-    /// was captured is all there will be.
-    fn closeOpenResource(self: *Store, current: *Interaction) void {
-        if (current.open_resource == null) return;
-        const open = &current.open_resource.?;
-        self.flushResourceTail(open);
-        current.published[open.entry].truncated = true;
-        open.file.close(self.io);
-        current.open_resource = null;
+    /// The OSC end marker is generic: it closes either kind of open region.
+    pub fn endRegion(self: *Store) void {
+        const current = &(self.current orelse return);
+        if (current.open_region == null) {
+            self.warn("region end with none open", .{});
+            return;
+        }
+        switch (current.open_region.?) {
+            .resource => |*open| {
+                self.flushResourceTail(open);
+                open.file.close(self.io);
+            },
+            .noout => {},
+        }
+        current.open_region = null;
+    }
+
+    /// Clears an unfinished region at the interaction boundary. Resources are
+    /// marked truncated; noout needs no metadata and is simply forgotten.
+    fn closeOpenRegion(self: *Store, current: *Interaction) void {
+        if (current.open_region == null) return;
+        switch (current.open_region.?) {
+            .resource => |*open| {
+                self.flushResourceTail(open);
+                current.published[open.entry].truncated = true;
+                open.file.close(self.io);
+            },
+            .noout => {},
+        }
+        current.open_region = null;
     }
 
     /// Called on the periodic tick so `tail -f` on a running command's `out`
@@ -432,7 +474,7 @@ pub const Store = struct {
         self.current = null;
         if (code) |value| current.exit_code = value;
 
-        self.closeOpenResource(&current);
+        self.closeOpenRegion(&current);
         current.writer.interface.flush() catch {};
         current.file.close(self.io);
 
@@ -507,7 +549,7 @@ pub const Store = struct {
     fn disable(self: *Store) void {
         self.disabled = true;
         if (self.current) |*current| {
-            self.closeOpenResource(current);
+            self.closeOpenRegion(current);
             current.file.close(self.io);
             current.dir.close(self.io);
             self.current = null;
@@ -1397,6 +1439,121 @@ const OutputSink = struct {
 
 // --- resources published by programs ----------------------------------------
 
+test "noout records one placeholder while keeping region bytes out of metadata" {
+    const io = std.testing.io;
+    const gpa = std.testing.allocator;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var root_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const root_len = try tmp.dir.realPath(io, &root_buf);
+
+    var store = try Store.createJournal(gpa, io, root_buf[0..root_len]);
+    store.begin("demo", null);
+    store.append("before");
+    store.beginNoout();
+    store.append("secret bytes");
+    store.endRegion();
+    store.append("after");
+    store.finish(0);
+
+    const out = try store.journal_dir.readFileAlloc(io, "1/out", gpa, .limited(4096));
+    defer gpa.free(out);
+    try std.testing.expectEqualStrings("before" ++ noout_placeholder ++ "after", out);
+
+    const meta = try store.journal_dir.readFileAlloc(io, "1/meta.json", gpa, .limited(4096));
+    defer gpa.free(meta);
+    try std.testing.expect(std.mem.indexOf(u8, meta, "\"started\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, meta, "\"ended\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, meta, "noout") == null);
+    try std.testing.expect(std.mem.indexOf(u8, meta, "secret bytes") == null);
+    store.close();
+}
+
+test "an empty noout region still records its placeholder once" {
+    const io = std.testing.io;
+    const gpa = std.testing.allocator;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var root_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const root_len = try tmp.dir.realPath(io, &root_buf);
+
+    var store = try Store.createJournal(gpa, io, root_buf[0..root_len]);
+    store.begin("demo", null);
+    store.beginNoout();
+    store.endRegion();
+    store.finish(0);
+    const out = try store.journal_dir.readFileAlloc(io, "1/out", gpa, .limited(4096));
+    defer gpa.free(out);
+    try std.testing.expectEqualStrings(noout_placeholder, out);
+    store.close();
+}
+
+test "region nesting is refused and the first open region wins" {
+    const io = std.testing.io;
+    const gpa = std.testing.allocator;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var root_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const root_len = try tmp.dir.realPath(io, &root_buf);
+
+    var store = try Store.createJournal(gpa, io, root_buf[0..root_len]);
+    store.begin("resource-first", null);
+    store.beginResource("kept", "text/plain");
+    store.beginNoout();
+    store.append("resource body");
+    store.endRegion();
+    store.finish(0);
+
+    const resource = try store.journal_dir.readFileAlloc(io, "1/kept", gpa, .limited(4096));
+    defer gpa.free(resource);
+    try std.testing.expectEqualStrings("resource body", resource);
+    const first_out = try store.journal_dir.readFileAlloc(io, "1/out", gpa, .limited(4096));
+    defer gpa.free(first_out);
+    try std.testing.expectEqualStrings("resource body", first_out);
+
+    store.begin("noout-first", null);
+    store.beginNoout();
+    store.beginResource("refused", "text/plain");
+    store.append("omitted");
+    store.endRegion();
+    store.append("visible");
+    store.finish(0);
+
+    const second_out = try store.journal_dir.readFileAlloc(io, "2/out", gpa, .limited(4096));
+    defer gpa.free(second_out);
+    try std.testing.expectEqualStrings(noout_placeholder ++ "visible", second_out);
+    var second = try store.journal_dir.openDir(io, "2", .{});
+    defer second.close(io);
+    try std.testing.expectError(error.FileNotFound, second.openFile(io, "refused", .{}));
+    store.close();
+}
+
+test "an unfinished noout region is reset at the interaction boundary" {
+    const io = std.testing.io;
+    const gpa = std.testing.allocator;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var root_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const root_len = try tmp.dir.realPath(io, &root_buf);
+
+    var store = try Store.createJournal(gpa, io, root_buf[0..root_len]);
+    store.begin("unfinished", null);
+    store.beginNoout();
+    store.append("omitted");
+    store.finish(0);
+    store.begin("next", null);
+    store.append("recorded normally");
+    store.finish(0);
+
+    const first = try store.journal_dir.readFileAlloc(io, "1/out", gpa, .limited(4096));
+    defer gpa.free(first);
+    try std.testing.expectEqualStrings(noout_placeholder, first);
+    const second = try store.journal_dir.readFileAlloc(io, "2/out", gpa, .limited(4096));
+    defer gpa.free(second);
+    try std.testing.expectEqualStrings("recorded normally", second);
+    store.close();
+}
+
 /// A resource name comes from the program, so this is a boundary rather than
 /// a nicety: it decides what a program can write inside the journal.
 pub fn validResourcePath(path: []const u8) bool {
@@ -1495,7 +1652,7 @@ test "a resource keeps the newlines the program wrote, not the pty's" {
             store.append(written[i..end]);
             i = end;
         }
-        store.endResource();
+        store.endRegion();
 
         const text = try store.current.?.dir.readFileAlloc(io, "script.sh", std.testing.allocator, .limited(4096));
         defer std.testing.allocator.free(text);
@@ -1518,7 +1675,7 @@ test "a carriage return at the very end of a resource is kept" {
     store.begin("demo", null);
     store.beginResource("trailing", "text/plain");
     store.append("ends with cr\r");
-    store.endResource();
+    store.endRegion();
 
     const text = try store.current.?.dir.readFileAlloc(io, "trailing", std.testing.allocator, .limited(4096));
     defer std.testing.allocator.free(text);
@@ -1552,7 +1709,7 @@ test "metadata preserves every accepted resource beyond eight kibibytes" {
         var path_buf: [96]u8 = undefined;
         const path = try std.fmt.bufPrint(&path_buf, "files/item-\"quoted\"-\\\\-{d}.dat", .{i});
         store.beginResource(path, long_mime);
-        store.endResource();
+        store.endRegion();
         store.current.?.published[i].truncated = i % 3 == 0;
     }
     store.finish(0);
@@ -1594,7 +1751,7 @@ test "output removal redacts out and published resources but keeps the interacti
     journal.begin("publish", null);
     journal.beginResource("files/report.txt", "text/plain");
     journal.append("published bytes\r\n");
-    journal.endResource();
+    journal.endRegion();
     journal.finish(0);
     journal.begin("later", null);
     journal.finish(0);
@@ -1648,7 +1805,7 @@ test "output removal refuses resource paths that traverse symlinks" {
     journal.begin("publish", null);
     journal.beginResource("files/report.txt", "text/plain");
     journal.append("recorded\r\n");
-    journal.endResource();
+    journal.endRegion();
     journal.finish(0);
     journal.close();
 

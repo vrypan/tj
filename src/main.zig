@@ -4,6 +4,7 @@ const Io = std.Io;
 const cli = @import("cli.zig");
 const proxy = @import("proxy.zig");
 const commands = @import("commands.zig");
+const noout = @import("noout.zig");
 
 pub const version = "0.1.0";
 
@@ -20,11 +21,13 @@ const usage =
     \\Usage:
     \\  tj new [flags] [-- command ...]          create a journal and write to it
     \\  tj continue <id> [flags] [-- command ...] append to an existing journal
+    \\  tj noout -- command ...                   show output but omit it from out
     \\  tj <subcommand> [args ...]               work with what was recorded
     \\
     \\Subcommands:
     \\  new            run $SHELL, or a command, writing a new journal
     \\  continue ID    run a fresh shell or command, appending to one journal
+    \\  noout -- CMD   run a command whose visible output is omitted from out
     \\  hist           the interactions of this journal (also: history)
     \\  journals       every journal, newest first
     \\  current        this journal's id
@@ -76,6 +79,8 @@ pub fn main(init: std.process.Init) !u8 {
             error.UnknownSubcommand => "tj: unknown subcommand\n\n",
             error.MissingLifecycle => "tj: choose `tj new` or `tj continue <id>` before the command\n\n",
             error.MissingJournal => "tj: continue needs a journal id or suffix\n\n",
+            error.MissingNooutSeparator => "tj: noout requires `--` before the command\n\n",
+            error.MissingNooutCommand => "tj: noout needs a command after `--`\n\n",
         });
         try write(init.io, .stderr(), usage);
         return 2;
@@ -89,6 +94,18 @@ pub fn main(init: std.process.Init) !u8 {
         .version => {
             try write(init.io, .stdout(), "tj " ++ version ++ "\n");
             return 0;
+        },
+        .noout => |argv| {
+            const result = noout.run(arena, argv) catch |err| {
+                try write(init.io, .stderr(), switch (err) {
+                    error.NotInJournal => "tj: noout must run inside a tj journal writer\n",
+                    error.NoControllingTerminal => "tj: noout needs a controlling terminal\n",
+                    error.ForkFailed => "tj: cannot fork\n",
+                    else => "tj: cannot start noout command\n",
+                });
+                return 1;
+            };
+            return result.exit_code;
         },
         .subcommand => |sub| {
             var buf: [4096]u8 = undefined;
@@ -165,4 +182,5 @@ test {
     _ = @import("plain.zig");
     _ = @import("store.zig");
     _ = commands;
+    _ = noout;
 }

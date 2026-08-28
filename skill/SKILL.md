@@ -106,6 +106,11 @@ Two things will look wrong and are not:
   missing data.
 - **Prompt redraw** appears at the end of an interaction's output. It belongs
   to the shell, not the command.
+- **`<tj:noout>` means visible output was deliberately omitted.** `tj noout`
+  and cooperating programs can show bytes in the terminal without retaining
+  them in `out`. The placeholder carries no byte count or hidden payload, and
+  `meta.json` intentionally adds no noout fields. Do not treat it as a failed
+  capture or try to reconstruct what was omitted.
 
 ## Referring across journals
 

@@ -48,8 +48,10 @@ pub const Event = union(enum) {
     /// `OSC 5107;tj;begin;<path>[;<mime>]` - the output that follows is also a
     /// named resource of this interaction.
     resource_begin: struct { path: []const u8, mime: []const u8 },
-    /// `OSC 5107;tj;end` - that resource is complete.
-    resource_end,
+    /// `OSC 5107;tj;noout` - output stays visible but is omitted from `out`.
+    noout_begin,
+    /// `OSC 5107;tj;end` - the current resource or noout region is complete.
+    region_end,
     /// A malformed or unsupported tj sequence. Carries the payload for the
     /// journal log; the sequence itself is dropped.
     protocol_error: []const u8,
@@ -321,8 +323,13 @@ pub const Scanner = struct {
             return;
         }
 
+        if (std.mem.eql(u8, rest, "noout")) {
+            sink.event(.noout_begin);
+            return;
+        }
+
         if (std.mem.eql(u8, rest, "end")) {
-            sink.event(.resource_end);
+            sink.event(.region_end);
             return;
         }
 
@@ -575,7 +582,7 @@ test "a published resource is announced and stripped" {
     try std.testing.expectEqual(@as(usize, 2), r.events.items.len);
     try std.testing.expectEqualStrings("files/data.csv", r.events.items[0].resource_begin.path);
     try std.testing.expectEqualStrings("text/csv", r.events.items[0].resource_begin.mime);
-    try std.testing.expect(r.events.items[1] == .resource_end);
+    try std.testing.expect(r.events.items[1] == .region_end);
 }
 
 test "a resource with no mime type gets the default" {
@@ -615,4 +622,46 @@ test "resource markers survive any chunking" {
             piece.events.items[0].resource_begin.path,
         );
     }
+}
+
+test "noout markers are exact, stripped, and survive any chunking" {
+    const gpa = std.testing.allocator;
+    const input =
+        "before\x1b]5107;tj;noout\x1b\\omitted\x1b]5107;tj;end\x1b\\after";
+    var whole = run(gpa, input, input.len, false);
+    defer whole.deinit();
+
+    try std.testing.expectEqualStrings("beforeomittedafter", whole.forwarded.items);
+    try std.testing.expectEqual(@as(usize, 2), whole.events.items.len);
+    try std.testing.expect(whole.events.items[0] == .noout_begin);
+    try std.testing.expect(whole.events.items[1] == .region_end);
+
+    var chunk: usize = 1;
+    while (chunk <= input.len) : (chunk += 1) {
+        var piece = run(gpa, input, chunk, false);
+        defer piece.deinit();
+        try std.testing.expectEqualStrings(whole.forwarded.items, piece.forwarded.items);
+        try std.testing.expectEqual(whole.events.items.len, piece.events.items.len);
+        try std.testing.expect(piece.events.items[0] == .noout_begin);
+        try std.testing.expect(piece.events.items[1] == .region_end);
+    }
+}
+
+test "keep_osc forwards noout markers only as control bytes" {
+    const gpa = std.testing.allocator;
+    const input = "a\x1b]5107;tj;noout\x1b\\hidden\x1b]5107;tj;end\x1b\\b";
+    var r = run(gpa, input, 1, true);
+    defer r.deinit();
+    try std.testing.expectEqualStrings(input, r.forwarded.items);
+    try std.testing.expectEqualStrings("ahiddenb", r.recorded.items);
+    try std.testing.expect(r.events.items[0] == .noout_begin);
+    try std.testing.expect(r.events.items[1] == .region_end);
+}
+
+test "noout with fields is a protocol error" {
+    const gpa = std.testing.allocator;
+    var r = run(gpa, "\x1b]5107;tj;noout;extra\x1b\\", 1, false);
+    defer r.deinit();
+    try std.testing.expectEqual(@as(usize, 1), r.events.items.len);
+    try std.testing.expect(r.events.items[0] == .protocol_error);
 }

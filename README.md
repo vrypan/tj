@@ -440,6 +440,40 @@ names, so it also covers `git log` paging through `less` and your own
 tools. It applies to recording only: the program renders exactly as it
 would without tj.
 
+## Showing output without recording it
+
+Some output is useful to see now but harmful as input to later searches or
+agents. Run that command through `tj noout` from inside a journal writer:
+
+```sh
+tj noout -- command args...
+```
+
+The command keeps the caller's terminal, standard streams, environment,
+working directory, arguments, exit status, and signal result. Its stdout and
+stderr remain visible, but `out` contains the fixed text `<tj:noout>` once in
+their place. The marker itself is not displayed or recorded.
+
+Cooperating programs can mark only part of their output directly:
+
+```sh
+printf '\033]5107;tj;noout\033\\'
+printf 'visible now, omitted from out\n'
+printf '\033]5107;tj;end\033\\'
+```
+
+Resource and noout regions share the same non-nesting OSC 5107 state. The
+generic `end` closes whichever kind is open, and an unfinished noout region is
+discarded when the interaction ends so it cannot suppress the next command.
+`--keep-osc` forwards TJ's markers for protocol debugging, but they are still
+never written to `out`.
+
+This is an explicit recording control, not a secrecy boundary. TJ does not
+infer it from the PTY's ECHO flag: password input with echo disabled is already
+absent from output, while many non-secret interactive programs also disable
+echo. A tool such as `tj-grep` may emit the markers itself when its displayed
+results should not feed later searches.
+
 ## Publishing resources
 
 A program can mark spans of its own output as named files. The output still
@@ -463,6 +497,10 @@ The point is that a program which prints a table, a diff or a script can
 make it directly reusable without inventing a side channel or a structured
 output mode. Plain text stays the interchange format; the marks only add
 addressability.
+
+Publishing and noout use one non-nesting region state. A begin marker received
+while either kind is already open is refused; the first region remains open
+until the next generic end marker.
 
 Names are the program's choice, so they are checked: a name cannot escape
 its interaction directory, and cannot be `cmd`, `out`, `rc`, `meta.json` or

@@ -615,10 +615,11 @@ then takes the journal mutation lock, and refuses an active journal. Successful
 removal renames the ULID directory to root-private trash before recursive deletion. `--force` skips confirmation
 only; it never bypasses selection, locking, or validation.
 
-## Semantic output resources
+## Semantic output regions
 
 TJ can preserve structure that would otherwise be lost when a program
-writes human-readable output.
+writes human-readable output, and can explicitly keep visible output out of
+the recorded resource.
 
 A cooperating program marks the beginning and end of a resource using
 **OSC 5107** (`5107` reads as `SLOT` in leetspeak). The resource
@@ -632,6 +633,20 @@ OSC 5107 ; tj ; begin ; <path> ; <mime> ST
 <ordinary output bytes>
 OSC 5107 ; tj ; end ST
 ```
+
+The same non-nesting protocol has a noout region:
+
+``` text
+OSC 5107 ; tj ; noout ST
+<ordinary output bytes>
+OSC 5107 ; tj ; end ST
+```
+
+TJ removes both markers before forwarding output. On `noout`, it writes the
+fixed text `<tj:noout>` once to the interaction's `out`, without displaying
+that text. Bytes inside the region are forwarded to the terminal but are not
+written to `out` or to a published resource. Normal recording resumes after
+the generic `end` marker.
 
 For example, an agent might produce a reply containing a CSV data set
 and a shell script:
@@ -673,7 +688,9 @@ exposing `@42/err`. Whether such a resource exists is up to the program.
 The v1 protocol has deliberately simple rules:
 
 -   no nesting
--   one open resource at a time
+-   one open region at a time, either a resource or noout
+-   the first open region wins when another begin marker is received
+-   `end` closes whichever region is open
 -   resource names are relative paths
 -   absolute paths and `..` are rejected
 -   `cmd`, `out`, `rc`, `meta.json`, and private removal bookkeeping names are
@@ -682,6 +699,10 @@ The v1 protocol has deliberately simple rules:
     contents
 -   OSC markers are control metadata and are not part of `@N/out`
 -   `ST` (`ESC \`) terminates the OSC sequence
+-   an unfinished resource is closed and marked truncated at the interaction
+    boundary; an unfinished noout region is cleared without metadata so it
+    cannot affect the next interaction
+-   noout payload sizes or flags are not stored in `meta.json`
 
 By default, TJ strips OSC 5107 sequences from the stream before
 forwarding it to the terminal emulator. An option keeps them in the
@@ -690,6 +711,19 @@ want to interpret them.
 
 Programs that do not emit OSC 5107 still work normally and simply expose
 the three default resources.
+
+`tj noout -- command args...` is the user-facing wrapper for a whole command.
+It requires an active journal and a controlling terminal, writes the region
+markers to that terminal, executes the supplied argv directly without a shell,
+and otherwise inherits the caller's cwd, environment, standard streams,
+terminal, and process group. Its result is the child's exit status, or
+`128 + signal` when the child dies from a signal. The wrapper makes a best
+effort to emit `end` after it has emitted `noout`; interaction-boundary reset
+handles cases where the wrapper itself dies before it can do so.
+
+Noout is explicit and is not inferred from the PTY ECHO flag. Input typed with
+echo disabled is already absent from `out`, and disabling echo is not in
+itself evidence that a program's output is secret.
 
 This allows richer programs, particularly agents, to turn parts of
 otherwise ordinary textual responses into reusable Unix resources

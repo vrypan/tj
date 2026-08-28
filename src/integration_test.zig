@@ -1644,6 +1644,165 @@ fn publisher(gpa: std.mem.Allocator, body: []const u8) ![]u8 {
     return std.fmt.allocPrint(gpa, "printf '{s}'", .{body});
 }
 
+test "a noout OSC region stays visible but is replaced in out" {
+    if (!haveZsh()) return error.SkipZigTest;
+    const gpa = std.testing.allocator;
+
+    var journal = try Journal.open(gpa);
+    defer journal.close();
+    const producer = try journal.fixture(
+        gpa,
+        "noout-producer.sh",
+        "printf 'ordinary-before\\n'\n" ++
+            "printf '\\033]5107;tj;noout\\033\\\\'\n" ++
+            "printf 'VISIBLE-BUT-OMITTED\\n'\n" ++
+            "printf '\\033]5107;tj;end\\033\\\\'\n" ++
+            "printf 'ordinary-after\\n'\n",
+    );
+    defer gpa.free(producer);
+
+    const child = try spawnJournalZsh(gpa, &journal);
+    var transcript: std.ArrayList(u8) = .empty;
+    defer transcript.deinit(gpa);
+    try setupJournalZsh(gpa, child, &transcript);
+    const command = try std.fmt.allocPrint(gpa, "/bin/sh '{s}'", .{producer});
+    defer gpa.free(command);
+    const from = transcript.items.len;
+    try child.write(command);
+    try child.write("\n");
+    try std.testing.expect(try child.readUntilFrom(gpa, &transcript, from, test_prompt, timeout_ms));
+    try child.write("exit 0\n");
+    try std.testing.expectEqual(@as(u8, 0), try child.finish(gpa, &transcript, timeout_ms));
+
+    const visible = transcript.items[from..];
+    try std.testing.expect(std.mem.indexOf(u8, visible, "VISIBLE-BUT-OMITTED") != null);
+    try std.testing.expect(std.mem.indexOf(u8, visible, "5107;tj") == null);
+
+    const out = try journal.read(gpa, "1/out");
+    defer gpa.free(out);
+    try std.testing.expect(std.mem.indexOf(u8, out, "ordinary-before") != null);
+    try std.testing.expect(std.mem.indexOf(u8, out, "<tj:noout>") != null);
+    try std.testing.expect(std.mem.indexOf(u8, out, "ordinary-after") != null);
+    try std.testing.expect(std.mem.indexOf(u8, out, "VISIBLE-BUT-OMITTED") == null);
+    try std.testing.expect(std.mem.indexOf(u8, out, "5107;tj") == null);
+
+    const meta = try journal.read(gpa, "1/meta.json");
+    defer gpa.free(meta);
+    try std.testing.expect(std.mem.indexOf(u8, meta, "noout") == null);
+    try std.testing.expect(std.mem.indexOf(u8, meta, "VISIBLE-BUT-OMITTED") == null);
+}
+
+test "an unfinished noout OSC region cannot suppress the next interaction" {
+    if (!haveZsh()) return error.SkipZigTest;
+    const gpa = std.testing.allocator;
+
+    var journal = try Journal.open(gpa);
+    defer journal.close();
+    const producer = try journal.fixture(
+        gpa,
+        "unfinished-noout.sh",
+        "printf '\\033]5107;tj;noout\\033\\\\'\n" ++
+            "printf 'OMITTED-UNTIL-BOUNDARY\\n'\n",
+    );
+    defer gpa.free(producer);
+    const first = try std.fmt.allocPrint(gpa, "/bin/sh '{s}'", .{producer});
+    defer gpa.free(first);
+    try recordJournal(gpa, &journal, &.{ first, "printf 'NEXT-INTERACTION-RECORDED\\n'" });
+
+    const first_out = try journal.read(gpa, "1/out");
+    defer gpa.free(first_out);
+    try std.testing.expect(std.mem.indexOf(u8, first_out, "<tj:noout>") != null);
+    try std.testing.expect(std.mem.indexOf(u8, first_out, "OMITTED-UNTIL-BOUNDARY") == null);
+    const second_out = try journal.read(gpa, "2/out");
+    defer gpa.free(second_out);
+    try std.testing.expect(std.mem.indexOf(u8, second_out, "NEXT-INTERACTION-RECORDED") != null);
+}
+
+test "tj noout preserves output argv and child statuses while omitting bytes" {
+    if (!haveZsh()) return error.SkipZigTest;
+    const gpa = std.testing.allocator;
+
+    var journal = try Journal.open(gpa);
+    defer journal.close();
+    const producer = try journal.fixture(
+        gpa,
+        "wrapper-producer.sh",
+        "printf 'WRAPPER-STDOUT:%s|%s|%s\\n' \"$1\" \"$2\" \"$3\"\n" ++
+            "printf 'WRAPPER-STDERR\\n' >&2\n" ++
+            "printf 'WRAPPER-CONTEXT:%s|%s|' \"$PWD\" \"$NOOUT_TEST_ENV\"\n" ++
+            "if test -t 0 && test -t 1 && test -t 2; then printf 'tty\\n'; else printf 'not-tty\\n'; fi\n",
+    );
+    defer gpa.free(producer);
+
+    const child = try spawnJournalZsh(gpa, &journal);
+    var transcript: std.ArrayList(u8) = .empty;
+    defer transcript.deinit(gpa);
+    try setupJournalZsh(gpa, child, &transcript);
+    const command = try std.fmt.allocPrint(
+        gpa,
+        "cd /; NOOUT_TEST_ENV=preserved command \"$TJ\" noout -- /bin/sh '{s}' 'two words' '*' --flag",
+        .{producer},
+    );
+    defer gpa.free(command);
+    const visible_from = transcript.items.len;
+    var from = visible_from;
+    try child.write(command);
+    try child.write("\n");
+    try std.testing.expect(try child.readUntilFrom(gpa, &transcript, from, test_prompt, timeout_ms));
+    from = transcript.items.len;
+    try child.write("command \"$TJ\" noout -- /bin/sh -c 'exit 7'\n");
+    try std.testing.expect(try child.readUntilFrom(gpa, &transcript, from, test_prompt, timeout_ms));
+    from = transcript.items.len;
+    try child.write("command \"$TJ\" noout -- /bin/sh -c 'kill -TERM $$'\n");
+    try std.testing.expect(try child.readUntilFrom(gpa, &transcript, from, test_prompt, timeout_ms));
+    from = transcript.items.len;
+    try child.write("command \"$TJ\" noout -- /definitely/not/a/tj-command\n");
+    try std.testing.expect(try child.readUntilFrom(gpa, &transcript, from, test_prompt, timeout_ms));
+    try child.write("exit 0\n");
+    try std.testing.expectEqual(@as(u8, 0), try child.finish(gpa, &transcript, timeout_ms));
+
+    const visible = transcript.items[visible_from..];
+    try std.testing.expect(std.mem.indexOf(u8, visible, "WRAPPER-STDOUT:two words|*|--flag") != null);
+    try std.testing.expect(std.mem.indexOf(u8, visible, "WRAPPER-STDERR") != null);
+    try std.testing.expect(std.mem.indexOf(u8, visible, "WRAPPER-CONTEXT:/|preserved|tty") != null);
+    try std.testing.expect(std.mem.indexOf(u8, visible, "5107;tj") == null);
+
+    const first_out = try journal.read(gpa, "1/out");
+    defer gpa.free(first_out);
+    try std.testing.expect(std.mem.indexOf(u8, first_out, "<tj:noout>") != null);
+    try std.testing.expect(std.mem.indexOf(u8, first_out, "WRAPPER-STDOUT") == null);
+    try std.testing.expect(std.mem.indexOf(u8, first_out, "WRAPPER-STDERR") == null);
+    for ([_]struct { path: []const u8, want: []const u8 }{
+        .{ .path = "1/rc", .want = "0\n" },
+        .{ .path = "2/rc", .want = "7\n" },
+        .{ .path = "3/rc", .want = "143\n" },
+        .{ .path = "4/rc", .want = "127\n" },
+    }) |case| {
+        const rc = try journal.read(gpa, case.path);
+        defer gpa.free(rc);
+        try std.testing.expectEqualStrings(case.want, rc);
+    }
+}
+
+test "tj noout syntax and journal preconditions fail without emitting OSC" {
+    const gpa = std.testing.allocator;
+    leaveJournal();
+
+    const missing_separator = try runNonTty(gpa, &.{ "noout", "/bin/true" });
+    defer gpa.free(missing_separator.stdout);
+    defer gpa.free(missing_separator.stderr);
+    try std.testing.expectEqual(@as(u8, 2), missing_separator.term.exited);
+    try std.testing.expect(std.mem.indexOf(u8, missing_separator.stdout, "5107;tj") == null);
+    try std.testing.expect(std.mem.indexOf(u8, missing_separator.stderr, "requires `--`") != null);
+
+    const outside = try runNonTty(gpa, &.{ "noout", "--", "/bin/true" });
+    defer gpa.free(outside.stdout);
+    defer gpa.free(outside.stderr);
+    try std.testing.expectEqual(@as(u8, 1), outside.term.exited);
+    try std.testing.expect(std.mem.indexOf(u8, outside.stdout, "5107;tj") == null);
+    try std.testing.expect(std.mem.indexOf(u8, outside.stderr, "inside a tj journal writer") != null);
+}
+
 test "a program can publish parts of its output as named resources" {
     if (!haveZsh()) return error.SkipZigTest;
     const gpa = std.testing.allocator;
