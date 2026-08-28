@@ -2371,8 +2371,23 @@ test "zsh completion keeps special resource names as one inert argument" {
     try std.testing.expect(try child.readUntilFrom(gpa, &out, from, test_prompt, timeout_ms));
 
     from = out.items.len;
-    try child.write("autoload -Uz compinit; compinit -D; _tj_register_completion\n");
-    try std.testing.expect(try child.readUntilFrom(gpa, &out, from, test_prompt, timeout_ms));
+    // `compinit` may otherwise stop for its insecure-directory question on a
+    // CI image. This fixture tests TJ's completion functions, not compinit's
+    // trust policy, so ignore insecure system entries instead of prompting.
+    // Keep the readiness marker split in the typed command: terminal echo
+    // must not satisfy the wait before setup actually reaches its end.
+    try child.write(
+        "autoload -Uz compinit && compinit -D -i && _tj_register_completion && " ++
+            "print -r -- TJ_COMPINIT_\"\"READY\n",
+    );
+    if (!try child.readUntilFrom(gpa, &out, from, "TJ_COMPINIT_READY", timeout_ms)) {
+        std.debug.print("completion setup did not finish; transcript follows:\n{s}\n", .{out.items[from..]});
+        return error.CompletionSetupDidNotFinish;
+    }
+    if (!try child.readUntilFrom(gpa, &out, from, test_prompt, timeout_ms)) {
+        std.debug.print("completion setup did not return a prompt; transcript follows:\n{s}\n", .{out.items[from..]});
+        return error.CompletionPromptMissing;
+    }
 
     from = out.items.len;
     try child.write("command \"$TJ\" name @1 build-failure\n");
