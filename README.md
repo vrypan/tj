@@ -1,5 +1,10 @@
 # tj — Terminal Journal
 
+> [!WARNING] 
+> **PRE-ALPHA**
+>
+> This project is under heavy development and many things will change.
+
 Makes terminal interactions persistent, addressable, and reusable. See
 [TJ-spec.md](TJ-spec.md) for the design.
 
