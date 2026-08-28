@@ -197,6 +197,7 @@ changing; the mutation command is then recorded there like any other command.
 ```sh
 tj rm @42                    # the entire interaction
 tj rm @42/out                # output and resources derived from it
+tj rm @2..@10                # every existing interaction in this inclusive range
 tj rm --journal pgsd         # prompt before removing an inactive journal
 tj rm --journal pgsd --force # non-interactive journal removal
 ```
@@ -207,6 +208,11 @@ its annotations and resources. Removing only `out` preserves `cmd`, `rc`, the
 interaction annotations, and other recording metadata, but removes every
 published resource derived from that output. Individual published resources
 cannot be removed because their bytes would still remain in `out`.
+
+Ranges use two unqualified numeric references, are inclusive, and remove whole
+interactions only. Existing numbering holes inside a range are skipped. A
+range that includes the currently running interaction is refused before any
+interaction is removed.
 
 An interaction removal leaves a numbering hole. The removal command itself is
 already a newer interaction in the same journal, so later numbers continue

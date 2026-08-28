@@ -45,7 +45,7 @@ const usage =
     \\                  tag, query, remove, or list interaction tags
     \\  pin [@ref | --remove @ref]
     \\                  pin, unpin, or list pinned interactions
-    \\  rm <@ref | @ref/out>
+    \\  rm <@ref | @ref/out | @N..@M>
     \\  rm --journal <id> [--force]
     \\                  remove recorded data or an inactive journal
     \\
@@ -129,6 +129,7 @@ pub fn main(init: std.process.Init) !u8 {
                     error.NameTaken => "tj: that interaction name is already in use\n",
                     error.InvalidAnnotations => "tj: invalid annotations.json; refusing to overwrite it\n",
                     error.UnsupportedRemoval => "tj: only an interaction or its out may be removed\n",
+                    error.InvalidRange => "tj: invalid interaction range; use ascending numeric references such as @2..@10\n",
                     error.CurrentInteraction => "tj: cannot remove the currently running interaction\n",
                     error.ActiveJournal => "tj: cannot remove a journal while it is being written\n",
                     error.AmbiguousJournal => "tj: journal suffix is ambiguous\n",

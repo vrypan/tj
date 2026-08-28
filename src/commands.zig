@@ -30,6 +30,7 @@ pub const Error = error{
     NameTaken,
     InvalidAnnotations,
     UnsupportedRemoval,
+    InvalidRange,
     CurrentInteraction,
     ActiveJournal,
     AmbiguousJournal,
@@ -732,6 +733,9 @@ fn removeCommand(
     }
 
     if (force or interaction_arg == null) return error.BadArguments;
+    if (try parseRemovalRange(interaction_arg.?)) |range| {
+        return removeInteractionRange(gpa, io, home, range);
+    }
     const target = blk: {
         var root = try store.openRoot(io, home);
         defer root.close(io);
@@ -766,6 +770,95 @@ fn removeCommand(
     manifest.removeInteraction(gpa, target.number);
     try annotations.save(gpa, io, mutation.root, mutation.journal, &manifest);
     try store.finishStagedRemoval(io, mutation.root, staged);
+}
+
+const RemovalRange = struct {
+    first: u32,
+    last: u32,
+};
+
+/// `rm` owns this small grammar extension; ranges are not references accepted
+/// by readers, zsh expansion, or other mutation commands.
+fn parseRemovalRange(text: []const u8) !?RemovalRange {
+    const cut = std.mem.indexOf(u8, text, "..") orelse return null;
+    if (std.mem.indexOf(u8, text[cut + 2 ..], "..") != null) return error.InvalidRange;
+
+    const first = try parseRemovalRangeEndpoint(text[0..cut]);
+    const last = try parseRemovalRangeEndpoint(text[cut + 2 ..]);
+    if (first > last) return error.InvalidRange;
+    return .{ .first = first, .last = last };
+}
+
+fn parseRemovalRangeEndpoint(text: []const u8) !u32 {
+    const parsed = reference.parse(text) catch return error.InvalidRange;
+    if (parsed.subpath.len != 0 or parsed.trailing_slash) return error.InvalidRange;
+    return switch (parsed.body) {
+        .current => |target| switch (target) {
+            .number => |number| number,
+            .name => error.InvalidRange,
+        },
+        .qualified => error.CrossJournalMutation,
+        .previous => error.InvalidRange,
+    };
+}
+
+fn removeInteractionRange(
+    gpa: std.mem.Allocator,
+    io: Io,
+    home: ?[]const u8,
+    range: RemovalRange,
+) !void {
+    var mutation = try openCurrentMutation(gpa, io, home);
+    defer mutation.lock.close(io);
+    defer mutation.root.close(io);
+
+    const numbers = try store.listNumbers(gpa, io, mutation.root, mutation.journal);
+    defer gpa.free(numbers);
+    if (numbers.len == 0) return error.NoSuchInteraction;
+
+    // The highest directory is the running removal command in normal use, or
+    // an unfinished boundary left by the last writer. Validate this before
+    // staging any directory so a protected range cannot partially apply.
+    const highest = numbers[numbers.len - 1];
+    if (range.first <= highest and highest <= range.last) return error.CurrentInteraction;
+
+    var selected: usize = 0;
+    for (numbers) |number| {
+        if (range.first <= number and number <= range.last) selected += 1;
+    }
+    if (selected == 0) return error.NoSuchInteraction;
+
+    var manifest = try annotations.load(gpa, io, mutation.root, mutation.journal);
+    defer manifest.deinit(gpa);
+    pruneMissingAnnotations(gpa, io, mutation.root, mutation.journal, &manifest);
+
+    var staged_paths: std.ArrayList([]u8) = .empty;
+    defer {
+        for (staged_paths.items) |path| gpa.free(path);
+        staged_paths.deinit(gpa);
+    }
+    try staged_paths.ensureTotalCapacity(gpa, selected);
+
+    for (numbers) |number| {
+        if (number < range.first or number > range.last) continue;
+        const staged = try store.stageInteractionRemoval(gpa, io, mutation.root, mutation.journal, number);
+        staged_paths.appendAssumeCapacity(staged);
+        manifest.removeInteraction(gpa, number);
+    }
+
+    try annotations.save(gpa, io, mutation.root, mutation.journal, &manifest);
+    for (staged_paths.items) |path| try store.finishStagedRemoval(io, mutation.root, path);
+}
+
+test "interaction removal ranges are inclusive numeric current-journal references" {
+    const range = (try parseRemovalRange("@2..@10")).?;
+    try std.testing.expectEqual(@as(u32, 2), range.first);
+    try std.testing.expectEqual(@as(u32, 10), range.last);
+    try std.testing.expect((try parseRemovalRange("@2")) == null);
+    try std.testing.expectError(error.InvalidRange, parseRemovalRange("@10..@2"));
+    try std.testing.expectError(error.InvalidRange, parseRemovalRange("@two..@ten"));
+    try std.testing.expectError(error.InvalidRange, parseRemovalRange("@2/out..@10/out"));
+    try std.testing.expectError(error.CrossJournalMutation, parseRemovalRange("@abcd.2..@abcd.10"));
 }
 
 // --- reading resources ------------------------------------------------------

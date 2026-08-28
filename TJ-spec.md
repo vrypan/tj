@@ -585,6 +585,7 @@ reloaded after acquiring it. No per-interaction or high-water lock exists.
 ``` text
 tj rm @42
 tj rm @42/out
+tj rm @2..@10
 tj rm --journal <id-or-suffix> [--force]
 ```
 
@@ -595,6 +596,13 @@ removal command itself has already become that newer interaction, which both
 refuses the running command and preserves monotonic numbering without a
 high-water manifest. Removed interactions leave holes; remaining interactions
 are never renumbered.
+
+`tj rm @N..@M` removes every existing whole interaction in the inclusive
+numeric interval. Both endpoints must be unqualified current-journal numeric
+references with `N <= M`; names, `@-`, resource suffixes, and qualified
+cross-journal endpoints are rejected. Existing holes are skipped. The command
+validates that the interval does not contain the protected highest interaction
+before staging any removal.
 
 Removing an interaction first renames its directory into private journal
 trash, removes its annotation entry atomically, and deletes the staged tree.

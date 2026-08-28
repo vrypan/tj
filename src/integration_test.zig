@@ -892,6 +892,87 @@ test "output and interaction removal clean data without reusing numbers" {
     try std.testing.expectEqualStrings("echo after-hole", next_cmd);
 }
 
+test "interaction ranges remove existing entries across holes and reject the running boundary" {
+    if (!haveZsh()) return error.SkipZigTest;
+    const gpa = std.testing.allocator;
+    const io = std.testing.io;
+    var journal = try Journal.open(gpa);
+    defer journal.close();
+    try recordJournal(gpa, &journal, &.{
+        "echo one",
+        "echo two",
+        "echo three",
+        "echo four",
+        "echo five",
+    });
+    try journal.enter(gpa);
+    const home = try journal.homeArg(gpa);
+    defer gpa.free(home);
+
+    for ([_][]const []const u8{
+        &.{ "name", "@2", "range-name" },
+        &.{ "tag", "@3", "range-tag" },
+        &.{ "pin", "@4" },
+    }) |command_args| {
+        var argv: std.ArrayList([]const u8) = .empty;
+        defer argv.deinit(gpa);
+        try argv.appendSlice(gpa, &.{ "--home", home });
+        try argv.appendSlice(gpa, command_args);
+        var result = try run(gpa, argv.items, 24, 100);
+        defer result.out.deinit(gpa);
+        try std.testing.expectEqual(@as(u8, 0), result.code);
+    }
+
+    // recordJournal leaves its `exit` interaction as the protected highest
+    // directory. A range containing it must fail before removing @2.
+    var protected = try run(gpa, &.{ "--home", home, "rm", "@2..@6" }, 24, 120);
+    defer protected.out.deinit(gpa);
+    try std.testing.expectEqual(@as(u8, 1), protected.code);
+    try std.testing.expect(std.mem.indexOf(u8, protected.out.items, "currently running") != null);
+    var before = try journal.journalDir();
+    var still_two = try before.openDir(io, "2", .{});
+    still_two.close(io);
+    before.close(io);
+
+    // Make a pre-existing hole inside the successful interval.
+    var hole = try run(gpa, &.{ "--home", home, "rm", "@3" }, 24, 100);
+    defer hole.out.deinit(gpa);
+    try std.testing.expectEqual(@as(u8, 0), hole.code);
+
+    // Drive the range through real zsh: its shorthand canonicalizer must leave
+    // the range word intact for the rm-specific parser.
+    const id = try journal.journalName(gpa);
+    defer gpa.free(id);
+    const child = try spawnContinuedJournalZsh(gpa, &journal, id);
+    var transcript: std.ArrayList(u8) = .empty;
+    defer transcript.deinit(gpa);
+    try setupJournalZsh(gpa, child, &transcript);
+    const from = transcript.items.len;
+    try child.write("command \"$TJ\" rm @2..@5\n");
+    try std.testing.expect(try child.readUntilFrom(gpa, &transcript, from, test_prompt, timeout_ms));
+    try child.write("exit 0\n");
+    try std.testing.expectEqual(@as(u8, 0), try child.finish(gpa, &transcript, timeout_ms));
+
+    var dir = try journal.journalDir();
+    defer dir.close(io);
+    for ([_][]const u8{ "2", "3", "4", "5" }) |number| {
+        try std.testing.expectError(error.FileNotFound, dir.openDir(io, number, .{}));
+    }
+    for ([_][]const u8{ "1", "6", "7" }) |number| {
+        var kept = try dir.openDir(io, number, .{});
+        kept.close(io);
+    }
+    const range_cmd = try dir.readFileAlloc(io, "7/cmd", gpa, .limited(4096));
+    defer gpa.free(range_cmd);
+    try std.testing.expectEqualStrings("command \"$TJ\" rm @2..@5", range_cmd);
+
+    const annotation_text = try dir.readFileAlloc(io, "annotations.json", gpa, .limited(4096));
+    defer gpa.free(annotation_text);
+    try std.testing.expect(std.mem.indexOf(u8, annotation_text, "range-name") == null);
+    try std.testing.expect(std.mem.indexOf(u8, annotation_text, "range-tag") == null);
+    try std.testing.expect(std.mem.indexOf(u8, annotation_text, "\"4\"") == null);
+}
+
 test "concurrent annotation commands preserve every update" {
     if (!haveZsh()) return error.SkipZigTest;
     const gpa = std.testing.allocator;
