@@ -150,8 +150,14 @@ For [starship](https://starship.rs), add an `env_var` module to
 `~/.config/starship.toml`:
 
 ```toml
+format = '$all${env_var.TJ_NEXT}$character'
+
 [env_var.TJ_REF]
 format = '[$env_value]($style) '
+style = 'dimmed white'
+
+[env_var.TJ_NEXT]
+format = '[@$env_value]($style) '
 style = 'dimmed white'
 ```
 
@@ -159,29 +165,11 @@ style = 'dimmed white'
 
 ```
 tj on git main via zig v0.16.0  @fgpc.43
->
+@43 >
 ```
 
 Outside a tj journal writer the variable is unset and the module renders nothing,
 leaving your prompt exactly as it was.
-
-To put it at the far left instead, name it explicitly at the front of your
-format:
-
-```toml
-format = """
-${env_var.TJ_REF}$all\
-$character"""
-```
-
-Styling the journal and the number differently takes two modules:
-
-```toml
-[env_var.TJ_JOURNAL_SHORT]
-format = '[$env_value](dimmed white)'
-[env_var.TJ_NEXT]
-format = '[.$env_value](white) '
-```
 
 For a plain zsh prompt:
 
