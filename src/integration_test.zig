@@ -2415,6 +2415,9 @@ test "zsh completion keeps special resource names as one inert argument" {
     try std.testing.expect(try child.readUntilFrom(gpa, &out, from, "~[@1]", timeout_ms));
     try child.write("/out\n");
     try std.testing.expect(try child.readUntilFrom(gpa, &out, from, "special-resource-content", timeout_ms));
+    // Output can arrive before precmd has redrawn the prompt. Do not start the
+    // next ZLE interaction until the shell is actually ready for input again.
+    try std.testing.expect(try child.readUntilFrom(gpa, &out, from, test_prompt, timeout_ms));
 
     // Dynamic-directory name completion is offered inside ~[...].
     from = out.items.len;
@@ -2483,6 +2486,7 @@ test "zsh completion keeps special resource names as one inert argument" {
     try std.testing.expect(try child.readUntilFrom(gpa, &out, from, "file.txt", timeout_ms));
     try child.write("\n");
     try std.testing.expect(try child.readUntilFrom(gpa, &out, from, "special-resource-content", timeout_ms));
+    try std.testing.expect(try child.readUntilFrom(gpa, &out, from, test_prompt, timeout_ms));
 
     // Shorthand resource completion works beneath a named interaction too.
     from = out.items.len;
@@ -2491,6 +2495,7 @@ test "zsh completion keeps special resource names as one inert argument" {
     try std.testing.expect(try child.readUntilFrom(gpa, &out, from, "file.txt", timeout_ms));
     try child.write("\n");
     try std.testing.expect(try child.readUntilFrom(gpa, &out, from, "special-resource-content", timeout_ms));
+    try std.testing.expect(try child.readUntilFrom(gpa, &out, from, test_prompt, timeout_ms));
 
     from = out.items.len;
     try child.write("cat ~[@1]/top");
@@ -2498,6 +2503,7 @@ test "zsh completion keeps special resource names as one inert argument" {
     try std.testing.expect(try child.readUntilFrom(gpa, &out, from, "note.txt", timeout_ms));
     try child.write("\n");
     try std.testing.expect(try child.readUntilFrom(gpa, &out, from, "top-resource-content", timeout_ms));
+    try std.testing.expect(try child.readUntilFrom(gpa, &out, from, test_prompt, timeout_ms));
 
     // The original shorthand completion remains available.
     from = out.items.len;
@@ -2506,6 +2512,7 @@ test "zsh completion keeps special resource names as one inert argument" {
     try std.testing.expect(try child.readUntilFrom(gpa, &out, from, "file.txt", timeout_ms));
     try child.write("\n");
     try std.testing.expect(try child.readUntilFrom(gpa, &out, from, "special-resource-content", timeout_ms));
+    try std.testing.expect(try child.readUntilFrom(gpa, &out, from, test_prompt, timeout_ms));
 
     try child.write("exit 0\n");
     try std.testing.expectEqual(@as(u8, 0), try child.finish(gpa, &out, timeout_ms));
