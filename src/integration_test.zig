@@ -299,7 +299,7 @@ test "signals sent to tj are forwarded to the shell" {
     const gpa = std.testing.allocator;
     const child = try spawnTj(
         gpa,
-        &.{ tj, "new", "--", "/bin/sh", "-c", "trap 'echo GOTTERM; exit 9' TERM; echo READY; sleep 5" },
+        &.{ tj, "new", "--", "/bin/sh", "-c", "trap 'echo GOTTERM; exit 9' TERM; echo READY; while :; do sleep 1; done" },
         24,
         80,
     );
@@ -307,10 +307,13 @@ test "signals sent to tj are forwarded to the shell" {
     defer out.deinit(gpa);
 
     try std.testing.expect(try child.readUntil(gpa, &out, "READY", timeout_ms));
+    // A shell that defers traps until its foreground child finishes must not
+    // need longer than the test budget to get there, so the shell sleeps in
+    // short steps instead of one long one.
+    const from = out.items.len;
     _ = std.c.kill(child.pid, posix.SIG.TERM);
+    try std.testing.expect(try child.readUntilFrom(gpa, &out, from, "GOTTERM", timeout_ms));
     _ = try child.finish(gpa, &out, timeout_ms);
-
-    try std.testing.expect(std.mem.indexOf(u8, out.items, "GOTTERM") != null);
 }
 
 test "the terminal is raw while tj is active and restored afterwards" {
@@ -473,10 +476,14 @@ fn setupJournalZsh(gpa: std.mem.Allocator, child: harness.PtyChild, out: *std.Ar
 
 /// Cancels an editable ZLE line and proves that the shell accepted a new
 /// command afterward. Waiting for the ordinary prompt is insufficient here:
-/// completion redraws that same prompt before Ctrl-C has been processed.
+/// completion redraws that same prompt before the cancellation is processed.
 fn cancelZleLine(gpa: std.mem.Allocator, child: harness.PtyChild, out: *std.ArrayList(u8)) !void {
     const from = out.items.len;
-    try child.write("\x03");
+    // Clear the line with a plain ZLE binding rather than Ctrl-C. While the
+    // completion system is running the shell's terminal still raises SIGINT,
+    // and the interrupt discards bytes zsh has already read - including the
+    // first character of the command typed right behind it.
+    try child.write("\x15");
     // Split the marker in the typed command so terminal echo cannot satisfy
     // the wait; only the executed print produces the contiguous text.
     try child.write("print -r -- TJ_ZLE_CANCEL_\"\"READY\n");
