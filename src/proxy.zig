@@ -59,20 +59,19 @@ pub const Result = struct { exit_code: u8 };
 pub fn run(gpa: std.mem.Allocator, io: std.Io, opts: cli.Proxy) !Result {
     const argv = try buildArgv(gpa, opts.argv);
 
-    // Panes and multiplexers make nesting legitimate, so this is a note, not a
-    // refusal: the inner session simply shadows the outer one for this shell.
-    if (sys.env("TJ_SESSION")) |outer| {
-        warnStartup("tj: starting a new session inside {s}\r\n", .{outer});
+    // Panes and multiplexers make nesting legitimate. A new writer shadows
+    // the outer journal environment; continuing it fails on the lock.
+    if (sys.env("TJ_JOURNAL")) |outer| {
+        warnStartup("tj: starting another journal writer inside {s}\r\n", .{outer});
     }
 
-    // A failure to open the journal must not stop the shell from starting, so
-    // the session degrades to a plain proxy and says so once.
-    var store_storage: ?Store = Store.create(gpa, io, opts.home) catch |err| blk: {
-        warnStartup("tj: not recording ({t})\r\n", .{err});
-        break :blk null;
+    // Lifecycle acquisition is strict: selection, numbering, and locking all
+    // complete before a pty or child process exists.
+    var store = switch (opts.journal) {
+        .new => try Store.createJournal(gpa, io, opts.home),
+        .existing => |selector| try Store.continueJournal(gpa, io, opts.home, selector),
     };
-    const store: ?*Store = if (store_storage) |*value| value else null;
-    defer if (store) |value| value.close();
+    defer store.close();
 
     // Seed the inner pty with the outer terminal's settings so programs that
     // query them (line width, control characters) see the truth from the start.
@@ -99,7 +98,7 @@ pub fn run(gpa: std.mem.Allocator, io: std.Io, opts: cli.Proxy) !Result {
     sig_pipe_w.store(sig_fds[1], .monotonic);
 
     installSignalHandlers();
-    exportEnvironment(store);
+    exportEnvironment(&store);
 
     const pid = c.fork();
     if (pid < 0) {
@@ -121,7 +120,7 @@ pub fn run(gpa: std.mem.Allocator, io: std.Io, opts: cli.Proxy) !Result {
         if (raw) |saved| tty.restore(saved);
     }
 
-    var recorder: Recorder = .{ .store = store };
+    var recorder: Recorder = .{ .store = &store };
     var output: scanner.Scanner = .{ .keep_osc = opts.keep_osc };
     pump(pty.master, sig_fds[0], pid, &recorder, &output) catch {};
     // Nothing may stay withheld inside the scanner once the stream is over.
@@ -156,8 +155,8 @@ fn buildArgv(gpa: std.mem.Allocator, requested: []const []const u8) ![:null]cons
 fn childExec(pty: sys.Pty, argv: [:null]const ?[*:0]const u8) noreturn {
     sys.close(pty.master);
 
-    // Become a session leader and adopt the pty as controlling terminal, so
-    // job control, Ctrl-C and SIGWINCH all work inside the session.
+    // Become a POSIX session leader and adopt the pty as controlling terminal,
+    // so job control, Ctrl-C and SIGWINCH all work inside the child.
     _ = c.setsid();
     sys.setControllingTty(pty.slave) catch {};
 
@@ -207,24 +206,25 @@ fn installSignalHandlers() void {
     posix.sigaction(.PIPE, &ignore, null);
 }
 
-/// Exported before the fork so the shell and its plugin inherit them:
-/// `TJ_SESSION` names the journal session, `TJ` points at this exact build.
-fn exportEnvironment(store: ?*Store) void {
-    if (store) |value| {
-        var session: [ulid.len + 1]u8 = undefined;
-        @memcpy(session[0..ulid.len], &value.session);
-        session[ulid.len] = 0;
-        sys.setEnv("TJ_SESSION", session[0..ulid.len :0]);
+/// Exported before the fork so the shell and its plugin inherit them.
+fn exportEnvironment(store: *Store) void {
+    var journal: [ulid.len + 1]u8 = undefined;
+    @memcpy(journal[0..ulid.len], &store.journal);
+    journal[ulid.len] = 0;
+    sys.setEnv("TJ_JOURNAL", journal[0..ulid.len :0]);
 
-        // Also when it came from --home: every `tj` invoked inside the session
-        // has to resolve references against the journal being written, not the
-        // default one.
-        var root: [std.fs.max_path_bytes + 1]u8 = undefined;
-        if (value.root.realPath(value.io, root[0..std.fs.max_path_bytes])) |len| {
-            root[len] = 0;
-            sys.setEnv("TJ_HOME", root[0..len :0]);
-        } else |_| {}
-    }
+    var next: [16]u8 = undefined;
+    const next_text = std.fmt.bufPrint(next[0 .. next.len - 1], "{d}", .{store.next_number.?}) catch return;
+    next[next_text.len] = 0;
+    sys.setEnv("TJ_NEXT", next[0..next_text.len :0]);
+
+    // Also when it came from --home: every `tj` invoked inside the writer has
+    // to resolve references against the selected journal root.
+    var root: [std.fs.max_path_bytes + 1]u8 = undefined;
+    if (store.root.realPath(store.io, root[0..std.fs.max_path_bytes])) |len| {
+        root[len] = 0;
+        sys.setEnv("TJ_HOME", root[0..len :0]);
+    } else |_| {}
 
     var path_buf: [std.fs.max_path_bytes]u8 = undefined;
     var value_buf: [std.fs.max_path_bytes + 1]u8 = undefined;
@@ -244,7 +244,7 @@ fn warnStartup(comptime fmt: []const u8, args: anytype) void {
 /// Turns scanner events into journal entries and forwards every byte the
 /// terminal is meant to see. This is the only place the two jobs meet.
 const Recorder = struct {
-    store: ?*Store,
+    store: *Store,
     /// The command line arrives just before the "command is running" boundary,
     /// so it waits here until the interaction actually opens.
     command: [scanner.max_osc]u8 = undefined,
@@ -260,7 +260,7 @@ const Recorder = struct {
     /// Bytes for the terminal that also belong in `out`.
     pub fn data(self: *Recorder, bytes: []const u8) void {
         self.forward(bytes);
-        if (self.store) |store| store.append(bytes);
+        self.store.append(bytes);
     }
 
     /// Bytes for the terminal only: tj's own sequences under `--keep-osc`,
@@ -276,7 +276,6 @@ const Recorder = struct {
     }
 
     pub fn event(self: *Recorder, ev: scanner.Event) void {
-        const store = self.store orelse return;
         switch (ev) {
             .command_line => |line| {
                 const n = @min(line.len, self.command.len);
@@ -290,7 +289,7 @@ const Recorder = struct {
                 self.has_expanded = true;
             },
             .command_run => {
-                store.begin(
+                self.store.begin(
                     self.command[0..self.command_len],
                     if (self.has_expanded) self.expanded[0..self.expanded_len] else null,
                 );
@@ -298,13 +297,13 @@ const Recorder = struct {
                 self.expanded_len = 0;
                 self.has_expanded = false;
             },
-            .command_end => |code| store.finish(code),
+            .command_end => |code| self.store.finish(code),
             // Ends whatever is still open; a no-op right after `command_end`,
             // which is the usual case since the shell reports both at once.
-            .prompt_start => store.finish(null),
-            .resource_begin => |r| store.beginResource(r.path, r.mime),
-            .resource_end => store.endResource(),
-            .protocol_error => |payload| store.warn("ignored tj sequence: {s}", .{payload}),
+            .prompt_start => self.store.finish(null),
+            .resource_begin => |r| self.store.beginResource(r.path, r.mime),
+            .resource_end => self.store.endResource(),
+            .protocol_error => |payload| self.store.warn("ignored tj sequence: {s}", .{payload}),
         }
     }
 };
@@ -325,7 +324,7 @@ fn pump(master: sys.Fd, sig_r: sys.Fd, pid: c.pid_t, recorder: *Recorder, output
     while (true) {
         // While a command is running, wake up regularly to flush its output to
         // disk, so `tail -f` on `@N/out` shows progress.
-        const recording = if (recorder.store) |store| store.isRecording() else false;
+        const recording = recorder.store.isRecording();
         _ = posix.poll(&fds, if (recording) flush_interval_ms else -1) catch return;
 
         if (sig.revents & (posix.POLL.IN | posix.POLL.HUP) != 0) {
@@ -337,8 +336,8 @@ fn pump(master: sys.Fd, sig_r: sys.Fd, pid: c.pid_t, recorder: *Recorder, output
             if (n == 0) return;
             output.feed(out_buf[0..n], recorder);
             if (recorder.broken) return;
-        } else if (recorder.store) |store| {
-            store.tick();
+        } else {
+            recorder.store.tick();
         }
 
         if (in.fd >= 0 and in.revents & (posix.POLL.IN | posix.POLL.HUP) != 0) {

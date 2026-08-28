@@ -4,7 +4,7 @@
 #
 #     source /path/to/tj.plugin.zsh
 #
-# Everything below is inert outside a tj session, so loading it
+# Everything below is inert outside a tj journal writer, so loading it
 # unconditionally is safe.
 #
 # Two jobs:
@@ -14,7 +14,7 @@
 #   2. Turn journal references into paths, so ordinary programs can read them
 #      without knowing tj exists.
 
-[[ -n $TJ_SESSION ]] || return 0
+[[ -n $TJ_JOURNAL ]] || return 0
 
 autoload -Uz add-zsh-hook
 
@@ -54,24 +54,24 @@ _tj_preexec() {
 # Exported rather than computed by the prompt, so showing any of this costs no
 # process per prompt:
 #
-#   TJ_SESSION        the full session id, exported by tj itself
-#   TJ_SESSION_SHORT  the shortest suffix that names this session
+#   TJ_JOURNAL        the full journal id, exported by tj itself
+#   TJ_JOURNAL_SHORT  the shortest suffix that names this journal
 #   TJ_NEXT           the number the next command will get
 #   TJ_REF            a reference to it that can be typed from anywhere
 #
-# tj assigns numbers on the same event this counter follows - one per preexec -
-# so the two stay in step. Seeded from the journal, because the plugin can be
-# sourced part way through a session that already has interactions.
-typeset -gi _tj_count=${$(command "$(_tj_bin)" last 2>/dev/null):-0}
+# tj computes the next unused number while holding the journal lock. Starting
+# one behind keeps this counter aligned with the preexec event below, including
+# after unfinished interactions and numbering gaps.
+typeset -gi _tj_count=$(( TJ_NEXT - 1 ))
 
 # Four characters of a ULID's random tail is plenty to tell a handful of
-# sessions apart. $TJ_SESSION holds the whole id when that is not enough.
-export TJ_SESSION_SHORT=${TJ_SESSION: -4}
+# journals apart. $TJ_JOURNAL holds the whole id when that is not enough.
+export TJ_JOURNAL_SHORT=${TJ_JOURNAL: -4}
 
 _tj_publish() {
   export TJ_NEXT=$(( _tj_count + 1 ))
-  # Qualified by session, so it still resolves from another pane.
-  export TJ_REF="@${TJ_SESSION_SHORT}.${TJ_NEXT}"
+  # Qualified by journal, so it still resolves from another pane.
+  export TJ_REF="@${TJ_JOURNAL_SHORT}.${TJ_NEXT}"
 }
 
 _tj_publish

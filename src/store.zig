@@ -1,8 +1,8 @@
 //! The on-disk journal.
 //!
 //!     $TJ_HOME/                 default ~/.tj
-//!     └── <session-ulid>/
-//!         ├── log               warnings from this session, if any
+//!     └── <journal-ulid>/
+//!         ├── log               warnings from this journal, if any
 //!         └── 1/
 //!             ├── cmd           the command line as entered
 //!             ├── out           what the terminal saw
@@ -14,7 +14,7 @@
 //!
 //! Recording must never get in the way of the terminal. Every entry point here
 //! swallows its errors: the first failure disables recording for the rest of
-//! the session and is noted in the session log, and the proxy keeps forwarding
+//! the journal and is noted in the journal log, and the proxy keeps forwarding
 //! bytes as if nothing happened.
 
 const std = @import("std");
@@ -48,13 +48,17 @@ pub const Store = struct {
     io: Io,
     gpa: std.mem.Allocator,
     root: Dir,
-    session_dir: Dir,
-    session: ulid.Ulid,
-    next_number: u32 = 1,
+    journal_dir: Dir,
+    journal: ulid.Ulid,
+    lock_file: File,
+    origin: Origin,
+    next_number: ?u32 = 1,
     current: ?Interaction = null,
     out_buffer: []u8,
     /// Set after the first write failure; recording stops, forwarding does not.
     disabled: bool = false,
+
+    const Origin = enum { created, existing };
 
     const Interaction = struct {
         number: u32,
@@ -92,17 +96,14 @@ pub const Store = struct {
         truncated: bool = false,
     };
 
-    /// Creates a new session. `home_override` wins over `$TJ_HOME`, which wins
+    /// Creates a new journal. `home_override` wins over `$TJ_HOME`, which wins
     /// over `~/.tj`.
-    pub fn create(gpa: std.mem.Allocator, io: Io, home_override: ?[]const u8) !Store {
+    pub fn createJournal(gpa: std.mem.Allocator, io: Io, home_override: ?[]const u8) !Store {
         var path_buf: [std.fs.max_path_bytes]u8 = undefined;
         const root_path = try resolveRoot(home_override, &path_buf);
 
         const root = try openOrCreateRoot(io, root_path);
         errdefer root.close(io);
-
-        const out_buffer = try gpa.alloc(u8, out_buffer_size);
-        errdefer gpa.free(out_buffer);
 
         // ULIDs carry 80 random bits, so a clash means something is badly
         // wrong with the entropy source; retrying is still the cheap fix.
@@ -113,29 +114,93 @@ pub const Store = struct {
                 error.PathAlreadyExists => continue,
                 else => return err,
             };
-            const session_dir = try root.openDir(io, &id, .{});
+            errdefer root.deleteDir(io, &id) catch {};
+
+            const lock_file = acquireJournalLock(io, root, &id) catch |err| {
+                removeLockFile(io, root, &id);
+                return err;
+            };
+            errdefer lock_file.close(io);
+            errdefer removeLockFile(io, root, &id);
+
+            const journal_dir = try root.openDir(io, &id, .{ .iterate = true });
+            errdefer journal_dir.close(io);
+
+            const out_buffer = try gpa.alloc(u8, out_buffer_size);
             return .{
                 .io = io,
                 .gpa = gpa,
                 .root = root,
-                .session_dir = session_dir,
-                .session = id,
+                .journal_dir = journal_dir,
+                .journal = id,
+                .lock_file = lock_file,
+                .origin = .created,
                 .out_buffer = out_buffer,
             };
         }
-        return error.NoUniqueSession;
+        return error.NoUniqueJournal;
+    }
+
+    /// Attaches a writer to exactly one existing journal. Selection,
+    /// locking, and numbering all finish before the caller starts a child.
+    pub fn continueJournal(
+        gpa: std.mem.Allocator,
+        io: Io,
+        home_override: ?[]const u8,
+        selector: []const u8,
+    ) !Store {
+        const root = openRoot(io, home_override) catch |err| switch (err) {
+            error.FileNotFound => return error.NoSuchJournal,
+            else => return err,
+        };
+        errdefer root.close(io);
+
+        const selected = try findUniqueJournal(gpa, io, root, selector);
+        defer gpa.free(selected);
+        var id: ulid.Ulid = undefined;
+        @memcpy(&id, selected);
+
+        const lock_file = try acquireJournalLock(io, root, &id);
+        errdefer lock_file.close(io);
+
+        // Re-open only after the lock is held. Future pruning uses the same
+        // lock, so the selected directory cannot disappear between these two
+        // operations.
+        const journal_dir = root.openDir(io, &id, .{ .iterate = true }) catch |err| switch (err) {
+            error.FileNotFound => return error.NoSuchJournal,
+            else => return err,
+        };
+        errdefer journal_dir.close(io);
+
+        const next_number = try nextInteractionNumber(gpa, io, root, &id);
+        const out_buffer = try gpa.alloc(u8, out_buffer_size);
+
+        return .{
+            .io = io,
+            .gpa = gpa,
+            .root = root,
+            .journal_dir = journal_dir,
+            .journal = id,
+            .lock_file = lock_file,
+            .origin = .existing,
+            .next_number = next_number,
+            .out_buffer = out_buffer,
+        };
     }
 
     pub fn close(self: *Store) void {
         self.finish(null);
-        self.session_dir.close(self.io);
+        self.journal_dir.close(self.io);
 
-        // A session that recorded nothing is noise: nothing to reference,
-        // nothing to read, and one more name for a short suffix to collide
-        // with. Removing a directory refuses to remove one with anything in
-        // it, so this cannot take a session that has content - including one
-        // that only managed to write a log saying why it recorded nothing.
-        self.root.deleteDir(self.io, &self.session) catch {};
+        // Only the invocation that created a journal may remove it as empty
+        // noise. A continued journal is persistent even when it stays empty.
+        const removed = self.origin == .created and blk: {
+            self.root.deleteDir(self.io, &self.journal) catch break :blk false;
+            break :blk true;
+        };
+
+        self.lock_file.close(self.io);
+        if (removed) removeLockFile(self.io, self.root, &self.journal);
 
         self.root.close(self.io);
         self.gpa.free(self.out_buffer);
@@ -145,24 +210,30 @@ pub const Store = struct {
         return self.current != null;
     }
 
-    /// Opens interaction N and writes `cmd` immediately, so a session that
+    /// Opens interaction N and writes `cmd` immediately, so a journal that
     /// dies mid-command still shows what was running.
     pub fn begin(self: *Store, cmd: []const u8, expanded: ?[]const u8) void {
         if (self.disabled) return;
         if (self.current != null) self.finish(null);
 
-        var name_buf: [16]u8 = undefined;
-        const name = std.fmt.bufPrint(&name_buf, "{d}", .{self.next_number}) catch return;
+        const number = self.next_number orelse {
+            self.warn("journal has no interaction numbers left", .{});
+            self.disabled = true;
+            return;
+        };
 
-        self.beginFallible(name, cmd, expanded) catch |err| {
+        var name_buf: [16]u8 = undefined;
+        const name = std.fmt.bufPrint(&name_buf, "{d}", .{number}) catch return;
+
+        self.beginFallible(number, name, cmd, expanded) catch |err| {
             self.warn("cannot start interaction {s}: {t}", .{ name, err });
             self.disable();
         };
     }
 
-    fn beginFallible(self: *Store, name: []const u8, cmd: []const u8, expanded: ?[]const u8) !void {
-        try self.session_dir.createDir(self.io, name, dir_permissions);
-        var dir = try self.session_dir.openDir(self.io, name, .{});
+    fn beginFallible(self: *Store, number: u32, name: []const u8, cmd: []const u8, expanded: ?[]const u8) !void {
+        try self.journal_dir.createDir(self.io, name, dir_permissions);
+        var dir = try self.journal_dir.openDir(self.io, name, .{});
         errdefer dir.close(self.io);
 
         try dir.writeFile(self.io, .{
@@ -173,14 +244,14 @@ pub const Store = struct {
 
         const file = try dir.createFile(self.io, "out", .{ .permissions = file_permissions });
         self.current = .{
-            .number = self.next_number,
+            .number = number,
             .dir = dir,
             .file = file,
             .writer = file.writerStreaming(self.io, self.out_buffer),
             .started_ms = nowMillis(self.io),
             .expanded = if (expanded) |text| try self.gpa.dupe(u8, text) else null,
         };
-        self.next_number += 1;
+        self.next_number = std.math.add(u32, number, 1) catch null;
     }
 
     /// Buffered: the poll loop must not wait on the disk to forward a byte.
@@ -442,12 +513,12 @@ pub const Store = struct {
         }
     }
 
-    /// Appends to `$TJ_HOME/<session>/log`. Best effort: if even this fails
+    /// Appends to `$TJ_HOME/<journal>/log`. Best effort: if even this fails
     /// there is nothing useful left to do about it.
     pub fn warn(self: *Store, comptime fmt: []const u8, args: anytype) void {
         var buf: [512]u8 = undefined;
         const line = std.fmt.bufPrint(&buf, fmt ++ "\n", args) catch return;
-        const file = self.session_dir.createFile(self.io, "log", .{
+        const file = self.journal_dir.createFile(self.io, "log", .{
             .truncate = false,
             .permissions = file_permissions,
         }) catch return;
@@ -476,15 +547,41 @@ fn openOrCreateRoot(io: Io, path: []const u8) !Dir {
     return Dir.cwd().openDir(io, path, .{ .iterate = true });
 }
 
+fn acquireJournalLock(io: Io, root: Dir, journal: []const u8) !File {
+    _ = root.createDir(io, ".locks", dir_permissions) catch |err| switch (err) {
+        error.PathAlreadyExists => {},
+        else => return err,
+    };
+    var locks = try root.openDir(io, ".locks", .{});
+    defer locks.close(io);
+
+    return locks.createFile(io, journal, .{
+        .read = true,
+        .truncate = false,
+        .lock = .exclusive,
+        .lock_nonblocking = true,
+        .permissions = file_permissions,
+    }) catch |err| switch (err) {
+        error.WouldBlock => error.JournalLocked,
+        else => return err,
+    };
+}
+
+fn removeLockFile(io: Io, root: Dir, journal: []const u8) void {
+    var path_buf: [64]u8 = undefined;
+    const path = std.fmt.bufPrint(&path_buf, ".locks/{s}", .{journal}) catch return;
+    root.deleteFile(io, path) catch {};
+}
+
 pub fn openRoot(io: Io, home_override: ?[]const u8) !Dir {
     var buf: [std.fs.max_path_bytes]u8 = undefined;
     const path = try resolveRoot(home_override, &buf);
     return Dir.cwd().openDir(io, path, .{ .iterate = true });
 }
 
-/// Session ids, newest first. ULIDs sort chronologically, so this is just a
+/// Journal ids, newest first. ULIDs sort chronologically, so this is just a
 /// reverse sort of the directory names.
-pub fn listSessions(gpa: std.mem.Allocator, io: Io, root: Dir) ![][]const u8 {
+pub fn listJournals(gpa: std.mem.Allocator, io: Io, root: Dir) ![][]const u8 {
     var found: std.ArrayList([]const u8) = .empty;
     errdefer {
         for (found.items) |name| gpa.free(name);
@@ -520,9 +617,9 @@ pub const InteractionInfo = struct {
     }
 };
 
-/// Interactions of one session, in numeric order.
-pub fn listInteractions(gpa: std.mem.Allocator, io: Io, root: Dir, session: []const u8) ![]InteractionInfo {
-    var dir = try root.openDir(io, session, .{ .iterate = true });
+/// Interactions of one journal, in numeric order.
+pub fn listInteractions(gpa: std.mem.Allocator, io: Io, root: Dir, journal: []const u8) ![]InteractionInfo {
+    var dir = try root.openDir(io, journal, .{ .iterate = true });
     defer dir.close(io);
 
     var found: std.ArrayList(InteractionInfo) = .empty;
@@ -534,7 +631,7 @@ pub fn listInteractions(gpa: std.mem.Allocator, io: Io, root: Dir, session: []co
     var it = dir.iterate();
     while (try it.next(io)) |entry| {
         if (entry.kind != .directory) continue;
-        const number = std.fmt.parseInt(u32, entry.name, 10) catch continue;
+        const number = parseInteractionDirName(entry.name) orelse continue;
 
         var interaction = try dir.openDir(io, entry.name, .{});
         defer interaction.close(io);
@@ -566,8 +663,8 @@ pub fn listInteractions(gpa: std.mem.Allocator, io: Io, root: Dir, session: []co
 
 /// The highest interaction that actually completed. `@-` resolves to this, so
 /// a command reading `@-/out` never picks up the one running it.
-pub fn lastCompleted(gpa: std.mem.Allocator, io: Io, root: Dir, session: []const u8) !?u32 {
-    const interactions = try listInteractions(gpa, io, root, session);
+pub fn lastCompleted(gpa: std.mem.Allocator, io: Io, root: Dir, journal: []const u8) !?u32 {
+    const interactions = try listInteractions(gpa, io, root, journal);
     defer {
         for (interactions) |info| info.deinit(gpa);
         gpa.free(interactions);
@@ -633,10 +730,10 @@ test "timestamps format as UTC ISO 8601" {
 const reference = @import("reference.zig");
 
 pub const ResolveError = error{
-    /// `@42` and `@-` are relative to the session you are in.
-    NotInSession,
-    /// No session directory ends with the given suffix.
-    NoSuchSession,
+    /// `@42` and `@-` are relative to the journal you are in.
+    NotInJournal,
+    /// No journal directory ends with the given suffix.
+    NoSuchJournal,
     /// `@-` used before anything has completed.
     NothingCompleted,
 };
@@ -644,7 +741,7 @@ pub const ResolveError = error{
 pub const Resolved = struct {
     /// Always absolute, so the path keeps working wherever it is pasted.
     path: []u8,
-    session: []u8,
+    journal: []u8,
     number: u32,
     /// Whether the interaction directory is actually there. The resource
     /// inside it may still be missing.
@@ -652,11 +749,11 @@ pub const Resolved = struct {
 
     pub fn deinit(self: Resolved, gpa: std.mem.Allocator) void {
         gpa.free(self.path);
-        gpa.free(self.session);
+        gpa.free(self.journal);
     }
 };
 
-/// Turns a parsed reference into a filesystem path. `current` is the session
+/// Turns a parsed reference into a filesystem path. `current` is the journal
 /// the caller is in, if any.
 pub fn resolve(
     gpa: std.mem.Allocator,
@@ -678,16 +775,16 @@ pub fn locate(
     current: ?[]const u8,
     ref: reference.Reference,
 ) !Resolved {
-    const session: []u8 = switch (ref.body) {
-        .previous, .current => try gpa.dupe(u8, current orelse return error.NotInSession),
-        .qualified => |q| try findSession(gpa, io, root, q.suffix) orelse return error.NoSuchSession,
+    const journal: []u8 = switch (ref.body) {
+        .previous, .current => try gpa.dupe(u8, current orelse return error.NotInJournal),
+        .qualified => |q| try findNewestJournal(gpa, io, root, q.suffix) orelse return error.NoSuchJournal,
     };
-    errdefer gpa.free(session);
+    errdefer gpa.free(journal);
 
     const number: u32 = switch (ref.body) {
         .current => |n| n,
         .qualified => |q| q.number,
-        .previous => try lastCompleted(gpa, io, root, session) orelse return error.NothingCompleted,
+        .previous => try lastCompleted(gpa, io, root, journal) orelse return error.NothingCompleted,
     };
 
     var base: [std.fs.max_path_bytes]u8 = undefined;
@@ -697,7 +794,7 @@ pub fn locate(
     errdefer path.deinit(gpa);
     try path.appendSlice(gpa, base[0..base_len]);
     try path.append(gpa, '/');
-    try path.appendSlice(gpa, session);
+    try path.appendSlice(gpa, journal);
     try path.print(gpa, "/{d}", .{number});
 
     const exists = blk: {
@@ -713,36 +810,59 @@ pub fn locate(
 
     return .{
         .path = try path.toOwnedSlice(gpa),
-        .session = session,
+        .journal = journal,
         .number = number,
         .exists = exists,
     };
 }
 
-/// The most recent session whose id ends with `suffix`. Short suffixes are for
+/// The most recent journal whose id ends with `suffix`. Short suffixes are for
 /// interactive use and deliberately trade certainty for convenience; anything
 /// that needs to stay valid should use the full id.
-pub fn findSession(gpa: std.mem.Allocator, io: Io, root: Dir, suffix: []const u8) !?[]u8 {
+pub fn findNewestJournal(gpa: std.mem.Allocator, io: Io, root: Dir, suffix: []const u8) !?[]u8 {
     var lowered: [reference.max_suffix]u8 = undefined;
     if (suffix.len > lowered.len) return null;
     const wanted = std.ascii.lowerString(lowered[0..suffix.len], suffix);
 
-    const sessions = try listSessions(gpa, io, root);
+    const journals = try listJournals(gpa, io, root);
     defer {
-        for (sessions) |name| gpa.free(name);
-        gpa.free(sessions);
+        for (journals) |name| gpa.free(name);
+        gpa.free(journals);
     }
 
-    // listSessions is newest first, so the first match wins.
-    for (sessions) |name| {
+    // listJournals is newest first, so the first match wins.
+    for (journals) |name| {
         if (std.mem.endsWith(u8, name, wanted)) return try gpa.dupe(u8, name);
     }
     return null;
 }
 
-/// Interaction numbers present in a session, in numeric order.
-pub fn listNumbers(gpa: std.mem.Allocator, io: Io, root: Dir, session: []const u8) ![]u32 {
-    var dir = try root.openDir(io, session, .{ .iterate = true });
+/// Resolves a journal selector for mutation. Unlike references, ambiguity is
+/// an error because selecting the wrong result would append to the wrong
+/// durable object.
+pub fn findUniqueJournal(gpa: std.mem.Allocator, io: Io, root: Dir, suffix: []const u8) ![]u8 {
+    var lowered: [reference.max_suffix]u8 = undefined;
+    if (suffix.len == 0 or suffix.len > lowered.len) return error.NoSuchJournal;
+    const wanted = std.ascii.lowerString(lowered[0..suffix.len], suffix);
+
+    const journals = try listJournals(gpa, io, root);
+    defer {
+        for (journals) |name| gpa.free(name);
+        gpa.free(journals);
+    }
+
+    var match: ?[]const u8 = null;
+    for (journals) |name| {
+        if (!std.mem.endsWith(u8, name, wanted)) continue;
+        if (match != null) return error.AmbiguousJournal;
+        match = name;
+    }
+    return gpa.dupe(u8, match orelse return error.NoSuchJournal);
+}
+
+/// Interaction numbers present in a journal, in numeric order.
+pub fn listNumbers(gpa: std.mem.Allocator, io: Io, root: Dir, journal: []const u8) ![]u32 {
+    var dir = try root.openDir(io, journal, .{ .iterate = true });
     defer dir.close(io);
 
     var found: std.ArrayList(u32) = .empty;
@@ -751,7 +871,7 @@ pub fn listNumbers(gpa: std.mem.Allocator, io: Io, root: Dir, session: []const u
     var it = dir.iterate();
     while (try it.next(io)) |entry| {
         if (entry.kind != .directory) continue;
-        const number = std.fmt.parseInt(u32, entry.name, 10) catch continue;
+        const number = parseInteractionDirName(entry.name) orelse continue;
         try found.append(gpa, number);
     }
 
@@ -759,11 +879,133 @@ pub fn listNumbers(gpa: std.mem.Allocator, io: Io, root: Dir, session: []const u
     return found.toOwnedSlice(gpa);
 }
 
-/// Resource names inside one interaction. `meta.json` and the session log are
+fn parseInteractionDirName(name: []const u8) ?u32 {
+    if (name.len == 0 or name[0] == '0') return null;
+    for (name) |char| if (!std.ascii.isDigit(char)) return null;
+    return std.fmt.parseInt(u32, name, 10) catch null;
+}
+
+fn nextInteractionNumber(gpa: std.mem.Allocator, io: Io, root: Dir, journal: []const u8) !u32 {
+    const numbers = try listNumbers(gpa, io, root, journal);
+    defer gpa.free(numbers);
+    if (numbers.len == 0) return 1;
+    return std.math.add(u32, numbers[numbers.len - 1], 1) catch error.JournalFull;
+}
+
+fn testHome(tmp: *std.testing.TmpDir, io: Io, buf: []u8) ![]const u8 {
+    const len = try tmp.dir.realPath(io, buf);
+    return buf[0..len];
+}
+
+fn makeTestJournal(tmp: *std.testing.TmpDir, io: Io, id: ulid.Ulid, entries: []const []const u8) !void {
+    try tmp.dir.createDir(io, &id, dir_permissions);
+    var journal = try tmp.dir.openDir(io, &id, .{});
+    defer journal.close(io);
+    for (entries) |name| try journal.createDir(io, name, dir_permissions);
+}
+
+test "continuation resolves one journal and keeps newest reference lookup" {
+    const io = std.testing.io;
+    const gpa = std.testing.allocator;
+    var tmp = std.testing.tmpDir(.{ .iterate = true });
+    defer tmp.cleanup();
+
+    const older = ulid.encode(1, .{0} ** 10);
+    const newer = ulid.encode(2, .{0} ** 10);
+    try makeTestJournal(&tmp, io, older, &.{});
+    try makeTestJournal(&tmp, io, newer, &.{});
+
+    var root = try tmp.dir.openDir(io, ".", .{ .iterate = true });
+    defer root.close(io);
+
+    const exact = try findUniqueJournal(gpa, io, root, &older);
+    defer gpa.free(exact);
+    try std.testing.expectEqualStrings(&older, exact);
+    try std.testing.expectError(error.NoSuchJournal, findUniqueJournal(gpa, io, root, "nope"));
+    try std.testing.expectError(error.AmbiguousJournal, findUniqueJournal(gpa, io, root, "0000"));
+
+    const newest = (try findNewestJournal(gpa, io, root, "0000")).?;
+    defer gpa.free(newest);
+    try std.testing.expectEqualStrings(&newer, newest);
+}
+
+test "continued journals use the highest entry and are never removed as empty" {
+    const io = std.testing.io;
+    const gpa = std.testing.allocator;
+    var tmp = std.testing.tmpDir(.{ .iterate = true });
+    defer tmp.cleanup();
+    var path_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const home = try testHome(&tmp, io, &path_buf);
+
+    const with_gap = ulid.encode(3, .{1} ** 10);
+    try makeTestJournal(&tmp, io, with_gap, &.{ "1", "3", "03", "0", "not-an-entry" });
+    var continued = try Store.continueJournal(gpa, io, home, &with_gap);
+    try std.testing.expectEqual(@as(?u32, 4), continued.next_number);
+    continued.close();
+
+    var gap_dir = try tmp.dir.openDir(io, &with_gap, .{});
+    gap_dir.close(io);
+
+    const empty = ulid.encode(4, .{2} ** 10);
+    try makeTestJournal(&tmp, io, empty, &.{});
+    var empty_continue = try Store.continueJournal(gpa, io, home, &empty);
+    try std.testing.expectEqual(@as(?u32, 1), empty_continue.next_number);
+    empty_continue.close();
+    var empty_dir = try tmp.dir.openDir(io, &empty, .{});
+    empty_dir.close(io);
+}
+
+test "unfinished entries consume their numbers and full journals fail" {
+    const io = std.testing.io;
+    const gpa = std.testing.allocator;
+    var tmp = std.testing.tmpDir(.{ .iterate = true });
+    defer tmp.cleanup();
+    var path_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const home = try testHome(&tmp, io, &path_buf);
+
+    const unfinished = ulid.encode(5, .{3} ** 10);
+    try makeTestJournal(&tmp, io, unfinished, &.{ "1", "2" });
+    var continued = try Store.continueJournal(gpa, io, home, &unfinished);
+    try std.testing.expectEqual(@as(?u32, 3), continued.next_number);
+    continued.close();
+
+    const full = ulid.encode(6, .{4} ** 10);
+    try makeTestJournal(&tmp, io, full, &.{"4294967295"});
+    try std.testing.expectError(error.JournalFull, Store.continueJournal(gpa, io, home, &full));
+}
+
+test "journal writer locks are exclusive and released on close" {
+    const io = std.testing.io;
+    const gpa = std.testing.allocator;
+    var tmp = std.testing.tmpDir(.{ .iterate = true });
+    defer tmp.cleanup();
+    var path_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const home = try testHome(&tmp, io, &path_buf);
+
+    const id = ulid.encode(7, .{5} ** 10);
+    try makeTestJournal(&tmp, io, id, &.{"1"});
+    var first = try Store.continueJournal(gpa, io, home, &id);
+    try std.testing.expectError(error.JournalLocked, Store.continueJournal(gpa, io, home, &id));
+
+    var root = try tmp.dir.openDir(io, ".", .{ .iterate = true });
+    const journals = try listJournals(gpa, io, root);
+    defer {
+        for (journals) |name| gpa.free(name);
+        gpa.free(journals);
+    }
+    root.close(io);
+    try std.testing.expectEqual(@as(usize, 1), journals.len);
+
+    first.close();
+    var second = try Store.continueJournal(gpa, io, home, &id);
+    second.close();
+}
+
+/// Resource names inside one interaction. `meta.json` and the journal log are
 /// tj's own bookkeeping and are never offered.
-pub fn listResources(gpa: std.mem.Allocator, io: Io, root: Dir, session: []const u8, number: u32) ![][]u8 {
+pub fn listResources(gpa: std.mem.Allocator, io: Io, root: Dir, journal: []const u8, number: u32) ![][]u8 {
     var path_buf: [64]u8 = undefined;
-    const sub = try std.fmt.bufPrint(&path_buf, "{s}/{d}", .{ session, number });
+    const sub = try std.fmt.bufPrint(&path_buf, "{s}/{d}", .{ journal, number });
 
     var dir = try root.openDir(io, sub, .{ .iterate = true });
     defer dir.close(io);
@@ -807,7 +1049,7 @@ test "tj's bookkeeping files are not part of the namespace" {
 }
 
 /// Receives the bytes that survive the full-screen filter and puts them on
-/// disk. A write failure stops recording for the session; it never stops the
+/// disk. A write failure stops recording for the journal; it never stops the
 /// terminal.
 const OutputSink = struct {
     store: *Store,
@@ -886,12 +1128,12 @@ test "every warning is kept, not written over the last one" {
     var path_buf: [std.fs.max_path_bytes]u8 = undefined;
     const len = try tmp.dir.realPath(io, &path_buf);
 
-    var store = try Store.create(std.testing.allocator, io, path_buf[0..len]);
+    var store = try Store.createJournal(std.testing.allocator, io, path_buf[0..len]);
     store.warn("first warning, which is a long one", .{});
     store.warn("second", .{});
     store.warn("third", .{});
 
-    const text = try store.session_dir.readFileAlloc(io, "log", std.testing.allocator, .limited(4096));
+    const text = try store.journal_dir.readFileAlloc(io, "log", std.testing.allocator, .limited(4096));
     defer std.testing.allocator.free(text);
     store.close();
 
@@ -910,7 +1152,7 @@ test "a resource keeps the newlines the program wrote, not the pty's" {
 
     // Fed one byte at a time, so a CRLF straddling two reads is covered too.
     for ([_]usize{ 1, 2, 3, 64 }) |chunk| {
-        var store = try Store.create(std.testing.allocator, io, path_buf[0..len]);
+        var store = try Store.createJournal(std.testing.allocator, io, path_buf[0..len]);
         store.begin("demo", null);
         store.beginResource("script.sh", "text/x-shellscript");
 
@@ -940,7 +1182,7 @@ test "a carriage return at the very end of a resource is kept" {
     var path_buf: [std.fs.max_path_bytes]u8 = undefined;
     const len = try tmp.dir.realPath(io, &path_buf);
 
-    var store = try Store.create(std.testing.allocator, io, path_buf[0..len]);
+    var store = try Store.createJournal(std.testing.allocator, io, path_buf[0..len]);
     store.begin("demo", null);
     store.beginResource("trailing", "text/plain");
     store.append("ends with cr\r");
@@ -971,7 +1213,7 @@ test "metadata preserves every accepted resource beyond eight kibibytes" {
         "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx" ++
         "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx";
 
-    var store = try Store.create(gpa, io, root_buf[0..root_len]);
+    var store = try Store.createJournal(gpa, io, root_buf[0..root_len]);
     store.begin("demo", "expanded \"command\" with \\ and a newline\n");
 
     for (0..max_resources) |i| {
@@ -983,7 +1225,7 @@ test "metadata preserves every accepted resource beyond eight kibibytes" {
     }
     store.finish(0);
 
-    const meta = try store.session_dir.readFileAlloc(io, "1/meta.json", gpa, .limited(64 * 1024));
+    const meta = try store.journal_dir.readFileAlloc(io, "1/meta.json", gpa, .limited(64 * 1024));
     defer gpa.free(meta);
     store.close();
 
@@ -1007,7 +1249,7 @@ test "metadata preserves every accepted resource beyond eight kibibytes" {
     }
 }
 
-// --- reading back what a session recorded ------------------------------------
+// --- reading back what a journal recorded ------------------------------------
 
 /// When an interaction ran, as milliseconds since the epoch.
 pub const Timing = struct {
@@ -1022,9 +1264,9 @@ pub const Timing = struct {
 
 /// Reads the timings an interaction recorded. Absent or unparseable metadata
 /// is not an error: replaying without pacing is better than not replaying.
-pub fn readTiming(gpa: std.mem.Allocator, io: Io, root: Dir, session: []const u8, number: u32) ?Timing {
+pub fn readTiming(gpa: std.mem.Allocator, io: Io, root: Dir, journal: []const u8, number: u32) ?Timing {
     var path_buf: [64]u8 = undefined;
-    const sub = std.fmt.bufPrint(&path_buf, "{s}/{d}/meta.json", .{ session, number }) catch return null;
+    const sub = std.fmt.bufPrint(&path_buf, "{s}/{d}/meta.json", .{ journal, number }) catch return null;
 
     const text = root.readFileAlloc(io, sub, gpa, .limited(64 * 1024)) catch return null;
     defer gpa.free(text);

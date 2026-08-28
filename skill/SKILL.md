@@ -11,8 +11,9 @@ without asking them to paste anything and without running it again.
 
 ## Is there a journal?
 
-`$TJ_SESSION` is set inside a recorded session. If it is empty, there is no
-journal: answer from what you were told.
+`$TJ_JOURNAL` is set while the current shell is writing a journal. If it is
+empty, there is no current journal context: answer from what you were told.
+Persisted journals may still exist and are listed by `tj journals`.
 
 Run **`tj`** by its plain name, one command per call, with no pipe and no
 `;`. Not `"$TJ"`, not `tj ... | tail`. A wrapper may grant permission to run
@@ -37,7 +38,7 @@ tj hist
 ```
 
 Columns: number, exit status, size of the output, first line of the command.
-The whole index is a few hundred tokens even for a long session. The output
+The whole index is a few hundred tokens even for a long journal. The output
 of a single interaction can be 50K. **Read the index first and fetch
 deliberately.**
 
@@ -105,11 +106,11 @@ Two things will look wrong and are not:
 - **Prompt redraw** appears at the end of an interaction's output. It belongs
   to the shell, not the command.
 
-## Referring across sessions
+## Referring across journals
 
-`@42` means this session. Another session is named by a suffix of its id:
-`@pgsd.42/out`. `$TJ_SESSION_SHORT` holds the current one's suffix. `tj
-sessions` lists them, newest first.
+`@42` means this journal. Another journal is named by a suffix of its id:
+`@pgsd.42/out`. `$TJ_JOURNAL_SHORT` holds the current one's suffix. `tj
+journals` lists them, newest first.
 
 ## Published resources
 
@@ -150,7 +151,7 @@ there.
   most expensive mistake available here.
 - **Do not fetch everything.** Fetching every interaction's output costs
   hundreds of times what the index costs and is almost never worth it.
-- **Quote references** when passing them to `tj` from inside a session:
+- **Quote references** when passing them to `tj` from inside a journal writer:
   `tj cat '@1'`. The shell integration rewrites unquoted `@` words into paths
   before `tj` runs.
 - The journal records **what happened, not what the user was trying to do**.

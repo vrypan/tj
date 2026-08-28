@@ -13,8 +13,8 @@ const plain = @import("plain.zig");
 const Subcommand = @FieldType(cli.Command, "subcommand");
 
 pub const Error = error{
-    NotInSession,
-    NoSuchSession,
+    NotInJournal,
+    NoSuchJournal,
     NothingRecorded,
     MissingArgument,
     BadReference,
@@ -22,7 +22,7 @@ pub const Error = error{
     NoSuchResource,
     BadCount,
     BadReplayOption,
-    InsideSession,
+    InsideJournal,
 };
 
 pub fn run(
@@ -32,35 +32,33 @@ pub fn run(
     out: *Io.Writer,
 ) !void {
     switch (sub.which) {
-        .current => try out.print("{s}\n", .{try currentSession()}),
-        .sessions => try listSessions(gpa, io, sub.home, out),
+        .current => try out.print("{s}\n", .{try currentJournal()}),
+        .journals => try listJournals(gpa, io, sub.home, out),
         .hist => try listInteractions(gpa, io, sub.home, sub.args, out),
-        // Handled as the proxy, never as a journal query.
-        .run => unreachable,
         .last => try printLast(gpa, io, sub.home, out),
         .resolve => try resolveReference(gpa, io, sub.home, sub.args, out),
         .complete => try completeReference(gpa, io, sub.home, sub.args, out),
         .cat => try catResource(gpa, io, sub.home, sub.args, out),
-        .replay => try replaySession(gpa, io, sub.home, sub.args, out),
+        .replay => try replayJournal(gpa, io, sub.home, sub.args, out),
     }
 }
 
-fn currentSession() Error![]const u8 {
-    return sys.env("TJ_SESSION") orelse error.NotInSession;
+fn currentJournal() Error![]const u8 {
+    return sys.env("TJ_JOURNAL") orelse error.NotInJournal;
 }
 
-fn listSessions(gpa: std.mem.Allocator, io: Io, home: ?[]const u8, out: *Io.Writer) !void {
+fn listJournals(gpa: std.mem.Allocator, io: Io, home: ?[]const u8, out: *Io.Writer) !void {
     var root = try store.openRoot(io, home);
     defer root.close(io);
 
-    const sessions = try store.listSessions(gpa, io, root);
+    const journals = try store.listJournals(gpa, io, root);
     defer {
-        for (sessions) |name| gpa.free(name);
-        gpa.free(sessions);
+        for (journals) |name| gpa.free(name);
+        gpa.free(journals);
     }
 
-    const current = sys.env("TJ_SESSION");
-    for (sessions) |name| {
+    const current = sys.env("TJ_JOURNAL");
+    for (journals) |name| {
         const interactions = store.listInteractions(gpa, io, root, name) catch continue;
         defer {
             for (interactions) |info| info.deinit(gpa);
@@ -77,13 +75,13 @@ fn listSessions(gpa: std.mem.Allocator, io: Io, home: ?[]const u8, out: *Io.Writ
 }
 
 fn listInteractions(gpa: std.mem.Allocator, io: Io, home: ?[]const u8, args: []const []const u8, out: *Io.Writer) !void {
-    const session = if (args.len > 0) args[0] else try currentSession();
+    const journal = if (args.len > 0) args[0] else try currentJournal();
 
     var root = try store.openRoot(io, home);
     defer root.close(io);
 
-    const interactions = store.listInteractions(gpa, io, root, session) catch |err| switch (err) {
-        error.FileNotFound => return error.NoSuchSession,
+    const interactions = store.listInteractions(gpa, io, root, journal) catch |err| switch (err) {
+        error.FileNotFound => return error.NoSuchJournal,
         else => return err,
     };
     defer {
@@ -110,12 +108,12 @@ fn listInteractions(gpa: std.mem.Allocator, io: Io, home: ?[]const u8, args: []c
 }
 
 fn printLast(gpa: std.mem.Allocator, io: Io, home: ?[]const u8, out: *Io.Writer) !void {
-    const session = try currentSession();
+    const journal = try currentJournal();
 
     var root = try store.openRoot(io, home);
     defer root.close(io);
 
-    const number = try store.lastCompleted(gpa, io, root, session) orelse
+    const number = try store.lastCompleted(gpa, io, root, journal) orelse
         return error.NothingRecorded;
     try out.print("{d}\n", .{number});
 }
@@ -166,7 +164,7 @@ fn resolveReference(
     var root = try store.openRoot(io, home);
     defer root.close(io);
 
-    const found = try store.locate(gpa, io, root, sys.env("TJ_SESSION"), ref);
+    const found = try store.locate(gpa, io, root, sys.env("TJ_JOURNAL"), ref);
     defer found.deinit(gpa);
 
     // The resource inside may not exist yet, but the interaction must, or the
@@ -208,20 +206,20 @@ fn completeInteractions(
 ) !void {
     var prefix = body;
     var qualifier: []const u8 = "";
-    var session_owned: ?[]u8 = null;
-    defer if (session_owned) |name| gpa.free(name);
+    var journal_owned: ?[]u8 = null;
+    defer if (journal_owned) |name| gpa.free(name);
 
-    const session: []const u8 = if (std.mem.lastIndexOfScalar(u8, body, '.')) |dot| blk: {
+    const journal: []const u8 = if (std.mem.lastIndexOfScalar(u8, body, '.')) |dot| blk: {
         qualifier = body[0 .. dot + 1];
         prefix = body[dot + 1 ..];
-        session_owned = try store.findSession(gpa, io, root, body[0..dot]) orelse return;
-        break :blk session_owned.?;
-    } else sys.env("TJ_SESSION") orelse return;
+        journal_owned = try store.findNewestJournal(gpa, io, root, body[0..dot]) orelse return;
+        break :blk journal_owned.?;
+    } else sys.env("TJ_JOURNAL") orelse return;
 
-    // A body being typed as a session suffix has no numbers to offer yet.
+    // A body being typed as a journal suffix has no numbers to offer yet.
     for (prefix) |char| if (!std.ascii.isDigit(char)) return;
 
-    const numbers = store.listNumbers(gpa, io, root, session) catch return;
+    const numbers = store.listNumbers(gpa, io, root, journal) catch return;
     defer gpa.free(numbers);
 
     for (numbers) |number| {
@@ -247,14 +245,14 @@ fn completeResources(
     const ref = reference.parse(std.fmt.allocPrint(gpa, "@{s}", .{body[0..cut]}) catch return) catch return;
     const directory = if (cut < body.len) body[cut + 1 ..] else "";
 
-    const found = store.locate(gpa, io, root, sys.env("TJ_SESSION"), ref) catch return;
+    const found = store.locate(gpa, io, root, sys.env("TJ_JOURNAL"), ref) catch return;
     defer found.deinit(gpa);
     if (!found.exists) return;
 
     const names = if (directory.len == 0)
-        store.listResources(gpa, io, root, found.session, found.number) catch return
+        store.listResources(gpa, io, root, found.journal, found.number) catch return
     else
-        listWithin(gpa, io, root, found.session, found.number, directory) catch return;
+        listWithin(gpa, io, root, found.journal, found.number, directory) catch return;
     defer {
         for (names) |name| gpa.free(name);
         gpa.free(names);
@@ -270,12 +268,12 @@ fn listWithin(
     gpa: std.mem.Allocator,
     io: Io,
     root: store.Dir,
-    session: []const u8,
+    journal: []const u8,
     number: u32,
     directory: []const u8,
 ) ![][]u8 {
     var path_buf: [std.fs.max_path_bytes]u8 = undefined;
-    const sub = try std.fmt.bufPrint(&path_buf, "{s}/{d}/{s}", .{ session, number, directory });
+    const sub = try std.fmt.bufPrint(&path_buf, "{s}/{d}/{s}", .{ journal, number, directory });
 
     var dir = try root.openDir(io, sub, .{ .iterate = true });
     defer dir.close(io);
@@ -571,11 +569,11 @@ test "streaming windows keep whole lines across chunk boundaries" {
 
 /// Accepts a reference or a path to the same thing.
 ///
-/// Inside a session the shell integration has already rewritten `@42/out`
+/// Inside a journal writer the shell integration has already rewritten `@42/out`
 /// into a path by the time tj is executed, so insisting on a reference would
 /// make `tj cat @42` work everywhere except the place it is most likely to be
-/// typed. Outside a session there is nothing to rewrite and the reference is
-/// resolved here instead. Either way it ends at the same open file.
+/// typed. Outside a journal writer there is nothing to rewrite and the
+/// reference is resolved here instead. Either way it ends at the same open file.
 fn openTarget(gpa: std.mem.Allocator, io: Io, root: store.Dir, text: []const u8) !Io.File {
     var path_buf: [std.fs.max_path_bytes]u8 = undefined;
     var path: []const u8 = text;
@@ -583,7 +581,7 @@ fn openTarget(gpa: std.mem.Allocator, io: Io, root: store.Dir, text: []const u8)
     defer if (owned) |value| gpa.free(value);
 
     if (reference.parse(text)) |parsed| {
-        const found = try store.locate(gpa, io, root, sys.env("TJ_SESSION"), parsed);
+        const found = try store.locate(gpa, io, root, sys.env("TJ_JOURNAL"), parsed);
         defer found.deinit(gpa);
         if (!found.exists) return error.NoSuchInteraction;
         owned = try gpa.dupe(u8, found.path);
@@ -613,10 +611,10 @@ fn isDirectory(io: Io, path: []const u8) bool {
     return true;
 }
 
-// --- replaying a session -----------------------------------------------------
+// --- replaying a journal -----------------------------------------------------
 
 /// How a recording is played back. The recorded timings give the rhythm; the
-/// defaults keep it watchable, since a real session has gaps where somebody
+/// defaults keep it watchable, since a real journal has gaps where somebody
 /// was reading something for a minute.
 const Replay = struct {
     /// Divides every delay. 2 means twice as fast.
@@ -703,14 +701,14 @@ fn parseReplayArgs(args: []const []const u8) !ReplayRequest {
     return request;
 }
 
-/// `tj replay <session>` - play a recording back into the terminal.
+/// `tj replay <journal>` - play a recording back into the terminal.
 ///
 /// Nothing is re-executed: this is the output that was captured, escape
 /// sequences and all, so it looks the way it looked. What cannot be
 /// reconstructed is when each byte arrived, since only the start and end of
 /// each interaction were recorded - so output appears at once, and the pacing
 /// comes from the real durations and the real gaps between commands.
-fn replaySession(
+fn replayJournal(
     gpa: std.mem.Allocator,
     io: Io,
     home: ?[]const u8,
@@ -721,37 +719,37 @@ fn replaySession(
     const replay = request.replay;
     const wanted = request.wanted;
 
-    // Replaying into a live session would feed the recording back into the
-    // journal: the replayed shell-integration markers read as real command
+    // Replaying inside a live journal writer would feed the recording back
+    // into the journal: the replayed shell-integration markers read as real command
     // boundaries, which truncates the recording of the replay itself and
     // pins the replayed exit status onto it. Asking for the duration prints
     // no recording, so it stays allowed - `tj-tape` needs it.
-    if (!replay.duration_only and sys.env("TJ_SESSION") != null) return error.InsideSession;
+    if (!replay.duration_only and sys.env("TJ_JOURNAL") != null) return error.InsideJournal;
 
     var root = try store.openRoot(io, home);
     defer root.close(io);
 
-    // A suffix works here as it does anywhere else a session is named. With
-    // no session named, the most recent one: there is no current session to
+    // A suffix works here as it does anywhere else a journal is named. With
+    // no journal named, the most recent one: there is no current journal to
     // fall back on, since replay only runs outside one.
     var owned: ?[]u8 = null;
     defer if (owned) |name| gpa.free(name);
 
-    const session: []const u8 = if (wanted) |name| blk: {
-        owned = try store.findSession(gpa, io, root, name) orelse return error.NoSuchSession;
+    const journal: []const u8 = if (wanted) |name| blk: {
+        owned = try store.findNewestJournal(gpa, io, root, name) orelse return error.NoSuchJournal;
         break :blk owned.?;
     } else blk: {
-        const sessions = try store.listSessions(gpa, io, root);
+        const journals = try store.listJournals(gpa, io, root);
         defer {
-            for (sessions) |name| gpa.free(name);
-            gpa.free(sessions);
+            for (journals) |name| gpa.free(name);
+            gpa.free(journals);
         }
-        if (sessions.len == 0) return error.NothingRecorded;
-        owned = try gpa.dupe(u8, sessions[0]);
+        if (journals.len == 0) return error.NothingRecorded;
+        owned = try gpa.dupe(u8, journals[0]);
         break :blk owned.?;
     };
 
-    const numbers = store.listNumbers(gpa, io, root, session) catch return error.NoSuchSession;
+    const numbers = store.listNumbers(gpa, io, root, journal) catch return error.NoSuchJournal;
     defer gpa.free(numbers);
 
     var previous_end: ?i64 = null;
@@ -760,7 +758,7 @@ fn replaySession(
     for (numbers) |number| {
         if (number < replay.from or number > replay.to) continue;
 
-        const timing = store.readTiming(gpa, io, root, session, number);
+        const timing = store.readTiming(gpa, io, root, journal, number);
 
         // The gap since the last command finished is the time somebody spent
         // reading it and typing the next one.
@@ -769,13 +767,13 @@ fn replaySession(
         }
 
         if (!replay.duration_only) try out.writeAll(replay.prompt);
-        try addDuration(&total_ms, try typeOut(io, root, session, number, replay, out));
+        try addDuration(&total_ms, try typeOut(io, root, journal, number, replay, out));
 
         // Then the command runs, which took as long as it took.
         if (timing) |t| try addDuration(&total_ms, try replay.wait(t.duration()));
 
         if (!replay.duration_only) {
-            try writeResource(io, root, session, number, "out", out);
+            try writeResource(io, root, journal, number, "out", out);
             try out.flush();
         }
 
@@ -790,13 +788,13 @@ fn replaySession(
 fn typeOut(
     io: Io,
     root: store.Dir,
-    session: []const u8,
+    journal: []const u8,
     number: u32,
     replay: Replay,
     out: *Io.Writer,
 ) !u64 {
     var path_buf: [64]u8 = undefined;
-    const sub = try std.fmt.bufPrint(&path_buf, "{s}/{d}/cmd", .{ session, number });
+    const sub = try std.fmt.bufPrint(&path_buf, "{s}/{d}/cmd", .{ journal, number });
     const per_char: u64 = if (replay.typing_ms == 0) 0 else try scaleMillis(replay.typing_ms, replay.speed);
     var file = root.openFile(io, sub, .{}) catch |err| switch (err) {
         error.FileNotFound => {
@@ -890,7 +888,7 @@ test "replay millisecond options use their final u64 type" {
     );
 }
 
-test "replay rejects more than one session name" {
+test "replay rejects more than one journal name" {
     try std.testing.expectError(error.BadReplayOption, parseReplayArgs(&.{ "first", "second" }));
 }
 
@@ -908,13 +906,13 @@ test "replay timing arithmetic rejects unrepresentable durations" {
 fn writeResource(
     io: Io,
     root: store.Dir,
-    session: []const u8,
+    journal: []const u8,
     number: u32,
     name: []const u8,
     out: *Io.Writer,
 ) !void {
     var path_buf: [64]u8 = undefined;
-    const sub = try std.fmt.bufPrint(&path_buf, "{s}/{d}/{s}", .{ session, number, name });
+    const sub = try std.fmt.bufPrint(&path_buf, "{s}/{d}/{s}", .{ journal, number, name });
     var file = root.openFile(io, sub, .{}) catch |err| switch (err) {
         error.FileNotFound => return,
         else => |other| return other,

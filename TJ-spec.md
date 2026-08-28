@@ -275,40 +275,72 @@ to separate them. There is no `err` core resource; a program that wants
 to expose its errors as a distinct resource can do so with OSC 5107
 (see below).
 
-## Sessions and numbering
+## Journals and numbering
 
-Each `tj` process is a session. When a session starts, TJ generates a
-ULID for it. ULIDs are 26-character Crockford base32 strings: a 48-bit
-millisecond timestamp followed by 80 random bits. If the generated ULID
-already exists in the store, TJ simply generates another one.
+A journal is a durable ULID directory. A `tj` process is a temporary writer
+attached to one journal. `tj new` always generates a new ULID; `tj continue
+<id-or-suffix>` attaches to one existing journal and rejects zero or multiple
+matches. ULIDs are 26-character Crockford base32 strings: a 48-bit millisecond
+timestamp followed by 80 random bits. If a generated ULID already exists in
+the store, TJ generates another one.
 
-Interactions are numbered sequentially within a session, starting at 1.
+Continuation is append-only. It launches a fresh shell or requested command
+using the caller's cwd and environment. It restores no cwd, environment,
+shell options, functions, history, jobs, file descriptors, processes, or
+other state from previous writers.
 
-Within the current session, `@42` refers to interaction 42. To refer to
-an interaction in another session (for example, another terminal pane,
-or a session that has already ended), the reference is qualified with
-the session ULID or any suffix of it:
+Interactions start at 1. Every later writer starts at one greater than the
+highest valid numeric interaction directory. A missing `rc` means unfinished,
+but that directory still consumes its number. Gaps are never filled and old
+entries are never overwritten.
+
+At most one cooperating writer may attach to a journal. A nonblocking,
+exclusive advisory lock in `~/.tj/.locks/<journal-ulid>` is held for the
+writer's lifetime and is closed on exec in the child. Readers do not take
+this lock. Locking, selection, and number exhaustion fail before the child is
+started.
+
+The lifecycle CLI is explicit:
 
 ``` text
-@42/out                                  interaction 42, current session
-@01knxf1n5ffvk9jsm8wve1pgsd.42/out       interaction 42, full session id
+tj new [--keep-osc] [-- command ...]
+tj continue <id-or-suffix> [--keep-osc] [-- command ...]
+tj journals
+```
+
+The writer exports `TJ_JOURNAL`, `TJ_NEXT`, `TJ_HOME`, and `TJ`. The zsh
+integration derives `TJ_JOURNAL_SHORT` and `TJ_REF`. These variables describe
+the selected durable journal and its next unused interaction; they are not a
+snapshot of prior process state.
+
+Within the current journal, `@42` refers to interaction 42. To refer to
+an interaction in another journal (for example, another terminal pane,
+or a journal that has already ended), the reference is qualified with
+the journal ULID or any suffix of it:
+
+``` text
+@42/out                                  interaction 42, current journal
+@01knxf1n5ffvk9jsm8wve1pgsd.42/out       interaction 42, full journal id
 @wve1pgsd.42/out                         same, using a suffix
 @pgsd.42/out                             same, using a shorter suffix
-@-/out                                   previous interaction, current session
+@-/out                                   previous interaction, current journal
 ```
 
 Suffixes rather than prefixes, because the timestamp prefix is shared
-by every session started in the same moment while the random tail is
+by every journal started in the same moment while the random tail is
 what distinguishes them. A suffix may be of any length. If more than
-one session matches, the most recent one wins. This trades certainty
+one journal matches, the most recent one wins. This trades certainty
 for convenience: short suffixes are for interactive use, and anything
 that needs a stable reference (a note, a script, an agent transcript)
 should use the full ULID.
 
-Because the ULID is time-ordered, sessions sort chronologically in
+That newest-match rule applies to read references and replay. `tj continue`
+requires a unique match because it mutates the selected journal.
+
+Because the ULID is time-ordered, journals sort chronologically in
 `~/.tj/` with no extra metadata.
 
-An all-digit reference (`@42`) always means the current session and is
+An all-digit reference (`@42`) always means the current journal and is
 never interpreted as a suffix.
 
 ## Zsh integration
@@ -350,10 +382,10 @@ ordinary filesystem paths.
 Conceptually:
 
 ``` text
-@10/out                 → ~/.tj/<session>/10/out
-@10/files/data.csv      → ~/.tj/<session>/10/files/data.csv
+@10/out                 → ~/.tj/<journal>/10/out
+@10/files/data.csv      → ~/.tj/<journal>/10/files/data.csv
 @pgsd.10/out            → ~/.tj/<ulid ending in pgsd>/10/out
-@-/out                  → ~/.tj/<session>/<previous>/out
+@-/out                  → ~/.tj/<journal>/<previous>/out
 ```
 
 Thus:
@@ -365,7 +397,7 @@ cat @10/out
 is executed equivalently to:
 
 ``` sh
-cat ~/.tj/<session>/10/out
+cat ~/.tj/<journal>/10/out
 ```
 
 and `cat` remains completely unaware of TJ.
@@ -501,13 +533,19 @@ A proof of concept does not require a database.
 
 ``` text
 ~/.tj/
-└── <session>/
+├── .locks/
+│   └── <journal>
+└── <journal>/
     └── 42/
         ├── cmd
         ├── out
         ├── rc
         └── files/
 ```
+
+Existing ULID directories require no migration. A newly created journal that
+records no interaction or log may be removed as noise. A continued journal is
+never deleted by an empty writer run.
 
 This immediately enables shell completion.
 
@@ -539,7 +577,7 @@ It introduces a persistent namespace for previous computations.
 This unlocks:
 
 -   post-hoc composition
--   addressable debugging sessions
+-   addressable debugging journals
 -   reusable computational artifacts
 -   agent-friendly context
 -   model-independent workflows

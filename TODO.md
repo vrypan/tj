@@ -4,24 +4,24 @@ Things deliberately left undone, with enough context to pick up cold.
 
 ---
 
-## Tell the user when a session recorded nothing
+## Tell the user when a journal recorded nothing
 
-`tj run` without `tj.plugin.zsh` sourced runs fine and records nothing, and
+`tj new` without `tj.plugin.zsh` sourced runs fine and records nothing, and
 nothing says so. `tj hist` prints zero bytes and exits 0, which is
 indistinguishable from a broken journal, a wrong `$TJ_HOME`, or the feature
-not working at all. This has already cost one debugging session.
+not working at all. This has already cost one debugging journal.
 
 Zero interactions is a reliable signal: with the plugin loaded, even typing
 `exit` produces one. So the proxy knows for certain at exit, and `tj hist`
 knows whenever it is asked.
 
-- Where: `proxy.run`, which already has the store at close time and now
-  removes the session when it is empty (`Store.close`), and
-  `commands.listInteractions`.
+- Where: `proxy.run`, which already has the store at close time and may remove
+  a newly created journal when it is empty (`Store.close`); continued journals
+  are always preserved. Also update `commands.listInteractions`.
 - Suggested wording: `tj: nothing was recorded - is tj.plugin.zsh sourced in
   your ~/.zshrc?`
 - Send it to stderr so `tj hist` stays clean in a pipe.
-- Once per session at most. This must not become something that prints on
+- Once per journal at most. This must not become something that prints on
   every prompt.
 
 ## Log a warning when a boundary arrives without a command line
@@ -41,7 +41,7 @@ running under an integration it does not own, so it is worth having.
   `command_len == 0`, call `store.warn`.
 - Watch out for: the warning must not fire once per command in a shell that
   legitimately has no tj plugin, or the log becomes the largest file in the
-  session. Once per session is enough.
+  journal. Once per journal is enough.
 
 ---
 
@@ -49,14 +49,15 @@ running under an integration it does not own, so it is worth having.
 
 ### Retention
 
-Sessions persist indefinitely. `TJ-spec.md` lists retention and redaction as
+Journals persist indefinitely. `TJ-spec.md` lists retention and redaction as
 an open question and it still is. The journal holds whatever appeared on the
 terminal, including secrets, and grows without bound.
 
-Decided so far: exit is **not** the retention boundary. Deleting a session
+Decided so far: exit is **not** the retention boundary. Deleting a journal
 when its terminal closes would break `@SUFFIX.N`, which is defined to resolve
-after a session has ended, and would throw away exactly the recordings worth
-keeping. Only sessions that recorded nothing are removed at exit.
+after a writer has ended, and would throw away exactly the recordings worth
+keeping. Only journals newly created by an empty `tj new` may be removed at
+writer exit; `tj continue` never deletes its existing journal.
 
 What is wanted instead is deliberate: something like `tj prune --older-than
 30d`, or a size cap, or both.
@@ -100,10 +101,10 @@ is implemented. Revisit only if it turns out not to be enough.
 - `tj hist` has no machine-readable form. Not needed while an agent reads it
   through the skill - a model parses the table fine, and JSON measured 2.1x
   the size. It would matter if a wrapper script ever builds prompts.
-- Completion does not offer session suffixes: `@pg<TAB>` produces nothing.
+- Completion does not offer journal suffixes: `@pg<TAB>` produces nothing.
   `SPEC.md` §8.3 does not ask for it, and full ULIDs make poor candidates,
-  but it is a gap when working across sessions.
-- `tj resolve @1` inside a session needs quoting (`tj resolve '@1'`), because
+  but it is a gap when working across journals.
+- `tj resolve @1` inside a journal writer needs quoting (`tj resolve '@1'`), because
   the accept-line widget expands the reference before tj sees it. Inherent
   rather than fixable: resolve's whole job is turning a reference into a
   path, so being handed a path means there is nothing left to do. `tj cat`

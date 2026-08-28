@@ -51,7 +51,7 @@ pub const Event = union(enum) {
     /// `OSC 5107;tj;end` - that resource is complete.
     resource_end,
     /// A malformed or unsupported tj sequence. Carries the payload for the
-    /// session log; the sequence itself is dropped.
+    /// journal log; the sequence itself is dropped.
     protocol_error: []const u8,
 };
 

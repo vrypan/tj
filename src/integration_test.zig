@@ -7,6 +7,7 @@
 const std = @import("std");
 const posix = std.posix;
 const harness = @import("harness.zig");
+const ulid = @import("ulid.zig");
 
 const options = @import("build_options");
 const tj = options.tj_exe;
@@ -15,32 +16,32 @@ const timeout_ms = 5000;
 const test_prompt = "TJ_TEST_PROMPT> ";
 const journal_dir = "journal home *$'quoted";
 
-/// Tests start real sessions, and a session writes a journal. Point every
+/// Tests start real writer processes, each attached to a journal. Point every
 /// child at a scratch one: a test run must not leave anything in the journal
 /// the developer is actually using.
 var journal_isolated = false;
 
 fn isolateJournal() void {
-    // Once only. Tests that set TJ_SESSION themselves, to make `@N` resolve
+    // Once only. Tests that set TJ_JOURNAL themselves, to make `@N` resolve
     // against a journal they built, must not have it taken away again.
     if (journal_isolated) return;
     journal_isolated = true;
 
     sys.setEnv("TJ_HOME", ".zig-cache/tj-test-home");
     // Inherited from the developer's environment otherwise, which would make
-    // `@N` resolve against whatever session they happen to be sitting in.
-    sys.setEnv("TJ_SESSION", "");
+    // `@N` resolve against whatever journal they happen to be writing.
+    sys.setEnv("TJ_JOURNAL", "");
 }
 
-/// Tests share one process, so a test that entered a session leaves
-/// TJ_SESSION set for whatever runs next. Replay refuses to run inside a
-/// session, so its tests have to say they are outside one.
-fn leaveSession() void {
+/// Tests share one process, so a test that selected a journal leaves
+/// TJ_JOURNAL set for whatever runs next. Replay refuses to run inside a
+/// journal writer, so its tests have to say they are outside one.
+fn leaveJournal() void {
     isolateJournal();
-    sys.setEnv("TJ_SESSION", "");
+    sys.setEnv("TJ_JOURNAL", "");
 }
 
-fn spawnTj(gpa: std.mem.Allocator, args: []const []const u8, rows: u16, cols: u16) !harness.Session {
+fn spawnTj(gpa: std.mem.Allocator, args: []const []const u8, rows: u16, cols: u16) !harness.PtyChild {
     isolateJournal();
     return harness.spawn(gpa, args, rows, cols);
 }
@@ -54,9 +55,9 @@ fn run(gpa: std.mem.Allocator, args: []const []const u8, rows: u16, cols: u16) !
     try argv.append(gpa, tj);
     try argv.appendSlice(gpa, args);
 
-    const session = try spawnTj(gpa, argv.items, rows, cols);
+    const child = try spawnTj(gpa, argv.items, rows, cols);
     var out: std.ArrayList(u8) = .empty;
-    const code = try session.finish(gpa, &out, timeout_ms);
+    const code = try child.finish(gpa, &out, timeout_ms);
     return .{ .out = out, .code = code };
 }
 
@@ -64,7 +65,7 @@ fn run(gpa: std.mem.Allocator, args: []const []const u8, rows: u16, cols: u16) !
 /// final marker. This keeps the large-file regression honest about memory.
 fn finishKeepingTail(
     gpa: std.mem.Allocator,
-    session: harness.Session,
+    child: harness.PtyChild,
     keep: usize,
     timeout: i32,
 ) !struct { tail: std.ArrayList(u8), total: u64, code: u8 } {
@@ -75,14 +76,14 @@ fn finishKeepingTail(
     var buf: [64 * 1024]u8 = undefined;
 
     while (remaining > 0) {
-        var fds = [_]posix.pollfd{.{ .fd = session.master, .events = posix.POLL.IN, .revents = 0 }};
+        var fds = [_]posix.pollfd{.{ .fd = child.master, .events = posix.POLL.IN, .revents = 0 }};
         const step: i32 = 100;
         const ready = posix.poll(&fds, step) catch break;
         if (ready == 0) {
             remaining -= step;
             continue;
         }
-        const n = sys.read(session.master, &buf) catch 0;
+        const n = sys.read(child.master, &buf) catch 0;
         if (n == 0) break;
         total += @intCast(n);
 
@@ -101,8 +102,8 @@ fn finishKeepingTail(
         }
     }
 
-    sys.close(session.master);
-    return .{ .tail = tail, .total = total, .code = sys.waitFor(session.pid).code };
+    sys.close(child.master);
+    return .{ .tail = tail, .total = total, .code = sys.waitFor(child.pid).code };
 }
 
 test "exit status of the wrapped command is tj's exit status" {
@@ -110,7 +111,7 @@ test "exit status of the wrapped command is tj's exit status" {
     for ([_]u8{ 0, 3, 42 }) |want| {
         var script_buf: [32]u8 = undefined;
         const script = try std.fmt.bufPrint(&script_buf, "exit {d}", .{want});
-        var r = try run(gpa, &.{ "run", "--", "/bin/sh", "-c", script }, 24, 80);
+        var r = try run(gpa, &.{ "new", "--", "/bin/sh", "-c", script }, 24, 80);
         defer r.out.deinit(gpa);
         try std.testing.expectEqual(want, r.code);
     }
@@ -118,90 +119,90 @@ test "exit status of the wrapped command is tj's exit status" {
 
 test "a command killed by a signal reports 128+signal" {
     const gpa = std.testing.allocator;
-    var r = try run(gpa, &.{ "run", "--", "/bin/sh", "-c", "kill -TERM $$" }, 24, 80);
+    var r = try run(gpa, &.{ "new", "--", "/bin/sh", "-c", "kill -TERM $$" }, 24, 80);
     defer r.out.deinit(gpa);
     try std.testing.expectEqual(@as(u8, 128 + 15), r.code);
 }
 
 test "the outer window size reaches the wrapped command" {
     const gpa = std.testing.allocator;
-    var r = try run(gpa, &.{ "run", "--", "/bin/sh", "-c", "stty size" }, 31, 113);
+    var r = try run(gpa, &.{ "new", "--", "/bin/sh", "-c", "stty size" }, 31, 113);
     defer r.out.deinit(gpa);
     try std.testing.expect(std.mem.indexOf(u8, r.out.items, "31 113") != null);
 }
 
 test "the wrapped command sees a tty" {
     const gpa = std.testing.allocator;
-    var r = try run(gpa, &.{ "run", "--", "/bin/sh", "-c", "test -t 0 && test -t 1 && echo ISTTY" }, 24, 80);
+    var r = try run(gpa, &.{ "new", "--", "/bin/sh", "-c", "test -t 0 && test -t 1 && echo ISTTY" }, 24, 80);
     defer r.out.deinit(gpa);
     try std.testing.expect(std.mem.indexOf(u8, r.out.items, "ISTTY") != null);
 }
 
 test "a command that cannot be executed exits 127" {
     const gpa = std.testing.allocator;
-    var r = try run(gpa, &.{ "run", "--", "/nonexistent/program" }, 24, 80);
+    var r = try run(gpa, &.{ "new", "--", "/nonexistent/program" }, 24, 80);
     defer r.out.deinit(gpa);
     try std.testing.expectEqual(@as(u8, 127), r.code);
 }
 
 test "input typed at the outer terminal reaches the shell" {
     const gpa = std.testing.allocator;
-    const session = try spawnTj(gpa, &.{ tj, "run", "--", "/bin/sh" }, 24, 80);
+    const child = try spawnTj(gpa, &.{ tj, "new", "--", "/bin/sh" }, 24, 80);
     var out: std.ArrayList(u8) = .empty;
     defer out.deinit(gpa);
 
-    try session.write("echo ROUNDTRIP-$((6*7))\n");
-    _ = try session.readUntil(gpa, &out, "ROUNDTRIP-42", timeout_ms);
-    try session.write("exit\n");
-    _ = try session.finish(gpa, &out, timeout_ms);
+    try child.write("echo ROUNDTRIP-$((6*7))\n");
+    _ = try child.readUntil(gpa, &out, "ROUNDTRIP-42", timeout_ms);
+    try child.write("exit\n");
+    _ = try child.finish(gpa, &out, timeout_ms);
 
     try std.testing.expect(std.mem.indexOf(u8, out.items, "ROUNDTRIP-42") != null);
 }
 
 test "resizing the outer terminal resizes the inner one" {
     const gpa = std.testing.allocator;
-    const session = try spawnTj(
+    const child = try spawnTj(
         gpa,
-        &.{ tj, "run", "--", "/bin/sh", "-c", "trap 'stty size; exit 0' WINCH; echo READY; while :; do sleep 1; done" },
+        &.{ tj, "new", "--", "/bin/sh", "-c", "trap 'stty size; exit 0' WINCH; echo READY; while :; do sleep 1; done" },
         24,
         80,
     );
     var out: std.ArrayList(u8) = .empty;
     defer out.deinit(gpa);
 
-    try std.testing.expect(try session.readUntil(gpa, &out, "READY", timeout_ms));
+    try std.testing.expect(try child.readUntil(gpa, &out, "READY", timeout_ms));
     const from = out.items.len;
-    try session.resize(40, 100);
-    try std.testing.expect(try session.readUntilFrom(gpa, &out, from, "40 100", timeout_ms));
-    _ = try session.finish(gpa, &out, timeout_ms);
+    try child.resize(40, 100);
+    try std.testing.expect(try child.readUntilFrom(gpa, &out, from, "40 100", timeout_ms));
+    _ = try child.finish(gpa, &out, timeout_ms);
 
     try std.testing.expect(std.mem.indexOf(u8, out.items, "40 100") != null);
 }
 
 test "signals sent to tj are forwarded to the shell" {
     const gpa = std.testing.allocator;
-    const session = try spawnTj(
+    const child = try spawnTj(
         gpa,
-        &.{ tj, "run", "--", "/bin/sh", "-c", "trap 'echo GOTTERM; exit 9' TERM; echo READY; sleep 5" },
+        &.{ tj, "new", "--", "/bin/sh", "-c", "trap 'echo GOTTERM; exit 9' TERM; echo READY; sleep 5" },
         24,
         80,
     );
     var out: std.ArrayList(u8) = .empty;
     defer out.deinit(gpa);
 
-    try std.testing.expect(try session.readUntil(gpa, &out, "READY", timeout_ms));
-    _ = std.c.kill(session.pid, posix.SIG.TERM);
-    _ = try session.finish(gpa, &out, timeout_ms);
+    try std.testing.expect(try child.readUntil(gpa, &out, "READY", timeout_ms));
+    _ = std.c.kill(child.pid, posix.SIG.TERM);
+    _ = try child.finish(gpa, &out, timeout_ms);
 
     try std.testing.expect(std.mem.indexOf(u8, out.items, "GOTTERM") != null);
 }
 
-test "the terminal is raw while tj runs and restored afterwards" {
+test "the terminal is raw while tj is active and restored afterwards" {
     const gpa = std.testing.allocator;
-    const session = try spawnTj(gpa, &.{options.selftest_exe}, 24, 80);
+    const child = try spawnTj(gpa, &.{options.selftest_exe}, 24, 80);
     var out: std.ArrayList(u8) = .empty;
     defer out.deinit(gpa);
-    const code = try session.finish(gpa, &out, timeout_ms);
+    const code = try child.finish(gpa, &out, timeout_ms);
     try std.testing.expectEqual(@as(u8, 0), code);
     try std.testing.expect(std.mem.indexOf(u8, out.items, "RAW=yes") != null);
     try std.testing.expect(std.mem.indexOf(u8, out.items, "RESTORED=yes") != null);
@@ -213,7 +214,7 @@ const Io = std.Io;
 const Dir = std.Io.Dir;
 const sys = @import("sys.zig");
 
-/// A zsh session under tj, with the plugin loaded and a journal of its own.
+/// A zsh child process under tj, with the plugin loaded.
 const Journal = struct {
     tmp: std.testing.TmpDir,
     // A length, not a slice: the struct is returned by value, and a slice into
@@ -255,54 +256,64 @@ const Journal = struct {
         self.tmp.cleanup();
     }
 
-    /// The id of the single session this run created.
-    fn sessionName(self: *Journal, gpa: std.mem.Allocator) ![]u8 {
+    /// The id of the single journal this writer created.
+    fn journalName(self: *Journal, gpa: std.mem.Allocator) ![]u8 {
         const io = std.testing.io;
         var root = try self.tmp.dir.openDir(io, journal_dir, .{ .iterate = true });
         defer root.close(io);
         var it = root.iterate();
         while (try it.next(io)) |entry| {
-            if (entry.kind == .directory) return gpa.dupe(u8, entry.name);
+            if (entry.kind == .directory and ulid.isValid(entry.name)) return gpa.dupe(u8, entry.name);
         }
-        return error.NoSession;
+        return error.NoJournal;
     }
 
-    /// Makes `@N` and `@-` resolve against this journal's session.
+    /// Makes `@N` and `@-` resolve against this journal.
     fn enter(self: *Journal, gpa: std.mem.Allocator) !void {
-        const name = try self.sessionName(gpa);
+        const name = try self.journalName(gpa);
         defer gpa.free(name);
         var buf: [64]u8 = undefined;
         @memcpy(buf[0..name.len], name);
         buf[name.len] = 0;
-        sys.setEnv("TJ_SESSION", buf[0..name.len :0]);
+        sys.setEnv("TJ_JOURNAL", buf[0..name.len :0]);
     }
 
-    /// The single session directory this run created.
-    fn sessionDir(self: *Journal) !Dir {
+    /// The single journal directory this writer created.
+    fn journalDir(self: *Journal) !Dir {
         const io = std.testing.io;
         var root = try self.tmp.dir.openDir(io, journal_dir, .{ .iterate = true });
         defer root.close(io);
         var it = root.iterate();
         while (try it.next(io)) |entry| {
-            if (entry.kind == .directory) return root.openDir(io, entry.name, .{});
+            if (entry.kind == .directory and ulid.isValid(entry.name)) return root.openDir(io, entry.name, .{});
         }
-        return error.NoSession;
+        return error.NoJournal;
     }
 
     fn read(self: *Journal, gpa: std.mem.Allocator, sub_path: []const u8) ![]u8 {
-        var session = try self.sessionDir();
-        defer session.close(std.testing.io);
-        return session.readFileAlloc(std.testing.io, sub_path, gpa, .limited(1 << 20));
+        var child = try self.journalDir();
+        defer child.close(std.testing.io);
+        return child.readFileAlloc(std.testing.io, sub_path, gpa, .limited(1 << 20));
     }
 };
 
 /// Starts zsh with every startup file disabled. The fixture loads exactly the
 /// plugin it needs through the PTY, so system zsh configuration cannot change
 /// the prompt or install competing hooks.
-fn spawnJournalZsh(gpa: std.mem.Allocator, journal: *const Journal) !harness.Session {
+fn spawnJournalZsh(gpa: std.mem.Allocator, journal: *const Journal) !harness.PtyChild {
     const home = try journal.homeArg(gpa);
     defer gpa.free(home);
-    return spawnTj(gpa, &.{ tj, "--home", home, "run", "--", "/bin/zsh", "-f", "-i" }, 24, 80);
+    return spawnTj(gpa, &.{ tj, "--home", home, "new", "--", "/bin/zsh", "-f", "-i" }, 24, 80);
+}
+
+fn spawnContinuedJournalZsh(
+    gpa: std.mem.Allocator,
+    journal: *const Journal,
+    selector: []const u8,
+) !harness.PtyChild {
+    const home = try journal.homeArg(gpa);
+    defer gpa.free(home);
+    return spawnTj(gpa, &.{ tj, "--home", home, "continue", selector, "--", "/bin/zsh", "-f", "-i" }, 24, 80);
 }
 
 fn appendShellQuoted(gpa: std.mem.Allocator, out: *std.ArrayList(u8), text: []const u8) !void {
@@ -317,7 +328,7 @@ fn appendShellQuoted(gpa: std.mem.Allocator, out: *std.ArrayList(u8), text: []co
     try out.append(gpa, '\'');
 }
 
-fn setupJournalZsh(gpa: std.mem.Allocator, session: harness.Session, out: *std.ArrayList(u8)) !void {
+fn setupJournalZsh(gpa: std.mem.Allocator, child: harness.PtyChild, out: *std.ArrayList(u8)) !void {
     var command: std.ArrayList(u8) = .empty;
     defer command.deinit(gpa);
     // `source -- file` is not portable across the zsh versions used by the
@@ -325,8 +336,8 @@ fn setupJournalZsh(gpa: std.mem.Allocator, session: harness.Session, out: *std.A
     try command.appendSlice(gpa, ". ");
     try appendShellQuoted(gpa, &command, options.plugin);
     try command.appendSlice(gpa, " || exit; PS1='TJ_TEST_PROMPT> '\n");
-    try session.write(command.items);
-    if (!try session.readUntil(gpa, out, test_prompt, timeout_ms)) return error.ShellNotReady;
+    try child.write(command.items);
+    if (!try child.readUntil(gpa, out, test_prompt, timeout_ms)) return error.ShellNotReady;
 }
 
 fn haveZsh() bool {
@@ -337,20 +348,20 @@ fn haveZsh() bool {
 }
 
 /// Runs `script` line by line in an interactive zsh under tj, then exits.
-fn recordSession(gpa: std.mem.Allocator, journal: *Journal, script: []const []const u8) !void {
-    const session = try spawnJournalZsh(gpa, journal);
+fn recordJournal(gpa: std.mem.Allocator, journal: *Journal, script: []const []const u8) !void {
+    const child = try spawnJournalZsh(gpa, journal);
     var out: std.ArrayList(u8) = .empty;
     defer out.deinit(gpa);
 
-    try setupJournalZsh(gpa, session, &out);
+    try setupJournalZsh(gpa, child, &out);
     for (script) |line| {
         const from = out.items.len;
-        try session.write(line);
-        try session.write("\n");
-        if (!try session.readUntilFrom(gpa, &out, from, test_prompt, timeout_ms)) return error.CommandDidNotFinish;
+        try child.write(line);
+        try child.write("\n");
+        if (!try child.readUntilFrom(gpa, &out, from, test_prompt, timeout_ms)) return error.CommandDidNotFinish;
     }
-    try session.write("exit 0\n");
-    try std.testing.expectEqual(@as(u8, 0), try session.finish(gpa, &out, timeout_ms));
+    try child.write("exit 0\n");
+    try std.testing.expectEqual(@as(u8, 0), try child.finish(gpa, &out, timeout_ms));
 }
 
 test "commands are recorded as cmd, out and rc" {
@@ -360,7 +371,7 @@ test "commands are recorded as cmd, out and rc" {
     var journal = try Journal.open(gpa);
     defer journal.close();
 
-    try recordSession(gpa, &journal, &.{ "echo hello-journal", "false" });
+    try recordJournal(gpa, &journal, &.{ "echo hello-journal", "false" });
 
     const first_cmd = try journal.read(gpa, "1/cmd");
     defer gpa.free(first_cmd);
@@ -383,6 +394,102 @@ test "commands are recorded as cmd, out and rc" {
     try std.testing.expectEqualStrings("1\n", second_rc);
 }
 
+test "continue appends to the same journal at its next unused number" {
+    if (!haveZsh()) return error.SkipZigTest;
+    const gpa = std.testing.allocator;
+
+    var journal = try Journal.open(gpa);
+    defer journal.close();
+    try recordJournal(gpa, &journal, &.{"echo original-entry"});
+
+    const name = try journal.journalName(gpa);
+    defer gpa.free(name);
+    const child = try spawnContinuedJournalZsh(gpa, &journal, name);
+    var out: std.ArrayList(u8) = .empty;
+    defer out.deinit(gpa);
+    try setupJournalZsh(gpa, child, &out);
+
+    const from = out.items.len;
+    try child.write("echo continued-entry\n");
+    try std.testing.expect(try child.readUntilFrom(gpa, &out, from, test_prompt, timeout_ms));
+
+    const env_from = out.items.len;
+    try child.write("printf 'JENV=%s SHORT=%s NEXT=%s\\n' \"$TJ_JOURNAL\" \"$TJ_JOURNAL_SHORT\" \"$TJ_NEXT\"; command \"$TJ\" current\n");
+    try std.testing.expect(try child.readUntilFrom(gpa, &out, env_from, name, timeout_ms));
+    var short_buf: [16]u8 = undefined;
+    const expected_short = try std.fmt.bufPrint(&short_buf, "SHORT={s}", .{name[name.len - 4 ..]});
+    try std.testing.expect(std.mem.indexOf(u8, out.items[env_from..], expected_short) != null);
+    try std.testing.expect(try child.readUntilFrom(gpa, &out, env_from, test_prompt, timeout_ms));
+
+    try child.write("exit 0\n");
+    try std.testing.expectEqual(@as(u8, 0), try child.finish(gpa, &out, timeout_ms));
+
+    const first = try journal.read(gpa, "1/cmd");
+    defer gpa.free(first);
+    const unfinished = try journal.read(gpa, "2/cmd");
+    defer gpa.free(unfinished);
+    const continued = try journal.read(gpa, "3/cmd");
+    defer gpa.free(continued);
+    try std.testing.expectEqualStrings("echo original-entry", first);
+    try std.testing.expectEqualStrings("exit 0", unfinished);
+    try std.testing.expectEqualStrings("echo continued-entry", continued);
+
+    const home = try journal.homeArg(gpa);
+    defer gpa.free(home);
+    var listed = try run(gpa, &.{ "--home", home, "journals" }, 24, 80);
+    defer listed.out.deinit(gpa);
+    try std.testing.expectEqual(@as(u8, 0), listed.code);
+    try std.testing.expect(std.mem.indexOf(u8, listed.out.items, name) != null);
+}
+
+test "new exports journal variables and removes the old environment contract" {
+    const gpa = std.testing.allocator;
+    var scratch = try Scratch.open();
+    defer scratch.close();
+
+    var r = try run(gpa, &.{
+        "--home",
+        scratch.path(),
+        "new",
+        "--",
+        "/bin/sh",
+        "-c",
+        "printf 'J=%s N=%s\\n' \"$TJ_JOURNAL\" \"$TJ_NEXT\"; env | grep '^TJ_' | sort",
+    }, 24, 80);
+    defer r.out.deinit(gpa);
+    try std.testing.expectEqual(@as(u8, 0), r.code);
+    try std.testing.expect(std.mem.indexOf(u8, r.out.items, " N=1") != null);
+    try std.testing.expect(std.mem.indexOf(u8, r.out.items, "SESS" ++ "ION") == null);
+}
+
+test "continue preserves unfinished numbers and gaps" {
+    if (!haveZsh()) return error.SkipZigTest;
+    const gpa = std.testing.allocator;
+    const io = std.testing.io;
+    var scratch = try Scratch.open();
+    defer scratch.close();
+
+    const id = ulid.encode(20, .{8} ** 10);
+    try scratch.makeJournal(id, &.{ "1", "3" });
+    const child = try spawnTj(gpa, &.{ tj, "--home", scratch.path(), "continue", &id, "--", "/bin/zsh", "-f", "-i" }, 24, 80);
+    var out: std.ArrayList(u8) = .empty;
+    defer out.deinit(gpa);
+    try setupJournalZsh(gpa, child, &out);
+    const from = out.items.len;
+    try child.write("echo after-gap\n");
+    try std.testing.expect(try child.readUntilFrom(gpa, &out, from, test_prompt, timeout_ms));
+    try child.write("exit 0\n");
+    try std.testing.expectEqual(@as(u8, 0), try child.finish(gpa, &out, timeout_ms));
+
+    var dir = try scratch.tmp.dir.openDir(io, &id, .{});
+    defer dir.close(io);
+    const cmd = try dir.readFileAlloc(io, "4/cmd", gpa, .limited(1024));
+    defer gpa.free(cmd);
+    try std.testing.expectEqualStrings("echo after-gap", cmd);
+    var unfinished = try dir.openDir(io, "3", .{});
+    unfinished.close(io);
+}
+
 test "tj's own control sequences never reach the terminal" {
     if (!haveZsh()) return error.SkipZigTest;
     const gpa = std.testing.allocator;
@@ -390,16 +497,16 @@ test "tj's own control sequences never reach the terminal" {
     var journal = try Journal.open(gpa);
     defer journal.close();
 
-    const session = try spawnJournalZsh(gpa, &journal);
+    const child = try spawnJournalZsh(gpa, &journal);
     var out: std.ArrayList(u8) = .empty;
     defer out.deinit(gpa);
 
-    try setupJournalZsh(gpa, session, &out);
+    try setupJournalZsh(gpa, child, &out);
     const from = out.items.len;
-    try session.write("echo marker\n");
-    try std.testing.expect(try session.readUntilFrom(gpa, &out, from, test_prompt, timeout_ms));
-    try session.write("exit\n");
-    try std.testing.expectEqual(@as(u8, 0), try session.finish(gpa, &out, timeout_ms));
+    try child.write("echo marker\n");
+    try std.testing.expect(try child.readUntilFrom(gpa, &out, from, test_prompt, timeout_ms));
+    try child.write("exit\n");
+    try std.testing.expectEqual(@as(u8, 0), try child.finish(gpa, &out, timeout_ms));
 
     try std.testing.expect(std.mem.indexOf(u8, out.items, "marker") != null);
     // The command line travels inside a 5107 sequence; none of it may be shown.
@@ -418,39 +525,39 @@ test "a command line with shell metacharacters survives the round trip" {
 
     // Semicolons would split the control sequence if it were not encoded.
     const tricky = "echo 'a;b' \"c;d\" | cat # trailing;comment";
-    try recordSession(gpa, &journal, &.{tricky});
+    try recordJournal(gpa, &journal, &.{tricky});
 
     const recorded = try journal.read(gpa, "1/cmd");
     defer gpa.free(recorded);
     try std.testing.expectEqualStrings(tricky, recorded);
 }
 
-test "an interrupted session leaves the interaction without an rc" {
+test "an interrupted writer leaves the interaction without an rc" {
     if (!haveZsh()) return error.SkipZigTest;
     const gpa = std.testing.allocator;
 
     var journal = try Journal.open(gpa);
     defer journal.close();
 
-    const session = try spawnJournalZsh(gpa, &journal);
+    const child = try spawnJournalZsh(gpa, &journal);
     var out: std.ArrayList(u8) = .empty;
     defer out.deinit(gpa);
 
-    try setupJournalZsh(gpa, session, &out);
+    try setupJournalZsh(gpa, child, &out);
     const from = out.items.len;
-    try session.write("sleep 30\n");
+    try child.write("sleep 30\n");
     // The echoed input arrives before preexec. Wait for the plugin's command
     // boundary so the proxy has opened the interaction before interrupting it.
-    try std.testing.expect(try session.readUntilFrom(gpa, &out, from, "133;C", timeout_ms));
-    _ = std.c.kill(session.pid, posix.SIG.TERM);
-    _ = try session.finish(gpa, &out, timeout_ms);
+    try std.testing.expect(try child.readUntilFrom(gpa, &out, from, "133;C", timeout_ms));
+    _ = std.c.kill(child.pid, posix.SIG.TERM);
+    _ = try child.finish(gpa, &out, timeout_ms);
 
     const cmd = try journal.read(gpa, "1/cmd");
     defer gpa.free(cmd);
     try std.testing.expectEqualStrings("sleep 30", cmd);
 
     // No rc: readers must treat this as aborted, never as success.
-    var dir = try journal.sessionDir();
+    var dir = try journal.journalDir();
     defer dir.close(std.testing.io);
     try std.testing.expectError(error.FileNotFound, dir.openFile(std.testing.io, "1/rc", .{}));
 }
@@ -463,7 +570,7 @@ test "references resolve to paths inside the journal" {
 
     var journal = try Journal.open(gpa);
     defer journal.close();
-    try recordSession(gpa, &journal, &.{ "echo first", "echo second" });
+    try recordJournal(gpa, &journal, &.{ "echo first", "echo second" });
     try journal.enter(gpa);
 
     const home = try journal.homeArg(gpa);
@@ -482,7 +589,7 @@ test "a malformed reference and a missing one are told apart" {
 
     var journal = try Journal.open(gpa);
     defer journal.close();
-    try recordSession(gpa, &journal, &.{"echo only"});
+    try recordJournal(gpa, &journal, &.{"echo only"});
     try journal.enter(gpa);
 
     const home = try journal.homeArg(gpa);
@@ -505,7 +612,7 @@ test "a reference cannot escape its interaction directory" {
 
     var journal = try Journal.open(gpa);
     defer journal.close();
-    try recordSession(gpa, &journal, &.{"echo only"});
+    try recordJournal(gpa, &journal, &.{"echo only"});
     try journal.enter(gpa);
 
     const home = try journal.homeArg(gpa);
@@ -525,7 +632,7 @@ test "completion offers resources but never tj's own bookkeeping" {
 
     var journal = try Journal.open(gpa);
     defer journal.close();
-    try recordSession(gpa, &journal, &.{"echo one"});
+    try recordJournal(gpa, &journal, &.{"echo one"});
     try journal.enter(gpa);
 
     const home = try journal.homeArg(gpa);
@@ -547,7 +654,7 @@ test "an unquoted reference on a command line becomes a path" {
     defer journal.close();
 
     // The second command reads the first one's output through the journal.
-    try recordSession(gpa, &journal, &.{ "echo alpha-marker", "cat @1/out" });
+    try recordJournal(gpa, &journal, &.{ "echo alpha-marker", "cat @1/out" });
 
     const second_out = try journal.read(gpa, "2/out");
     defer gpa.free(second_out);
@@ -571,7 +678,7 @@ test "quoted references and addresses are left alone" {
 
     var journal = try Journal.open(gpa);
     defer journal.close();
-    try recordSession(gpa, &journal, &.{
+    try recordJournal(gpa, &journal, &.{
         "echo start",
         "echo 'literal @1/out here'",
         "echo user@host",
@@ -604,7 +711,7 @@ test "a full-screen program leaves nothing in the journal" {
 
     // The sequences a pager or editor sends, without the unpredictability of
     // driving a real one.
-    try recordSession(gpa, &journal, &.{
+    try recordJournal(gpa, &journal, &.{
         "printf 'BEFORE\\n\\033[?1049hHIDDEN-PAINTING\\033[?1049lAFTER\\n'",
     });
 
@@ -631,16 +738,16 @@ test "the terminal still sees the full-screen program" {
     var journal = try Journal.open(gpa);
     defer journal.close();
 
-    const session = try spawnJournalZsh(gpa, &journal);
+    const child = try spawnJournalZsh(gpa, &journal);
     var out: std.ArrayList(u8) = .empty;
     defer out.deinit(gpa);
 
-    try setupJournalZsh(gpa, session, &out);
+    try setupJournalZsh(gpa, child, &out);
     const from = out.items.len;
-    try session.write("printf '\\033[?1049hHIDDEN-PAINTING\\033[?1049l'\n");
-    try std.testing.expect(try session.readUntilFrom(gpa, &out, from, test_prompt, timeout_ms));
-    try session.write("exit\n");
-    try std.testing.expectEqual(@as(u8, 0), try session.finish(gpa, &out, timeout_ms));
+    try child.write("printf '\\033[?1049hHIDDEN-PAINTING\\033[?1049l'\n");
+    try std.testing.expect(try child.readUntilFrom(gpa, &out, from, test_prompt, timeout_ms));
+    try child.write("exit\n");
+    try std.testing.expectEqual(@as(u8, 0), try child.finish(gpa, &out, timeout_ms));
 
     // Filtering applies to the journal only: the program must render exactly
     // as it would without tj.
@@ -654,7 +761,7 @@ test "tj cat renders recorded output as readable text" {
 
     var journal = try Journal.open(gpa);
     defer journal.close();
-    try recordSession(gpa, &journal, &.{"printf '\\033[31mred\\033[0m\\r\\n10%%\\r100%% done\\r\\n'"});
+    try recordJournal(gpa, &journal, &.{"printf '\\033[31mred\\033[0m\\r\\n10%%\\r100%% done\\r\\n'"});
     try journal.enter(gpa);
 
     const home = try journal.homeArg(gpa);
@@ -676,7 +783,7 @@ test "tj cat --raw gives back exactly what was recorded" {
 
     var journal = try Journal.open(gpa);
     defer journal.close();
-    try recordSession(gpa, &journal, &.{"printf '\\033[31mred\\033[0m\\n'"});
+    try recordJournal(gpa, &journal, &.{"printf '\\033[31mred\\033[0m\\n'"});
     try journal.enter(gpa);
 
     const home = try journal.homeArg(gpa);
@@ -693,7 +800,7 @@ test "tj cat defaults to the output and reads other resources by name" {
 
     var journal = try Journal.open(gpa);
     defer journal.close();
-    try recordSession(gpa, &journal, &.{"echo marker-text"});
+    try recordJournal(gpa, &journal, &.{"echo marker-text"});
     try journal.enter(gpa);
 
     const home = try journal.homeArg(gpa);
@@ -718,13 +825,13 @@ test "tj cat takes the path a reference expanded to, as well as the reference" {
 
     var journal = try Journal.open(gpa);
     defer journal.close();
-    try recordSession(gpa, &journal, &.{"echo path-or-ref"});
+    try recordJournal(gpa, &journal, &.{"echo path-or-ref"});
     try journal.enter(gpa);
 
     const home = try journal.homeArg(gpa);
     defer gpa.free(home);
 
-    // Inside a session the shell integration rewrites `@1` before tj runs, so
+    // The shell integration rewrites `@1` before tj executes, so
     // this is the form tj actually receives there.
     var resolved = try run(gpa, &.{ "--home", home, "resolve", "@1" }, 24, 80);
     defer resolved.out.deinit(gpa);
@@ -753,11 +860,11 @@ test "cat windows and replay stream output beyond sixty-four mibibytes" {
 
     var journal = try Journal.open(gpa);
     defer journal.close();
-    try recordSession(gpa, &journal, &.{"echo replace-this-output"});
+    try recordJournal(gpa, &journal, &.{"echo replace-this-output"});
 
-    var session_dir = try journal.sessionDir();
-    defer session_dir.close(io);
-    var file = try session_dir.createFile(io, "1/out", .{});
+    var selected_dir = try journal.journalDir();
+    defer selected_dir.close(io);
+    var file = try selected_dir.createFile(io, "1/out", .{});
     try file.writePositionalAll(io, "FIRST-LINE\n", 0);
     try file.setLength(io, beyond_old_limit);
     try file.writePositionalAll(io, "\nTAIL-A\nREPLAY-BEYOND-LIMIT\n", beyond_old_limit);
@@ -782,7 +889,7 @@ test "cat windows and replay stream output beyond sixty-four mibibytes" {
     try std.testing.expect(std.mem.indexOf(u8, tail.out.items, "REPLAY-BEYOND-LIMIT") != null);
     try std.testing.expect(std.mem.indexOf(u8, tail.out.items, "showing 2 of 4 lines") != null);
 
-    leaveSession();
+    leaveJournal();
     const replay = try spawnTj(gpa, &.{
         tj, "--home", home, "replay", "--typing", "0", "--max-pause", "0", "--prompt", "",
     }, 24, 80);
@@ -793,10 +900,10 @@ test "cat windows and replay stream output beyond sixty-four mibibytes" {
     try std.testing.expect(std.mem.indexOf(u8, replayed.tail.items, "REPLAY-BEYOND-LIMIT") != null);
 }
 
-// --- sessions that recorded nothing ------------------------------------------
+// --- journals that recorded nothing ------------------------------------------
 
 /// A journal directory with no shell integration pointed at it, for testing
-/// what a session leaves behind.
+/// what a new journal writer leaves behind.
 const Scratch = struct {
     tmp: std.testing.TmpDir,
     path_len: usize,
@@ -820,62 +927,166 @@ const Scratch = struct {
         self.tmp.cleanup();
     }
 
-    /// How many session directories the journal holds.
-    fn sessions(self: *Scratch) !usize {
+    fn makeJournal(self: *Scratch, id: ulid.Ulid, entries: []const []const u8) !void {
+        const io = std.testing.io;
+        try self.tmp.dir.createDir(io, &id, @enumFromInt(0o700));
+        var dir = try self.tmp.dir.openDir(io, &id, .{});
+        defer dir.close(io);
+        for (entries) |entry| try dir.createDir(io, entry, @enumFromInt(0o700));
+    }
+
+    /// How many journal directories the root holds.
+    fn journals(self: *Scratch) !usize {
         var count: usize = 0;
         var it = self.tmp.dir.iterate();
         while (try it.next(std.testing.io)) |entry| {
-            if (entry.kind == .directory) count += 1;
+            if (entry.kind == .directory and ulid.isValid(entry.name)) count += 1;
         }
         return count;
     }
 };
 
-test "a session that recorded nothing leaves nothing behind" {
+test "a new journal that recorded nothing leaves nothing behind" {
     const gpa = std.testing.allocator;
 
     var scratch = try Scratch.open();
     defer scratch.close();
 
     // /bin/sh loads no tj integration, so no command boundaries are ever
-    // reported and the session records nothing.
-    var r = try run(gpa, &.{ "--home", scratch.path(), "run", "--", "/bin/sh", "-c", "true" }, 24, 80);
+    // reported and the new journal records nothing.
+    var r = try run(gpa, &.{ "--home", scratch.path(), "new", "--", "/bin/sh", "-c", "true" }, 24, 80);
     defer r.out.deinit(gpa);
     try std.testing.expectEqual(@as(u8, 0), r.code);
 
-    try std.testing.expectEqual(@as(usize, 0), try scratch.sessions());
+    try std.testing.expectEqual(@as(usize, 0), try scratch.journals());
 }
 
-test "a session that recorded something is kept" {
+test "a new journal that recorded something is kept" {
     if (!haveZsh()) return error.SkipZigTest;
     const gpa = std.testing.allocator;
 
     var journal = try Journal.open(gpa);
     defer journal.close();
-    try recordSession(gpa, &journal, &.{"echo kept"});
+    try recordJournal(gpa, &journal, &.{"echo kept"});
 
     const cmd = try journal.read(gpa, "1/cmd");
     defer gpa.free(cmd);
     try std.testing.expectEqualStrings("echo kept", cmd);
 }
 
-test "a session that could not record but said why is kept" {
+test "a new journal that could not record but said why is kept" {
     const gpa = std.testing.allocator;
 
     var scratch = try Scratch.open();
     defer scratch.close();
 
-    // A malformed tj sequence: no interaction is opened, but the session log
+    // A malformed tj sequence: no interaction is opened, but the journal log
     // records that something was ignored, and that is worth keeping.
     var r = try run(gpa, &.{
         "--home",                                scratch.path(),
-        "run",                                   "--",
+        "new",                                   "--",
         "/bin/sh",                               "-c",
         "printf '\\033]5107;tj;bogus\\033\\\\'",
     }, 24, 80);
     defer r.out.deinit(gpa);
 
-    try std.testing.expectEqual(@as(usize, 1), try scratch.sessions());
+    try std.testing.expectEqual(@as(usize, 1), try scratch.journals());
+}
+
+test "continue rejects missing ambiguous and full journals before exec" {
+    const gpa = std.testing.allocator;
+    var scratch = try Scratch.open();
+    defer scratch.close();
+
+    const first = ulid.encode(30, .{0} ** 10);
+    const second = ulid.encode(31, .{0} ** 10);
+    const full = ulid.encode(32, .{1} ** 10);
+    try scratch.makeJournal(first, &.{});
+    try scratch.makeJournal(second, &.{});
+    try scratch.makeJournal(full, &.{"4294967295"});
+
+    var missing = try run(gpa, &.{ "--home", scratch.path(), "continue", "does-not-exist", "--", "/bin/sh", "-c", "echo CHILD-RAN" }, 24, 80);
+    defer missing.out.deinit(gpa);
+    try std.testing.expectEqual(@as(u8, 1), missing.code);
+    try std.testing.expect(std.mem.indexOf(u8, missing.out.items, "no journal matches") != null);
+    try std.testing.expect(std.mem.indexOf(u8, missing.out.items, "CHILD-RAN") == null);
+
+    var ambiguous = try run(gpa, &.{ "--home", scratch.path(), "continue", "0000", "--", "/bin/sh", "-c", "echo CHILD-RAN" }, 24, 80);
+    defer ambiguous.out.deinit(gpa);
+    try std.testing.expectEqual(@as(u8, 1), ambiguous.code);
+    try std.testing.expect(std.mem.indexOf(u8, ambiguous.out.items, "suffix is ambiguous") != null);
+    try std.testing.expect(std.mem.indexOf(u8, ambiguous.out.items, "CHILD-RAN") == null);
+
+    var exhausted = try run(gpa, &.{ "--home", scratch.path(), "continue", &full, "--", "/bin/sh", "-c", "echo CHILD-RAN" }, 24, 80);
+    defer exhausted.out.deinit(gpa);
+    try std.testing.expectEqual(@as(u8, 1), exhausted.code);
+    try std.testing.expect(std.mem.indexOf(u8, exhausted.out.items, "no interaction numbers left") != null);
+    try std.testing.expect(std.mem.indexOf(u8, exhausted.out.items, "CHILD-RAN") == null);
+}
+
+test "an empty continue preserves its journal" {
+    const gpa = std.testing.allocator;
+    const io = std.testing.io;
+    var scratch = try Scratch.open();
+    defer scratch.close();
+
+    const id = ulid.encode(40, .{2} ** 10);
+    try scratch.makeJournal(id, &.{});
+    var r = try run(gpa, &.{ "--home", scratch.path(), "continue", id[id.len - 6 ..], "--", "/bin/sh", "-c", "true" }, 24, 80);
+    defer r.out.deinit(gpa);
+    try std.testing.expectEqual(@as(u8, 0), r.code);
+    var dir = try scratch.tmp.dir.openDir(io, &id, .{});
+    dir.close(io);
+}
+
+test "only one process writes a journal and descendants do not retain its lock" {
+    const gpa = std.testing.allocator;
+    var scratch = try Scratch.open();
+    defer scratch.close();
+
+    const id = ulid.encode(50, .{3} ** 10);
+    try scratch.makeJournal(id, &.{"1"});
+    const holder = try spawnTj(gpa, &.{ tj, "--home", scratch.path(), "continue", &id, "--", "/bin/sh", "-c", "echo LOCK-READY; sleep 30" }, 24, 80);
+    var holder_out: std.ArrayList(u8) = .empty;
+    defer holder_out.deinit(gpa);
+    try std.testing.expect(try holder.readUntil(gpa, &holder_out, "LOCK-READY", timeout_ms));
+
+    var blocked = try run(gpa, &.{ "--home", scratch.path(), "continue", &id, "--", "/bin/sh", "-c", "echo SECOND-RAN" }, 24, 80);
+    defer blocked.out.deinit(gpa);
+    try std.testing.expectEqual(@as(u8, 1), blocked.code);
+    try std.testing.expect(std.mem.indexOf(u8, blocked.out.items, "already being written") != null);
+    try std.testing.expect(std.mem.indexOf(u8, blocked.out.items, "SECOND-RAN") == null);
+
+    _ = std.c.kill(holder.pid, posix.SIG.TERM);
+    _ = try holder.finish(gpa, &holder_out, timeout_ms);
+
+    var background = try run(gpa, &.{ "--home", scratch.path(), "continue", &id, "--", "/bin/sh", "-c", "(sleep 3) </dev/null >/dev/null 2>&1 &" }, 24, 80);
+    defer background.out.deinit(gpa);
+    try std.testing.expectEqual(@as(u8, 0), background.code);
+
+    var after = try run(gpa, &.{ "--home", scratch.path(), "continue", &id, "--", "/bin/sh", "-c", "true" }, 24, 80);
+    defer after.out.deinit(gpa);
+    try std.testing.expectEqual(@as(u8, 0), after.code);
+}
+
+test "continue starts from the caller state instead of restoring writer state" {
+    if (!haveZsh()) return error.SkipZigTest;
+    const gpa = std.testing.allocator;
+    var scratch = try Scratch.open();
+    defer scratch.close();
+
+    const id = ulid.encode(60, .{4} ** 10);
+    try scratch.makeJournal(id, &.{});
+    var prior = try run(gpa, &.{ "--home", scratch.path(), "continue", &id, "--", "/bin/zsh", "-f", "-c", "cd /; export PRIOR_WRITER_STATE=secret; setopt extendedglob; prior_fn() { :; }; sleep 2 </dev/null >/dev/null 2>&1 &" }, 24, 80);
+    defer prior.out.deinit(gpa);
+    try std.testing.expectEqual(@as(u8, 0), prior.code);
+
+    var fresh = try run(gpa, &.{ "--home", scratch.path(), "continue", &id, "--", "/bin/zsh", "-f", "-c", "printf 'PWD=%s PRIOR=%s OPT=%s FUNC=%s JOBS=%s\\n' \"$PWD\" \"${PRIOR_WRITER_STATE-unset}\" \"${options[extendedglob]}\" \"${+functions[prior_fn]}\" \"${#jobstates}\"" }, 24, 80);
+    defer fresh.out.deinit(gpa);
+    try std.testing.expectEqual(@as(u8, 0), fresh.code);
+    try std.testing.expect(std.mem.indexOf(u8, fresh.out.items, "PRIOR=unset") != null);
+    try std.testing.expect(std.mem.indexOf(u8, fresh.out.items, "OPT=off FUNC=0 JOBS=0") != null);
+    try std.testing.expect(std.mem.indexOf(u8, fresh.out.items, "PWD=/ PR") == null);
 }
 
 // --- resources published by programs ----------------------------------------
@@ -899,7 +1110,7 @@ test "a program can publish parts of its output as named resources" {
         "\\033]5107;tj;end\\033\\\\" ++
         "after\\n");
     defer gpa.free(script);
-    try recordSession(gpa, &journal, &.{script});
+    try recordJournal(gpa, &journal, &.{script});
 
     const resource = try journal.read(gpa, "1/files/data.csv");
     defer gpa.free(resource);
@@ -933,7 +1144,7 @@ test "a resource name cannot escape the interaction or overwrite tj's own files"
         "\\033]5107;tj;begin;/etc/passwd\\033\\\\ROOT\\033]5107;tj;end\\033\\\\" ++
         "\\033]5107;tj;begin;ok/kept.txt\\033\\\\legit\\033]5107;tj;end\\033\\\\");
     defer gpa.free(script);
-    try recordSession(gpa, &journal, &.{script});
+    try recordJournal(gpa, &journal, &.{script});
 
     // The one valid name is published.
     const kept = try journal.read(gpa, "1/ok/kept.txt");
@@ -941,7 +1152,7 @@ test "a resource name cannot escape the interaction or overwrite tj's own files"
     try std.testing.expectEqualStrings("legit", kept);
 
     // The rest are refused, and `out` still holds what tj put there.
-    var dir = try journal.sessionDir();
+    var dir = try journal.journalDir();
     defer dir.close(std.testing.io);
     try std.testing.expectError(error.FileNotFound, dir.openFile(std.testing.io, "1/escape", .{}));
 
@@ -968,7 +1179,7 @@ test "a resource the program never closed is flagged truncated" {
 
     const script = try publisher(gpa, "\\033]5107;tj;begin;partial\\033\\\\half a file");
     defer gpa.free(script);
-    try recordSession(gpa, &journal, &.{script});
+    try recordJournal(gpa, &journal, &.{script});
 
     const resource = try journal.read(gpa, "1/partial");
     defer gpa.free(resource);
@@ -988,7 +1199,7 @@ test "published resources are addressable and completable" {
 
     const script = try publisher(gpa, "\\033]5107;tj;begin;files/note.txt;text/plain\\033\\\\hello resource\\033]5107;tj;end\\033\\\\");
     defer gpa.free(script);
-    try recordSession(gpa, &journal, &.{script});
+    try recordJournal(gpa, &journal, &.{script});
     try journal.enter(gpa);
 
     const home = try journal.homeArg(gpa);
@@ -1015,32 +1226,32 @@ test "zsh completion keeps special resource names as one inert argument" {
     var journal = try Journal.open(gpa);
     defer journal.close();
 
-    const session = try spawnJournalZsh(gpa, &journal);
+    const child = try spawnJournalZsh(gpa, &journal);
     var out: std.ArrayList(u8) = .empty;
     defer out.deinit(gpa);
-    try setupJournalZsh(gpa, session, &out);
+    try setupJournalZsh(gpa, child, &out);
 
     const publish = try publisher(gpa, "\\033]5107;tj;begin;files/note *$ file.txt;text/plain\\033\\\\" ++
         "special-resource-content\\033]5107;tj;end\\033\\\\");
     defer gpa.free(publish);
     var from = out.items.len;
-    try session.write(publish);
-    try session.write("\n");
-    try std.testing.expect(try session.readUntilFrom(gpa, &out, from, test_prompt, timeout_ms));
+    try child.write(publish);
+    try child.write("\n");
+    try std.testing.expect(try child.readUntilFrom(gpa, &out, from, test_prompt, timeout_ms));
 
     from = out.items.len;
-    try session.write("autoload -Uz compinit; compinit -D; _tj_register_completion\n");
-    try std.testing.expect(try session.readUntilFrom(gpa, &out, from, test_prompt, timeout_ms));
+    try child.write("autoload -Uz compinit; compinit -D; _tj_register_completion\n");
+    try std.testing.expect(try child.readUntilFrom(gpa, &out, from, test_prompt, timeout_ms));
 
     from = out.items.len;
-    try session.write("cat @1/files/note");
-    try session.write("\t");
-    try std.testing.expect(try session.readUntilFrom(gpa, &out, from, "file.txt", timeout_ms));
-    try session.write("\n");
-    try std.testing.expect(try session.readUntilFrom(gpa, &out, from, "special-resource-content", timeout_ms));
+    try child.write("cat @1/files/note");
+    try child.write("\t");
+    try std.testing.expect(try child.readUntilFrom(gpa, &out, from, "file.txt", timeout_ms));
+    try child.write("\n");
+    try std.testing.expect(try child.readUntilFrom(gpa, &out, from, "special-resource-content", timeout_ms));
 
-    try session.write("exit 0\n");
-    try std.testing.expectEqual(@as(u8, 0), try session.finish(gpa, &out, timeout_ms));
+    try child.write("exit 0\n");
+    try std.testing.expectEqual(@as(u8, 0), try child.finish(gpa, &out, timeout_ms));
 }
 
 test "a published resource survives arbitrary bytes" {
@@ -1070,7 +1281,7 @@ test "a published resource survives arbitrary bytes" {
         "cat {s}; " ++
         "printf '\\033]5107;tj;end\\033\\\\'", .{path});
     defer gpa.free(script);
-    try recordSession(gpa, &journal, &.{script});
+    try recordJournal(gpa, &journal, &.{script});
 
     const recovered = try journal.read(gpa, "1/files/blob.bin");
     defer gpa.free(recovered);
@@ -1084,7 +1295,7 @@ test "a published resource survives arbitrary bytes" {
 
 test "invalid replay numeric options exit cleanly" {
     const gpa = std.testing.allocator;
-    leaveSession();
+    leaveJournal();
 
     const cases = [_][]const []const u8{
         &.{ "replay", "--from", "4294967296" },
@@ -1102,14 +1313,14 @@ test "invalid replay numeric options exit cleanly" {
     }
 }
 
-test "a session replays the commands and output it recorded" {
+test "a journal replays the commands and output it recorded" {
     if (!haveZsh()) return error.SkipZigTest;
     const gpa = std.testing.allocator;
 
     var journal = try Journal.open(gpa);
     defer journal.close();
-    try recordSession(gpa, &journal, &.{ "echo first-marker", "echo second-marker" });
-    leaveSession();
+    try recordJournal(gpa, &journal, &.{ "echo first-marker", "echo second-marker" });
+    leaveJournal();
 
     const home = try journal.homeArg(gpa);
     defer gpa.free(home);
@@ -1137,8 +1348,8 @@ test "replay can be narrowed to a range of interactions" {
 
     var journal = try Journal.open(gpa);
     defer journal.close();
-    try recordSession(gpa, &journal, &.{ "echo alpha", "echo beta", "echo gamma" });
-    leaveSession();
+    try recordJournal(gpa, &journal, &.{ "echo alpha", "echo beta", "echo gamma" });
+    leaveJournal();
 
     const home = try journal.homeArg(gpa);
     defer gpa.free(home);
@@ -1153,16 +1364,16 @@ test "replay can be narrowed to a range of interactions" {
     try std.testing.expect(std.mem.indexOf(u8, r.out.items, "gamma") == null);
 }
 
-test "replay names a session by suffix, like every other reference" {
+test "replay names a journal by suffix, like every other reference" {
     if (!haveZsh()) return error.SkipZigTest;
     const gpa = std.testing.allocator;
 
     var journal = try Journal.open(gpa);
     defer journal.close();
-    try recordSession(gpa, &journal, &.{"echo by-suffix"});
-    leaveSession();
+    try recordJournal(gpa, &journal, &.{"echo by-suffix"});
+    leaveJournal();
 
-    const name = try journal.sessionName(gpa);
+    const name = try journal.journalName(gpa);
     defer gpa.free(name);
     const home = try journal.homeArg(gpa);
     defer gpa.free(home);
@@ -1174,14 +1385,14 @@ test "replay names a session by suffix, like every other reference" {
     try std.testing.expect(std.mem.indexOf(u8, r.out.items, "echo by-suffix") != null);
 }
 
-test "replay refuses to run inside a session" {
+test "replay refuses to run inside a journal writer" {
     if (!haveZsh()) return error.SkipZigTest;
     const gpa = std.testing.allocator;
 
     var journal = try Journal.open(gpa);
     defer journal.close();
-    try recordSession(gpa, &journal, &.{"echo recorded"});
-    // Being "inside a session" is exactly what TJ_SESSION means.
+    try recordJournal(gpa, &journal, &.{"echo recorded"});
+    // Being inside a journal writer is exactly what TJ_JOURNAL means.
     try journal.enter(gpa);
 
     const home = try journal.homeArg(gpa);
@@ -1190,30 +1401,30 @@ test "replay refuses to run inside a session" {
     var refused = try run(gpa, &.{ "--home", home, "replay", "--typing", "0" }, 24, 80);
     defer refused.out.deinit(gpa);
     try std.testing.expectEqual(@as(u8, 1), refused.code);
-    // The recording must not have been replayed into the live session.
+    // The recording must not have been replayed into the live writer.
     try std.testing.expect(std.mem.indexOf(u8, refused.out.items, "echo recorded") == null);
 
     // Asking only how long it would take prints no recording, so it is allowed:
-    // tj-tape needs it, and is usually run from inside a session.
+    // tj-tape needs it, and is usually run from inside a writer.
     var duration = try run(gpa, &.{ "--home", home, "replay", "--duration" }, 24, 80);
     defer duration.out.deinit(gpa);
     try std.testing.expectEqual(@as(u8, 0), duration.code);
 }
 
-test "replay with no session named plays the most recent one" {
+test "replay with no journal named plays the most recent one" {
     if (!haveZsh()) return error.SkipZigTest;
     const gpa = std.testing.allocator;
 
     var journal = try Journal.open(gpa);
     defer journal.close();
-    try recordSession(gpa, &journal, &.{"echo only-session"});
-    leaveSession();
+    try recordJournal(gpa, &journal, &.{"echo only-child"});
+    leaveJournal();
 
     const home = try journal.homeArg(gpa);
     defer gpa.free(home);
 
-    // Deliberately not inside a session, which is the only way replay runs.
+    // Deliberately not inside a journal writer, which is the only way replay runs.
     var r = try run(gpa, &.{ "--home", home, "replay", "--typing", "0", "--max-pause", "0" }, 24, 80);
     defer r.out.deinit(gpa);
-    try std.testing.expect(std.mem.indexOf(u8, r.out.items, "echo only-session") != null);
+    try std.testing.expect(std.mem.indexOf(u8, r.out.items, "echo only-child") != null);
 }

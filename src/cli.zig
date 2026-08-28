@@ -1,19 +1,19 @@
 //! Command line parsing for `tj`.
 //!
-//!     tj run [flags] [-- command...]   start a session
+//!     tj new [flags] [-- command...]   create and write a journal
+//!     tj continue <id> [flags] [...]  append to an existing journal
 //!     tj <subcommand> [args...]        work with the journal
 //!     tj                               help
 //!
-//! Starting a session takes an explicit `run`. A session changes what the
-//! shell you are typing into is, which is not something to end up inside by
-//! mistyping a subcommand.
+//! Starting a writer takes an explicit lifecycle command. This changes what
+//! the shell you are typing into is, which is not something to enter by
+//! mistyping a read subcommand.
 
 const std = @import("std");
 
 pub const Subcommand = enum {
-    run,
     hist,
-    sessions,
+    journals,
     current,
     last,
     cat,
@@ -27,7 +27,13 @@ pub const Subcommand = enum {
     }
 };
 
+pub const JournalSelection = union(enum) {
+    new,
+    existing: []const u8,
+};
+
 pub const Proxy = struct {
+    journal: JournalSelection,
     /// The command to run under the pty. Empty means "the user's shell".
     argv: []const []const u8 = &.{},
     keep_osc: bool = false,
@@ -51,13 +57,13 @@ pub const ParseError = error{
     UnknownFlag,
     MissingFlagValue,
     UnknownSubcommand,
-    /// A command to run, with no `run` in front of it.
-    MissingRun,
+    MissingLifecycle,
+    MissingJournal,
 };
 
 /// `args` excludes the program name.
 pub fn parse(args: []const []const u8) ParseError!Command {
-    var proxy: Proxy = .{};
+    var options: ProxyOptions = .{};
     var i: usize = 0;
 
     while (i < args.len) {
@@ -66,118 +72,162 @@ pub fn parse(args: []const []const u8) ParseError!Command {
         if (std.mem.eql(u8, arg, "-h") or std.mem.eql(u8, arg, "--help")) return .help;
         if (std.mem.eql(u8, arg, "-V") or std.mem.eql(u8, arg, "--version")) return .version;
 
-        if (try takeFlag(args, &i, &proxy)) continue;
+        if (try takeFlag(args, &i, &options)) continue;
 
-        // `tj -- zsh` used to start a session. It now needs saying out loud.
-        if (std.mem.eql(u8, arg, "--")) return error.MissingRun;
+        if (std.mem.eql(u8, arg, "--")) return error.MissingLifecycle;
         if (std.mem.startsWith(u8, arg, "-")) return error.UnknownFlag;
+
+        if (std.mem.eql(u8, arg, "new")) {
+            return .{ .proxy = try parseProxy(args[i + 1 ..], options, .new) };
+        }
+        if (std.mem.eql(u8, arg, "continue")) {
+            const rest = args[i + 1 ..];
+            if (rest.len == 0 or std.mem.eql(u8, rest[0], "--") or std.mem.startsWith(u8, rest[0], "-")) {
+                return error.MissingJournal;
+            }
+            return .{ .proxy = try parseProxy(rest[1..], options, .{ .existing = rest[0] }) };
+        }
 
         const which = Subcommand.parse(arg) orelse return error.UnknownSubcommand;
         const rest = args[i + 1 ..];
-        if (which == .run) return .{ .proxy = try parseRun(rest, proxy) };
-        return .{ .subcommand = .{ .which = which, .args = rest, .home = proxy.home } };
+        return .{ .subcommand = .{ .which = which, .args = rest, .home = options.home } };
     }
 
     // Nothing asked for. Say what is on offer rather than guessing.
     return .help;
 }
 
-/// Everything after `run`: any remaining flags, then the command, with or
-/// without a `--` separating them.
-fn parseRun(args: []const []const u8, inherited: Proxy) ParseError!Proxy {
-    var proxy = inherited;
+const ProxyOptions = struct {
+    keep_osc: bool = false,
+    home: ?[]const u8 = null,
+};
+
+/// Everything after the lifecycle selector: any remaining flags, then the
+/// child command, with or without a `--` separating them.
+fn parseProxy(args: []const []const u8, inherited: ProxyOptions, journal: JournalSelection) ParseError!Proxy {
+    var options = inherited;
     var i: usize = 0;
 
     while (i < args.len) {
         if (std.mem.eql(u8, args[i], "--")) {
-            proxy.argv = args[i + 1 ..];
-            return proxy;
+            return .{
+                .journal = journal,
+                .argv = args[i + 1 ..],
+                .keep_osc = options.keep_osc,
+                .home = options.home,
+            };
         }
-        if (try takeFlag(args, &i, &proxy)) continue;
+        if (try takeFlag(args, &i, &options)) continue;
 
         // A flag tj does not know is a mistake, not a program to run. Say so,
         // rather than reporting that `--nope` could not be executed. After the
         // separator it would be a program name, and is left alone.
         if (std.mem.startsWith(u8, args[i], "-")) return error.UnknownFlag;
 
-        // A bare command, so `tj run zsh -f` works as well as `tj run -- zsh -f`.
-        proxy.argv = args[i..];
-        return proxy;
+        return .{
+            .journal = journal,
+            .argv = args[i..],
+            .keep_osc = options.keep_osc,
+            .home = options.home,
+        };
     }
-    return proxy;
+    return .{
+        .journal = journal,
+        .keep_osc = options.keep_osc,
+        .home = options.home,
+    };
 }
 
 /// Consumes a flag at `i` if there is one, advancing past it.
-fn takeFlag(args: []const []const u8, i: *usize, proxy: *Proxy) ParseError!bool {
+fn takeFlag(args: []const []const u8, i: *usize, options: *ProxyOptions) ParseError!bool {
     const arg = args[i.*];
 
     if (std.mem.eql(u8, arg, "--keep-osc")) {
-        proxy.keep_osc = true;
+        options.keep_osc = true;
         i.* += 1;
         return true;
     }
     if (std.mem.eql(u8, arg, "--home")) {
         if (i.* + 1 >= args.len) return error.MissingFlagValue;
-        proxy.home = args[i.* + 1];
+        options.home = args[i.* + 1];
         i.* += 2;
         return true;
     }
     if (std.mem.startsWith(u8, arg, "--home=")) {
-        proxy.home = arg["--home=".len..];
+        options.home = arg["--home=".len..];
         i.* += 1;
         return true;
     }
     return false;
 }
 
-test "a bare invocation explains itself instead of starting a session" {
+test "a bare invocation explains itself instead of starting a writer" {
     try std.testing.expect(try parse(&.{}) == .help);
     try std.testing.expect(try parse(&.{"--keep-osc"}) == .help);
 }
 
-test "run starts a session with the default shell" {
-    const cmd = try parse(&.{"run"});
+test "new creates a journal with the default shell" {
+    const cmd = try parse(&.{"new"});
     try std.testing.expect(cmd == .proxy);
+    try std.testing.expect(cmd.proxy.journal == .new);
     try std.testing.expectEqual(@as(usize, 0), cmd.proxy.argv.len);
 }
 
-test "run takes a command with or without a separator" {
-    const separated = try parse(&.{ "run", "--", "zsh", "-f" });
+test "new takes a command with or without a separator" {
+    const separated = try parse(&.{ "new", "--", "zsh", "-f" });
     try std.testing.expectEqual(@as(usize, 2), separated.proxy.argv.len);
     try std.testing.expectEqualStrings("zsh", separated.proxy.argv[0]);
     try std.testing.expectEqualStrings("-f", separated.proxy.argv[1]);
 
-    const bare = try parse(&.{ "run", "zsh", "-f" });
+    const bare = try parse(&.{ "new", "zsh", "-f" });
     try std.testing.expectEqual(@as(usize, 2), bare.proxy.argv.len);
     try std.testing.expectEqualStrings("zsh", bare.proxy.argv[0]);
 }
 
-test "flags work before or after run" {
-    const before = try parse(&.{ "--keep-osc", "--home", "/tmp/j", "run" });
+test "flags work before or after new" {
+    const before = try parse(&.{ "--keep-osc", "--home", "/tmp/j", "new" });
     try std.testing.expect(before.proxy.keep_osc);
     try std.testing.expectEqualStrings("/tmp/j", before.proxy.home.?);
 
-    const after = try parse(&.{ "run", "--keep-osc", "--home=/tmp/j", "--", "sh" });
+    const after = try parse(&.{ "new", "--keep-osc", "--home=/tmp/j", "--", "sh" });
     try std.testing.expect(after.proxy.keep_osc);
     try std.testing.expectEqualStrings("/tmp/j", after.proxy.home.?);
     try std.testing.expectEqualStrings("sh", after.proxy.argv[0]);
 }
 
-test "an unknown flag after run is a mistake, not a program name" {
-    try std.testing.expectError(error.UnknownFlag, parse(&.{ "run", "--nope" }));
+test "an unknown flag after new is a mistake, not a program name" {
+    try std.testing.expectError(error.UnknownFlag, parse(&.{ "new", "--nope" }));
     // ...but after the separator it is whatever the user meant it to be.
-    const cmd = try parse(&.{ "run", "--", "--nope" });
+    const cmd = try parse(&.{ "new", "--", "--nope" });
     try std.testing.expectEqualStrings("--nope", cmd.proxy.argv[0]);
 }
 
 test "flags after the separator belong to the command" {
-    const cmd = try parse(&.{ "run", "--", "sh", "--help" });
+    const cmd = try parse(&.{ "new", "--", "sh", "--help" });
     try std.testing.expectEqual(@as(usize, 2), cmd.proxy.argv.len);
     try std.testing.expectEqualStrings("--help", cmd.proxy.argv[1]);
 }
 
-test "a command with no run is refused rather than guessed at" {
-    try std.testing.expectError(error.MissingRun, parse(&.{ "--", "zsh" }));
+test "continue requires one journal selector and accepts a command" {
+    const cmd = try parse(&.{ "continue", "abcd", "--keep-osc", "--", "zsh", "-f" });
+    try std.testing.expect(cmd.proxy.journal == .existing);
+    try std.testing.expectEqualStrings("abcd", cmd.proxy.journal.existing);
+    try std.testing.expect(cmd.proxy.keep_osc);
+    try std.testing.expectEqualStrings("zsh", cmd.proxy.argv[0]);
+
+    const bare = try parse(&.{ "--home=/tmp/j", "continue", "01abc", "sh", "-c", "true" });
+    try std.testing.expectEqualStrings("/tmp/j", bare.proxy.home.?);
+    try std.testing.expectEqualStrings("sh", bare.proxy.argv[0]);
+}
+
+test "continue requires a journal selector" {
+    try std.testing.expectError(error.MissingJournal, parse(&.{"continue"}));
+    try std.testing.expectError(error.MissingJournal, parse(&.{ "continue", "--" }));
+    try std.testing.expectError(error.MissingJournal, parse(&.{ "continue", "--home", "/tmp/j" }));
+}
+
+test "a command with no lifecycle is refused rather than guessed at" {
+    try std.testing.expectError(error.MissingLifecycle, parse(&.{ "--", "zsh" }));
 }
 
 test "subcommands are recognised and keep their arguments" {
@@ -192,14 +242,14 @@ test "history is the same subcommand as hist" {
 }
 
 test "a journal location given before a subcommand reaches it" {
-    const cmd = try parse(&.{ "--home", "/tmp/j", "sessions" });
-    try std.testing.expectEqual(Subcommand.sessions, cmd.subcommand.which);
+    const cmd = try parse(&.{ "--home", "/tmp/j", "journals" });
+    try std.testing.expectEqual(Subcommand.journals, cmd.subcommand.which);
     try std.testing.expectEqualStrings("/tmp/j", cmd.subcommand.home.?);
 }
 
 test "help and version win over anything else" {
     try std.testing.expect(try parse(&.{"--help"}) == .help);
-    try std.testing.expect(try parse(&.{ "-V", "sessions" }) == .version);
+    try std.testing.expect(try parse(&.{ "-V", "journals" }) == .version);
 }
 
 test "unknown flags and unknown subcommands are told apart" {
@@ -207,5 +257,7 @@ test "unknown flags and unknown subcommands are told apart" {
     try std.testing.expectError(error.UnknownSubcommand, parse(&.{"zsh"}));
     // The old name for `hist`, so this is a plausible thing to type.
     try std.testing.expectError(error.UnknownSubcommand, parse(&.{"list"}));
+    try std.testing.expectError(error.UnknownSubcommand, parse(&.{"run"}));
+    try std.testing.expectError(error.UnknownSubcommand, parse(&.{"sess" ++ "ions"}));
     try std.testing.expectError(error.MissingFlagValue, parse(&.{"--home"}));
 }

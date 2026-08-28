@@ -209,7 +209,7 @@ pub fn setEnv(name: [*:0]const u8, value: [*:0]const u8) void {
 }
 
 /// Absolute path of the running binary, so the shell plugin can invoke exactly
-/// the build that started the session.
+/// the build that started the journal writer.
 pub fn selfExePath(buf: []u8) ?[]const u8 {
     switch (builtin.os.tag) {
         .linux => {

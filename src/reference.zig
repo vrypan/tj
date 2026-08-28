@@ -1,12 +1,12 @@
 //! The `@` namespace: names for previous computations, alongside the
 //! filesystem's names for files.
 //!
-//!     @42/out                          interaction 42, current session
+//!     @42/out                          interaction 42, current journal
 //!     @-/out                           the last completed interaction
-//!     @01knxf1n5ffvk9jsm8wve1pgsd.42   another session, by full id
+//!     @01knxf1n5ffvk9jsm8wve1pgsd.42   another journal, by full id
 //!     @pgsd.42/files/data.csv          the same, by a suffix of it
 //!
-//! Suffixes rather than prefixes: every session started in the same
+//! Suffixes rather than prefixes: every journal started in the same
 //! millisecond shares the ULID's timestamp prefix, so only the tail
 //! distinguishes them.
 //!
@@ -74,8 +74,8 @@ fn parseBody(text: []const u8) Error!Body {
         return .{ .qualified = .{ .suffix = suffix, .number = try parseNumber(digits) } };
     }
 
-    // An all-digit reference always means the current session and is never
-    // read as a session suffix.
+    // An all-digit reference always means the current journal and is never
+    // read as a journal suffix.
     for (text) |char| if (!std.ascii.isDigit(char)) return error.NotAReference;
     return .{ .current = try parseNumber(text) };
 }
@@ -142,7 +142,7 @@ test "the previous interaction" {
     try std.testing.expectEqualStrings("out", (try parse("@-/out")).subpath);
 }
 
-test "session-qualified references" {
+test "journal-qualified references" {
     const ref = try parse("@pgsd.42/out");
     try std.testing.expectEqualStrings("pgsd", ref.body.qualified.suffix);
     try std.testing.expectEqual(@as(u32, 42), ref.body.qualified.number);
@@ -153,7 +153,7 @@ test "session-qualified references" {
     try std.testing.expectEqual(@as(u32, 7), full.body.qualified.number);
 }
 
-test "an all-digit reference is never read as a session suffix" {
+test "an all-digit reference is never read as a journal suffix" {
     const ref = try parse("@1234567890");
     try std.testing.expect(ref.body == .current);
     try std.testing.expectEqual(@as(u32, 1234567890), ref.body.current);
@@ -191,7 +191,7 @@ test "subpaths cannot escape the interaction directory" {
     try std.testing.expectError(error.Malformed, parse("@-/.."));
 }
 
-test "session suffixes are bounded" {
+test "journal suffixes are bounded" {
     try std.testing.expect(looksLikeReference("@" ++ "a" ** 26 ++ ".1"));
     try std.testing.expect(!looksLikeReference("@" ++ "a" ** 27 ++ ".1"));
 }

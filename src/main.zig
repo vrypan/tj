@@ -18,18 +18,20 @@ const usage =
     \\tj - Terminal Journal
     \\
     \\Usage:
-    \\  tj run [flags] [-- command ...]   start a session, recording what happens in it
-    \\  tj <subcommand> [args ...]        work with what was recorded
+    \\  tj new [flags] [-- command ...]          create a journal and write to it
+    \\  tj continue <id> [flags] [-- command ...] append to an existing journal
+    \\  tj <subcommand> [args ...]               work with what was recorded
     \\
     \\Subcommands:
-    \\  run            run $SHELL, or a given command, under the journal
-    \\  hist           the interactions of this session (also: history)
-    \\  sessions       every session, newest first
-    \\  current        this session's id
+    \\  new            run $SHELL, or a command, writing a new journal
+    \\  continue ID    run a fresh shell or command, appending to one journal
+    \\  hist           the interactions of this journal (also: history)
+    \\  journals       every journal, newest first
+    \\  current        this journal's id
     \\  last           the last interaction that completed
     \\  cat <ref>...   print what a reference names
     \\                 (--raw / --plain, --head N / --tail N)
-    \\  replay [sess]  play a session back into the terminal (outside a session)
+    \\  replay [id]    play a journal back into the terminal (outside a writer)
     \\                 (--speed X, --typing MS, --max-pause MS, --prompt S,
     \\                  --from N, --to N)
     \\  resolve <ref>  print the path a reference names
@@ -42,9 +44,9 @@ const usage =
     \\  -V, --version  show the version
     \\
     \\References name previous computations the way paths name files:
-    \\  @42/out        interaction 42 of this session
+    \\  @42/out        interaction 42 of this journal
     \\  @-/out         the last interaction that completed
-    \\  @pgsd.42/out   interaction 42 of another session, by a suffix of its id
+    \\  @pgsd.42/out   interaction 42 of another journal, by a suffix of its id
     \\
     \\Recording and reference expansion need the shell integration:
     \\  source /path/to/tj.plugin.zsh   # in ~/.zshrc
@@ -60,7 +62,8 @@ pub fn main(init: std.process.Init) !u8 {
             error.UnknownFlag => "tj: unrecognised flag\n\n",
             error.MissingFlagValue => "tj: --home needs a directory\n\n",
             error.UnknownSubcommand => "tj: unknown subcommand\n\n",
-            error.MissingRun => "tj: to run something under the journal, say `tj run -- <command>`\n\n",
+            error.MissingLifecycle => "tj: choose `tj new` or `tj continue <id>` before the command\n\n",
+            error.MissingJournal => "tj: continue needs a journal id or suffix\n\n",
         });
         try write(init.io, .stderr(), usage);
         return 2;
@@ -81,8 +84,8 @@ pub fn main(init: std.process.Init) !u8 {
             commands.run(arena, init.io, sub, &writer.interface) catch |err| {
                 writer.interface.flush() catch {};
                 try write(init.io, .stderr(), switch (err) {
-                    error.NotInSession => "tj: not inside a tj session\n",
-                    error.NoSuchSession => "tj: no session matches that id\n",
+                    error.NotInJournal => "tj: not inside a tj journal writer\n",
+                    error.NoSuchJournal => "tj: no journal matches that id\n",
                     error.NothingRecorded, error.NothingCompleted => "tj: nothing recorded yet\n",
                     error.MissingArgument => "tj: this subcommand needs an argument\n",
                     error.BadReference => "tj: not a journal reference\n",
@@ -90,7 +93,7 @@ pub fn main(init: std.process.Init) !u8 {
                     error.BadReplayOption => "tj: invalid replay numeric option\n",
                     error.NoSuchInteraction => "tj: no such interaction\n",
                     error.NoSuchResource => "tj: no such resource or file\n",
-                    error.InsideSession => "tj: cannot replay inside a tj session, because the session would record the replay; run it from a shell that is not under tj\n",
+                    error.InsideJournal => "tj: cannot replay inside a live journal writer, because it would record the replay; run it from a shell that is not under tj\n",
                     error.FileNotFound => "tj: no journal yet\n",
                     else => "tj: cannot read the journal\n",
                 });
@@ -105,9 +108,13 @@ pub fn main(init: std.process.Init) !u8 {
         .proxy => |opts| {
             const result = proxy.run(arena, init.io, opts) catch |err| {
                 try write(init.io, .stderr(), switch (err) {
+                    error.NoSuchJournal => "tj: no journal matches that id\n",
+                    error.AmbiguousJournal => "tj: journal suffix is ambiguous\n",
+                    error.JournalLocked => "tj: journal is already being written\n",
+                    error.JournalFull => "tj: journal has no interaction numbers left\n",
                     error.ForkFailed => "tj: cannot fork\n",
                     error.Syscall => "tj: cannot allocate a pseudo-terminal\n",
-                    else => "tj: startup failed\n",
+                    else => "tj: cannot open the journal\n",
                 });
                 return 1;
             };

@@ -3,7 +3,7 @@
 //! Editors, pagers and monitors switch to the terminal's alternate screen
 //! buffer before painting and switch back on exit. That buffer is not part of
 //! scrollback: when vim exits, the main screen is restored and nothing of the
-//! editing session remains to scroll back to.
+//! editing interaction remains to scroll back to.
 //!
 //! `out` follows the same rule, so it holds what a user would find scrolling
 //! back through their terminal. Everything written while the alternate screen
@@ -176,7 +176,7 @@ test "ordinary output is kept exactly as it arrived" {
     try std.testing.expectEqual(@as(u32, 0), r.regions);
 }
 
-test "a full-screen session leaves nothing behind" {
+test "full-screen use leaves nothing behind" {
     const gpa = std.testing.allocator;
     const input = "\x1b[?1049h" ++ "vim paints a whole screen here" ++ "\x1b[?1049l";
     const r = try filterAll(gpa, input, 1024);
@@ -186,7 +186,7 @@ test "a full-screen session leaves nothing behind" {
     try std.testing.expectEqual(@as(u64, input.len), r.suppressed);
 }
 
-test "what a program prints around a full-screen session is kept" {
+test "what a program prints around full-screen use is kept" {
     const gpa = std.testing.allocator;
     const input = "before\r\n\x1b[?1049hhidden\x1b[?1049lafter\r\n";
     const r = try filterAll(gpa, input, 1024);

@@ -6,15 +6,15 @@ const posix = std.posix;
 const c = std.c;
 const sys = @import("sys.zig");
 
-pub const Session = struct {
+pub const PtyChild = struct {
     master: sys.Fd,
     pid: c.pid_t,
 
-    pub fn write(self: Session, bytes: []const u8) !void {
+    pub fn write(self: PtyChild, bytes: []const u8) !void {
         try sys.writeAll(self.master, bytes);
     }
 
-    pub fn resize(self: Session, rows: u16, cols: u16) !void {
+    pub fn resize(self: PtyChild, rows: u16, cols: u16) !void {
         const ws: posix.winsize = .{ .row = rows, .col = cols, .xpixel = 0, .ypixel = 0 };
         try sys.setWinsize(self.master, &ws);
         _ = c.kill(self.pid, posix.SIG.WINCH);
@@ -23,7 +23,7 @@ pub const Session = struct {
     /// Reads until `marker` appears or the deadline passes. Returns everything
     /// read so far either way, so callers can assert on partial output.
     pub fn readUntil(
-        self: Session,
+        self: PtyChild,
         gpa: std.mem.Allocator,
         out: *std.ArrayList(u8),
         marker: []const u8,
@@ -51,7 +51,7 @@ pub const Session = struct {
     /// This makes a prompt already in the transcript unable to acknowledge a
     /// command that was written later.
     pub fn readUntilFrom(
-        self: Session,
+        self: PtyChild,
         gpa: std.mem.Allocator,
         out: *std.ArrayList(u8),
         from: usize,
@@ -77,7 +77,7 @@ pub const Session = struct {
     }
 
     /// Drains to end of output, then reaps the child.
-    pub fn finish(self: Session, gpa: std.mem.Allocator, out: *std.ArrayList(u8), timeout_ms: i32) !u8 {
+    pub fn finish(self: PtyChild, gpa: std.mem.Allocator, out: *std.ArrayList(u8), timeout_ms: i32) !u8 {
         var remaining = timeout_ms;
         var buf: [4096]u8 = undefined;
         while (remaining > 0) {
@@ -97,7 +97,7 @@ pub const Session = struct {
     }
 };
 
-pub fn spawn(gpa: std.mem.Allocator, argv: []const []const u8, rows: u16, cols: u16) !Session {
+pub fn spawn(gpa: std.mem.Allocator, argv: []const []const u8, rows: u16, cols: u16) !PtyChild {
     // Keep the owning slices around rather than recovering their lengths from
     // the C pointers later: an argument containing a NUL would then be freed
     // at the wrong length.

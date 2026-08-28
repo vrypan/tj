@@ -17,7 +17,7 @@ pub fn main(init: std.process.Init) !u8 {
 
     const before = posix.tcgetattr(0) catch return 1;
 
-    const argv = [_:null]?[*:0]const u8{ tj, "run", "--", "/bin/sh", "-c", "sleep 1" };
+    const argv = [_:null]?[*:0]const u8{ tj, "new", "--", "/bin/sh", "-c", "sleep 1" };
     const pid = c.fork();
     if (pid < 0) return 1;
     if (pid == 0) {

@@ -43,26 +43,41 @@ source ~/src/tj/tj.plugin.zsh
 ```
 
 Adjust the path to wherever you cloned it. The plugin starts with a guard on
-`$TJ_SESSION`, so outside a tj session it does nothing at all — loading it
-unconditionally is safe, and it costs nothing in shells that never run under
-tj.
+`$TJ_JOURNAL`, so outside a tj journal writer it does nothing at all — loading
+it unconditionally is safe, and it costs nothing in shells that never run
+under tj.
 
 **Without this line tj still runs and your terminal still behaves normally,
 but nothing is recorded** and `tj hist` comes back empty. That is the one
 setup step worth not skipping.
 
-## Use
+## Create or continue a journal
 
-Start a session:
+Create a journal and attach a writer to it:
 
 ```sh
-tj run                    # run $SHELL under the journal
-tj run -- zsh -f          # run a specific command instead
+tj new                    # run a fresh $SHELL, writing a new journal
+tj new -- zsh -f          # run a specific command instead
 ```
 
-Starting a session takes an explicit `run`: a session changes what the shell
-you are typing into is, and `tj` on its own prints help rather than putting
-you somewhere you did not mean to be.
+Append a later writer run to an existing journal:
+
+```sh
+tj continue 01knxf1n5ffvk9jsm8wve1pgsd
+tj continue pgsd -- zsh -f
+```
+
+`new` always creates a fresh journal. `continue` requires exactly one existing
+journal: a unique suffix is accepted, but an ambiguous suffix is refused.
+Only one writer can attach to a journal at a time.
+
+Continuing is append-only, not process resumption. It starts a fresh shell or
+command with the caller's current directory and environment. It does not
+restore paths, environment mutations, shell state, history, jobs, file
+descriptors, or processes from an earlier writer.
+
+Starting a writer takes an explicit lifecycle command. `tj` on its own prints
+help rather than putting you somewhere you did not mean to be.
 
 Everything inside behaves as it always did. Check that recording works:
 
@@ -75,9 +90,9 @@ tj cat @1                 # hello
 Each command becomes a numbered interaction:
 
 ```sh
-tj hist                   # interactions of this session: number, status, command
-tj sessions               # every session, newest first
-tj current                # this session's id
+tj hist                   # interactions of this journal: number, status, command
+tj journals               # every journal, newest first
+tj current                # this journal's id
 tj last                   # the last interaction that completed
 ```
 
@@ -95,11 +110,11 @@ cat @-/cmd                                # the last command that completed
 
 | Reference | Names |
 |---|---|
-| `@42/out` | interaction 42 of this session |
+| `@42/out` | interaction 42 of this journal |
 | `@-/out` | the last interaction that *completed*, never the one running |
-| `@pgsd.42/out` | interaction 42 of another session, by a suffix of its id |
+| `@pgsd.42/out` | interaction 42 of another journal, by a suffix of its id |
 
-Suffixes rather than prefixes, because every session started in the same
+Suffixes rather than prefixes, because every journal started in the same
 millisecond shares the ULID's timestamp prefix and only the tail tells them
 apart. The most recent match wins, so short suffixes are for interactive
 use; anything that must stay valid should use the full id.
@@ -114,21 +129,21 @@ when expansion changed it.
 
 ## Showing the reference in your prompt
 
-Inside a session these are exported, so a prompt can show them without
+Inside a journal writer these are exported, so a prompt can show them without
 running anything:
 
 | | |
 |---|---|
 | `TJ_REF` | `@fgpc.43` — a reference to the command about to be typed |
 | `TJ_NEXT` | `43` — just the number |
-| `TJ_SESSION_SHORT` | `fgpc` — the shortest suffix naming this session |
-| `TJ_SESSION` | the full 26-character session id |
+| `TJ_JOURNAL_SHORT` | `fgpc` — the shortest suffix naming this journal |
+| `TJ_JOURNAL` | the full 26-character journal id |
 
-`TJ_REF` is qualified by session, so it stays valid when you type it in
+`TJ_REF` is qualified by journal, so it stays valid when you type it in
 another pane. Four characters of a ULID's random tail separates a handful
-of sessions; use `$TJ_SESSION` where that is not enough.
+of journals; use `$TJ_JOURNAL` where that is not enough.
 
-All of them are unset outside a session, so a prompt that uses them is
+All of them are unset outside a journal writer, so a prompt that uses them is
 unchanged elsewhere.
 
 For [starship](https://starship.rs), add an `env_var` module to
@@ -147,7 +162,7 @@ tj on git main via zig v0.16.0  @fgpc.43
 >
 ```
 
-Outside a tj session the variable is unset and the module renders nothing,
+Outside a tj journal writer the variable is unset and the module renders nothing,
 leaving your prompt exactly as it was.
 
 To put it at the far left instead, name it explicitly at the front of your
@@ -159,10 +174,10 @@ ${env_var.TJ_REF}$all\
 $character"""
 ```
 
-Styling the session and the number differently takes two modules:
+Styling the journal and the number differently takes two modules:
 
 ```toml
-[env_var.TJ_SESSION_SHORT]
+[env_var.TJ_JOURNAL_SHORT]
 format = '[$env_value](dimmed white)'
 [env_var.TJ_NEXT]
 format = '[.$env_value](white) '
@@ -179,8 +194,8 @@ Scrolling back, every command is then headed by the reference that names it.
 
 ## Giving an agent the journal
 
-An agent invoked from a recorded session can find out what happened without
-being told, and without anything being pasted or re-run. `$TJ_SESSION`,
+An agent invoked from a journal writer can find out what happened without
+being told, and without anything being pasted or re-run. `$TJ_JOURNAL`,
 `$TJ` and `$TJ_HOME` are already in its environment; the journal is plain
 files; `tj hist` is a few hundred tokens and says what exists.
 
@@ -297,7 +312,7 @@ sequences itself it refuses, which is the right instinct: writing raw escape
 sequences into a terminal is what terminal injection looks like. And a
 command it runs cannot emit them either, because a coding agent's shell tool
 captures stdout rather than connecting it to the terminal, and `/dev/tty`
-from inside that tool does not reach the session. Marking happens in the
+from inside that tool does not reach the journal. Marking happens in the
 wrapper, on output the agent has already produced, where it needs no
 permission and no cooperation.
 
@@ -325,8 +340,8 @@ bytes as recorded, so colours still render. `--plain` and `--raw` force
 either behaviour.
 
 It takes a path as readily as a reference, which is what makes `tj cat @42`
-work everywhere. Inside a session the shell has already rewritten `@42` into
-a path by the time tj runs; outside one, tj resolves it itself.
+work everywhere. Inside a journal writer the shell has already rewritten `@42` into
+a path before tj executes; outside one, tj resolves it itself.
 
 ## Full-screen programs
 
@@ -375,7 +390,7 @@ addressability.
 
 Names are the program's choice, so they are checked: a name cannot escape
 its interaction directory, and cannot be `cmd`, `out`, `rc`, `meta.json` or
-`log`. Refusals are recorded in the session log. `files/` is a convention,
+`log`. Refusals are recorded in the journal log. `files/` is a convention,
 not a rule — `err` is a resource too.
 
 Line endings are normalised: a program writes `\n`, the terminal turns it
@@ -390,29 +405,29 @@ avoid; and a terminal with `oxtabs` set expands tabs before tj sees them,
 which cannot be undone. The bytes still reach your screen and will make a
 mess of it, exactly as they would without tj.
 
-## Replaying a session
+## Replaying a journal
 
 `tj replay` plays a recording back into the terminal — the prompt, the command
 typing itself out, then the output exactly as it was captured, colours and all:
 
 ```sh
-tj replay                     # this session
+tj replay                     # the most recent journal
 tj replay fgpc                # another, by a suffix of its id
 tj replay fgpc --from 4 --to 9 --speed 2
 ```
 
-**Replay only runs outside a session.** Inside one, the recording would be
+**Replay only runs outside a journal writer.** Inside one, the recording would be
 fed back into the journal: the replayed shell-integration markers read as
 real command boundaries, which truncates the recording of the replay itself
 and pins the replayed exit status onto it — and `tj hist` shows a
-plausible-looking entry, so nothing tells you. So exit the session first, or
-replay from another pane. With no session named, the most recent one plays.
+plausible-looking entry, so nothing tells you. So exit the writer first, or
+replay from another pane. With no journal named, the most recent one plays.
 
 Nothing is re-executed. What cannot be reconstructed is *when* each byte
 arrived, since only the start and end of each interaction were recorded — so
 output appears at once, and the pacing comes from the real command durations
 and the real gaps between commands. Those gaps get capped (`--max-pause`,
-default 2s), because a session where you stared at the screen for a minute
+default 2s), because a journal where you stared at the screen for a minute
 does not make a watchable demo.
 
 | | |
@@ -421,8 +436,8 @@ does not make a watchable demo.
 | `--typing MS` | per character of the command line; `0` shows it at once |
 | `--max-pause MS` | longest single pause, however long the real one was |
 | `--prompt S` | the prompt to draw; tj never records one |
-| `--from N` `--to N` | replay part of a session |
-| `--duration` | print the seconds it would take, and play nothing; allowed inside a session, since it emits no recording |
+| `--from N` `--to N` | replay part of a journal |
+| `--duration` | print the seconds it would take, and play nothing; allowed inside a journal writer, since it emits no recording |
 
 For a GIF, [contrib/tj-tape](contrib/tj-tape) emits a
 [vhs](https://github.com/charmbracelet/vhs) tape that records the replay:
@@ -433,7 +448,7 @@ vhs demo.tape
 ```
 
 The tape plays the recording rather than re-running the commands, so the GIF
-shows what actually happened — and a session containing `rm -rf` does not
+shows what actually happened — and a journal containing `rm -rf` does not
 re-run it to make a demo. It asks `tj replay --duration` how long the replay
 takes, since vhs cannot wait for a process to exit.
 
@@ -443,22 +458,30 @@ The journal is plain files under `~/.tj` (override with `$TJ_HOME` or
 `--home`), so nothing needs to understand tj to read it:
 
 ```
-~/.tj/<session-ulid>/42/
+~/.tj/<journal-ulid>/42/
 ├── cmd        the command line as entered
 ├── out        what you could scroll back to, escape sequences and all
 ├── rc         exit status; absent means the command never finished
 └── meta.json
 ```
 
+Writer coordination uses private `~/.tj/.locks/<journal-ulid>` files. The
+file's held advisory lock—not its mere presence—indicates a live writer.
+Read-only commands remain available while that lock is held.
+
 Directories are `0700` and files `0600`: the journal holds whatever
 appeared on your terminal, so treat it like shell history.
 
-Sessions outlive the terminal window they ran in — that is the point, and
+Journals outlive every writer process attached to them — that is the point, and
 `@pgsd.42/out` is meant to keep working after the pane it belonged to is
-gone. A session that recorded nothing is removed when it exits, so opening a
-shell and closing it leaves no trace, and neither does running tj without
-the shell integration loaded. A session that recorded nothing but logged why
-is kept, because that log is the explanation.
+gone. Interaction numbering resumes at one greater than the highest existing
+numeric directory. An unfinished interaction has no `rc`, but still consumes
+its number; gaps are never filled.
+
+A journal newly created by `tj new` may be removed when that writer records
+nothing. An existing journal opened by `tj continue` is never deleted merely
+because the new writer was empty. A journal that logged why it could not
+record is also kept, because that log is the explanation.
 
 ## Development
 
@@ -488,16 +511,16 @@ cross builds dependency-free.
 
 ## Status
 
-The proxy is transparent: `tj run -- <command>` is indistinguishable from
+The proxy is transparent: `tj new -- <command>` is indistinguishable from
 running the command directly. The pty is allocated and sized from the outer
 terminal, both byte streams are forwarded unchanged, `SIGWINCH` propagates,
 signals sent to `tj` reach the shell, and the terminal is handed back with
 its original settings on every exit path.
 
 Recording works for `cmd`, `out` and `rc`, and the `@` namespace resolves,
-expands and completes. Recording never gets in the way of the terminal: if
-the journal cannot be written, the session says so once and carries on as a
-plain proxy.
+expands and completes. Selecting, locking, and numbering a journal are strict
+startup requirements and fail before the child starts. After acquisition,
+individual recording failures are logged while the PTY keeps forwarding.
 
 Full-screen programs are kept out of the journal, and `tj cat` reads a
 recording back as either bytes or plain text.

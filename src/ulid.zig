@@ -1,7 +1,7 @@
-//! ULIDs identify sessions: a 48-bit millisecond timestamp followed by 80
+//! ULIDs identify journals: a 48-bit millisecond timestamp followed by 80
 //! random bits, written as 26 Crockford base32 characters.
 //!
-//! The timestamp comes first and the encoding is base32, so session
+//! The timestamp comes first and the encoding is base32, so journal
 //! directories sort chronologically under a plain `ls` with no index to
 //! maintain. tj stores and prints them lowercase.
 
@@ -56,7 +56,7 @@ pub fn timestampOf(ulid: Ulid) u48 {
     return millis;
 }
 
-/// Whether `name` is a well-formed lowercase ULID. Used to tell session
+/// Whether `name` is a well-formed lowercase ULID. Used to tell journal
 /// directories apart from anything else that lands in the store.
 pub fn isValid(name: []const u8) bool {
     if (name.len != len) return false;
@@ -99,7 +99,7 @@ test "the timestamp survives a round trip" {
 
 test "later timestamps sort after earlier ones" {
     // The property the store depends on: chronological order is lexicographic
-    // order, so `ls` alone lists sessions oldest to newest.
+    // order, so `ls` alone lists journals oldest to newest.
     var previous = encode(0, .{0xff} ** 10);
     for ([_]u48{ 1, 2, 1000, 1 << 20, 1 << 40, std.math.maxInt(u48) }) |millis| {
         const id = encode(millis, .{0} ** 10);
