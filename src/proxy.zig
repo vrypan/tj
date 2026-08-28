@@ -249,8 +249,8 @@ const Recorder = struct {
     /// so it waits here until the interaction actually opens.
     command: [scanner.max_osc]u8 = undefined,
     command_len: usize = 0,
-    /// The same line after journal references were rewritten to paths, when
-    /// the shell integration reports that it changed anything.
+    /// Executable shell text after canonical TJ named-directory tokens were
+    /// resolved to paths for metadata, when the integration reports any.
     expanded: [scanner.max_osc]u8 = undefined,
     expanded_len: usize = 0,
     has_expanded: bool = false,

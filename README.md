@@ -34,7 +34,8 @@ tj records by watching the terminal, but a pty carries a single
 undifferentiated byte stream: the prompt, your keystrokes echoing back, and
 a command's output all arrive as one flow with nothing marking where one
 command ends and the next begins. The zsh plugin supplies those marks, and
-it is also what turns `@41/out` into a path before a command runs.
+it also canonicalizes `@41/out` as `~[@41]/out` so zsh can expand the dynamic
+named directory before a command runs.
 
 Add one line to `~/.zshrc`:
 
@@ -98,8 +99,28 @@ tj last                   # the last interaction that completed
 
 ## References
 
-Interactions have names, the way files do. Write them on any command line
-and the shell integration turns them into paths before the command runs:
+Interactions have names, the way files do. TJ's shell-neutral reference form
+is `@REF`; commands such as `tj cat` and `tj resolve` accept it directly. In
+zsh, the canonical filesystem namespace uses dynamic named directories:
+
+```sh
+~[@42]/out                 # interaction 42 of this journal
+~[@-]/out                  # the last completed interaction
+~[@pgsd.42]/out            # interaction 42 of another journal
+```
+
+For interactive use, `@REF` remains shorthand. When a shorthand reference is
+an unquoted shell word, the accept-line widget changes only its reference
+component to canonical notation:
+
+```text
+@42/out       -> ~[@42]/out
+@-/out        -> ~[@-]/out
+@pgsd.42/out  -> ~[@pgsd.42]/out
+```
+
+zsh then performs its normal named-directory and filesystem expansion while
+parsing the command, so ordinary programs receive full paths:
 
 ```sh
 curl -s https://example.com/data.json     # interaction 41
@@ -108,24 +129,27 @@ diff @41/out @43/out
 cat @-/cmd                                # the last command that completed
 ```
 
-| Reference | Names |
-|---|---|
-| `@42/out` | interaction 42 of this journal |
-| `@-/out` | the last interaction that *completed*, never the one running |
-| `@pgsd.42/out` | interaction 42 of another journal, by a suffix of its id |
+| TJ reference | Canonical zsh name | Names |
+|---|---|---|
+| `@42` | `~[@42]` | interaction 42 of this journal |
+| `@-` | `~[@-]` | the last interaction that *completed*, never the one running |
+| `@pgsd.42` | `~[@pgsd.42]` | interaction 42 of another journal, by a suffix of its id |
 
 Suffixes rather than prefixes, because every journal started in the same
 millisecond shares the ULID's timestamp prefix and only the tail tells them
 apart. The most recent match wins, so short suffixes are for interactive
 use; anything that must stay valid should use the full id.
 
-`@42/<TAB>` completes to the resources that interaction actually has. Words
-that merely contain an `@`, quoted text, and `user@host` are left alone, and
-a reference that cannot be resolved reaches the command literally rather
-than being silently dropped.
+`~[@<TAB>` completes dynamic interaction names and appends `]`.
+`~[@42]/<TAB>` uses ordinary filesystem completion for `cmd`, `out`, `rc`,
+`files/`, and published resources. The shorthand `@42/<TAB>` remains
+available. Words that merely contain an `@`, quoted text, and `user@host` are
+left alone.
 
-The journal records the line you typed; `meta.json` keeps what actually ran
-when expansion changed it.
+The accepted line shown by the terminal and stored in zsh history uses
+`~[@REF]`, never TJ's internal storage path. The journal's `cmd` preserves the
+original shorthand you typed; `meta.json` keeps a diagnostic `expanded_cmd`
+with the resolved filesystem path.
 
 ## Showing the reference in your prompt
 
@@ -251,7 +275,8 @@ Three differences from the Claude wrapper:
   recurses.
 
 pi has its own `@file` syntax, which does not collide: the shell integration
-rewrites `@42/out` into a plain path before pi ever sees the word.
+canonicalizes `@42/out` as `~[@42]/out`, then zsh supplies a plain path before
+pi sees the word.
 
 With it loaded, a reference is optional. `@-` is the last *completed*
 interaction, and the agent's own invocation is still running, so it reliably
@@ -328,8 +353,9 @@ bytes as recorded, so colours still render. `--plain` and `--raw` force
 either behaviour.
 
 It takes a path as readily as a reference, which is what makes `tj cat @42`
-work everywhere. Inside a journal writer the shell has already rewritten `@42` into
-a path before tj executes; outside one, tj resolves it itself.
+work everywhere. Inside a journal writer, unquoted shorthand becomes
+`~[@42]` and zsh expands that named directory before tj executes; outside one,
+tj resolves `@42` itself.
 
 ## Full-screen programs
 
@@ -505,10 +531,12 @@ terminal, both byte streams are forwarded unchanged, `SIGWINCH` propagates,
 signals sent to `tj` reach the shell, and the terminal is handed back with
 its original settings on every exit path.
 
-Recording works for `cmd`, `out` and `rc`, and the `@` namespace resolves,
-expands and completes. Selecting, locking, and numbering a journal are strict
-startup requirements and fail before the child starts. After acquisition,
-individual recording failures are logged while the PTY keeps forwarding.
+Recording works for `cmd`, `out` and `rc`; zsh canonicalizes interactive
+`@REF` shorthand into the `~[@REF]` dynamic named-directory namespace, then
+resolves and completes it through normal filesystem behavior. Selecting,
+locking, and numbering a journal are strict startup requirements and fail
+before the child starts. After acquisition, individual recording failures are
+logged while the PTY keeps forwarding.
 
 Full-screen programs are kept out of the journal, and `tj cat` reads a
 recording back as either bytes or plain text.

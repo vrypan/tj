@@ -569,11 +569,12 @@ test "streaming windows keep whole lines across chunk boundaries" {
 
 /// Accepts a reference or a path to the same thing.
 ///
-/// Inside a journal writer the shell integration has already rewritten `@42/out`
-/// into a path by the time tj is executed, so insisting on a reference would
-/// make `tj cat @42` work everywhere except the place it is most likely to be
-/// typed. Outside a journal writer there is nothing to rewrite and the
-/// reference is resolved here instead. Either way it ends at the same open file.
+/// Inside a journal writer, shorthand `@42/out` becomes canonical
+/// `~[@42]/out`, which zsh expands to a path before tj executes. Insisting on a
+/// reference would therefore make `tj cat @42` work everywhere except the
+/// place it is most likely to be typed. Outside a writer there is no named
+/// directory expansion and the reference is resolved here instead. Either way
+/// it ends at the same open file.
 fn openTarget(gpa: std.mem.Allocator, io: Io, root: store.Dir, text: []const u8) !Io.File {
     var path_buf: [std.fs.max_path_bytes]u8 = undefined;
     var path: []const u8 = text;
@@ -594,7 +595,7 @@ fn openTarget(gpa: std.mem.Allocator, io: Io, root: store.Dir, text: []const u8)
     }
 
     // Naming the interaction rather than a resource means its output, whether
-    // that came from `@42` or from the path `@42` expanded to.
+    // that came from `@42` or from the path `~[@42]` expanded to.
     if (isDirectory(io, path)) {
         path = std.fmt.bufPrint(&path_buf, "{s}/out", .{path}) catch return error.BadReference;
     }

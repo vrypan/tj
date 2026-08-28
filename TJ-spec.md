@@ -366,32 +366,42 @@ Each completed interaction becomes a journal entry:
 
 ### Journal namespace
 
-TJ references are a shell-level namespace:
+TJ references are shell-neutral identifiers accepted by TJ commands:
 
 ``` text
-@10/out
-@10/files/data.csv
-@pgsd.10/out
-@-/out
+@10
+@pgsd.10
+@-
 ```
 
-Ordinary programs do not need to understand this syntax. Before
-executing a command, the zsh integration resolves journal references to
-ordinary filesystem paths.
+The canonical zsh filesystem namespace uses dynamic named directories. The
+name inside the brackets identifies an interaction directory; resource paths
+are ordinary filesystem suffixes:
+
+``` text
+~[@10]/out
+~[@10]/files/data.csv
+~[@pgsd.10]/out
+~[@-]/out
+```
+
+Ordinary programs do not need to understand either form. zsh expands the
+canonical dynamic named directory during normal command parsing and passes an
+ordinary filesystem path to the program.
 
 Conceptually:
 
 ``` text
-@10/out                 → ~/.tj/<journal>/10/out
-@10/files/data.csv      → ~/.tj/<journal>/10/files/data.csv
-@pgsd.10/out            → ~/.tj/<ulid ending in pgsd>/10/out
-@-/out                  → ~/.tj/<journal>/<previous>/out
+~[@10]/out                 → ~/.tj/<journal>/10/out
+~[@10]/files/data.csv      → ~/.tj/<journal>/10/files/data.csv
+~[@pgsd.10]/out            → ~/.tj/<ulid ending in pgsd>/10/out
+~[@-]/out                  → ~/.tj/<journal>/<previous>/out
 ```
 
 Thus:
 
 ``` sh
-cat @10/out
+cat ~[@10]/out
 ```
 
 is executed equivalently to:
@@ -402,29 +412,58 @@ cat ~/.tj/<journal>/10/out
 
 and `cat` remains completely unaware of TJ.
 
-The model deliberately resembles zsh named-directory expansion:
+This is zsh named-directory expansion rather than a parallel emulation:
 
 ``` text
-~name/path      named filesystem location
-@N/path         named journal interaction
+~name/path       static named filesystem location
+~[@N]/path       dynamic named journal interaction
 ```
 
-The `@` prefix identifies the journal namespace in the same way that `~`
-introduces filesystem-oriented shorthand.
+For interactive convenience, an accept-line widget canonicalizes valid,
+unquoted shorthand at the start of shell words. It changes only the reference
+head and preserves the resource suffix:
 
-The zsh integration applies this expansion to unquoted command arguments
-that begin with `@` followed by a journal reference (`-`, `N`, or
-`SUFFIX.N`). Arguments such as `user@host` are unaffected. The semantic PTY
-proxy does not rewrite command input.
+``` text
+@10/out       → ~[@10]/out
+@-/out        → ~[@-]/out
+@pgsd.10/out  → ~[@pgsd.10]/out
+```
+
+Quoted references, malformed references, and words such as `user@host` are
+unaffected. Explicit `~[@REF]` input is already canonical and is not rewritten.
+The widget never inserts a storage path. Its canonical buffer is what the
+terminal accepts and zsh history stores.
+
+The plugin registers its handler by appending it once to
+`zsh_directory_name_functions`; it does not replace the special
+`zsh_directory_name` function or other array handlers. In `n` mode it accepts
+an `@` name, calls `tj resolve` for that interaction reference, and returns the
+interaction directory as the single global `reply` element. `d` mode is not
+implemented and returns failure, so paths are not abbreviated back to names.
+
+`preexec` runs before dynamic named-directory expansion. Its first argument is
+the accepted/history line; its third argument is the full executable shell
+text with aliases expanded, but it still contains `~[@REF]`. The widget saves
+pre-canonical shorthand in `_TJ_TYPED`, which is recorded as `cmd`. For
+`expanded_cmd`, the plugin starts from `$3` and safely resolves only unquoted
+canonical TJ directory tokens for diagnostic metadata. It never evaluates the
+command line, and zsh remains solely responsible for the expansion used by the
+actual process.
 
 ### Completion
 
-The same resolver provides native zsh completion.
-
-For example:
+Dynamic-directory `c` mode completes interaction names inside `~[...]` and
+appends the closing bracket:
 
 ``` sh
-cat @10/<TAB>
+cat ~[@<TAB>
+```
+
+Once the bracket is closed, ordinary zsh filesystem completion operates on
+the resolved interaction directory. For example:
+
+``` sh
+cat ~[@10]/<TAB>
 ```
 
 can offer:
@@ -436,10 +475,18 @@ cmd  files/  out  rc
 and:
 
 ``` sh
-cat @10/files/<TAB>
+cat ~[@10]/files/<TAB>
 ```
 
 can offer resources published by the program.
+
+The global shorthand completer remains available for `@10/<TAB>`. Normal zsh
+completion runs before that fallback so dynamic named-directory and ordinary
+filesystem completion retain their native behavior.
+
+The suffix after `~[@REF]` has ordinary filesystem semantics, including `.`
+and `..`. This differs deliberately from `tj resolve @REF/subpath`, whose
+shell-neutral reference subpath remains containment-validated by TJ.
 
 This makes the journal namespace behave like a filesystem from the
 user's perspective while allowing TJ to change its underlying storage

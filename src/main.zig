@@ -47,6 +47,7 @@ const usage =
     \\  @42/out        interaction 42 of this journal
     \\  @-/out         the last interaction that completed
     \\  @pgsd.42/out   interaction 42 of another journal, by a suffix of its id
+    \\  ~[@42]/out     canonical zsh form; unquoted @42/out is shorthand
     \\
     \\Recording and reference expansion need the shell integration:
     \\  source /path/to/tj.plugin.zsh   # in ~/.zshrc

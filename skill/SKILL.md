@@ -152,8 +152,8 @@ there.
 - **Do not fetch everything.** Fetching every interaction's output costs
   hundreds of times what the index costs and is almost never worth it.
 - **Quote references** when passing them to `tj` from inside a journal writer:
-  `tj cat '@1'`. The shell integration rewrites unquoted `@` words into paths
-  before `tj` runs.
+  `tj cat '@1'`. The shell integration canonicalizes unquoted shorthand as
+  `~[@1]`, then zsh expands that dynamic named directory before `tj` runs.
 - The journal records **what happened, not what the user was trying to do**.
   It has no intent, no reasoning, and no record of what was already ruled
   out. If the goal matters and the prompt does not say it, ask.

@@ -104,11 +104,10 @@ is implemented. Revisit only if it turns out not to be enough.
 - Completion does not offer journal suffixes: `@pg<TAB>` produces nothing.
   `SPEC.md` §8.3 does not ask for it, and full ULIDs make poor candidates,
   but it is a gap when working across journals.
-- `tj resolve @1` inside a journal writer needs quoting (`tj resolve '@1'`), because
-  the accept-line widget expands the reference before tj sees it. Inherent
-  rather than fixable: resolve's whole job is turning a reference into a
-  path, so being handed a path means there is nothing left to do. `tj cat`
-  sidesteps it by accepting either.
+- `tj resolve @1` inside a journal writer needs quoting (`tj resolve '@1'`).
+  The accept-line widget canonicalizes the shorthand as `~[@1]`, then zsh's
+  dynamic named-directory expansion supplies a path before tj sees it.
+  `tj cat` sidesteps this by accepting either references or paths.
 - Programs that repaint without the alternate screen - a progress meter,
   `top --no-altscreen` - are recorded in full. Only real terminal emulation
   could reduce those to a final state. `tj cat` resolves the common

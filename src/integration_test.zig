@@ -7,6 +7,7 @@
 const std = @import("std");
 const posix = std.posix;
 const harness = @import("harness.zig");
+const plain = @import("plain.zig");
 const ulid = @import("ulid.zig");
 
 const options = @import("build_options");
@@ -328,16 +329,31 @@ fn appendShellQuoted(gpa: std.mem.Allocator, out: *std.ArrayList(u8), text: []co
     try out.append(gpa, '\'');
 }
 
-fn setupJournalZsh(gpa: std.mem.Allocator, child: harness.PtyChild, out: *std.ArrayList(u8)) !void {
+fn setupJournalZshWithPrefix(
+    gpa: std.mem.Allocator,
+    child: harness.PtyChild,
+    out: *std.ArrayList(u8),
+    prefix: []const u8,
+) !void {
     var command: std.ArrayList(u8) = .empty;
     defer command.deinit(gpa);
     // `source -- file` is not portable across the zsh versions used by the
     // native CI runners. The POSIX dot builtin accepts the quoted pathname.
+    if (prefix.len > 0) {
+        try command.appendSlice(gpa, prefix);
+        try command.appendSlice(gpa, "; ");
+    }
     try command.appendSlice(gpa, ". ");
     try appendShellQuoted(gpa, &command, options.plugin);
-    try command.appendSlice(gpa, " || exit; PS1='TJ_TEST_PROMPT> '\n");
+    // Keep the literal marker out of the echoed setup command, so waiting for
+    // it can only match the real prompt after the plugin finished loading.
+    try command.appendSlice(gpa, " || exit; PS1='TJ_TEST_'PROMPT'> '\n");
     try child.write(command.items);
     if (!try child.readUntil(gpa, out, test_prompt, timeout_ms)) return error.ShellNotReady;
+}
+
+fn setupJournalZsh(gpa: std.mem.Allocator, child: harness.PtyChild, out: *std.ArrayList(u8)) !void {
+    return setupJournalZshWithPrefix(gpa, child, out, "");
 }
 
 fn haveZsh() bool {
@@ -562,7 +578,81 @@ test "an interrupted writer leaves the interaction without an rc" {
     try std.testing.expectError(error.FileNotFound, dir.openFile(std.testing.io, "1/rc", .{}));
 }
 
-// --- the @ namespace --------------------------------------------------------
+// --- the journal namespace --------------------------------------------------
+
+test "zsh preexec precedes dynamic named-directory expansion" {
+    if (!haveZsh()) return error.SkipZigTest;
+    const gpa = std.testing.allocator;
+
+    var journal = try Journal.open(gpa);
+    defer journal.close();
+
+    const child = try spawnJournalZsh(gpa, &journal);
+    var out: std.ArrayList(u8) = .empty;
+    defer out.deinit(gpa);
+    try setupJournalZsh(gpa, child, &out);
+
+    const from = out.items.len;
+    try child.write("_tj_probe_directory_name() { if [[ $1 == n && $2 == @probe ]]; then print -r -- TJ_PROBE_DIRECTORY; typeset -ga reply; reply=(/tmp/tj-probe); return 0; fi; return 1; }; typeset -ga zsh_directory_name_functions; zsh_directory_name_functions+=(_tj_probe_directory_name)\n");
+    try child.write("_tj_probe_preexec() { print -r -- \"TJ_PROBE_1=<$1>\"; print -r -- \"TJ_PROBE_2=<$2>\"; print -r -- \"TJ_PROBE_3=<$3>\"; }; add-zsh-hook preexec _tj_probe_preexec; alias tj_probe_alias='print -r --'\n");
+    try child.write("tj_probe_alias ~[@probe]/out\n");
+    try std.testing.expect(try child.readUntilFrom(gpa, &out, from, "/tmp/tj-probe/out", timeout_ms));
+
+    const transcript = out.items[from..];
+    try std.testing.expect(std.mem.indexOf(u8, transcript, "TJ_PROBE_1=<tj_probe_alias ~[@probe]/out>") != null);
+    try std.testing.expect(std.mem.indexOf(u8, transcript, "TJ_PROBE_2=<print -r -- ~[@probe]/out>") != null);
+    const preexec_full = std.mem.indexOf(u8, transcript, "TJ_PROBE_3=<print -r -- ~[@probe]/out>") orelse return error.MissingPreexecProbe;
+    const directory_call = std.mem.lastIndexOf(u8, transcript, "TJ_PROBE_DIRECTORY") orelse return error.MissingDirectoryProbe;
+    try std.testing.expect(preexec_full < directory_call);
+    try std.testing.expect(std.mem.indexOf(u8, transcript, "/tmp/tj-probe/out") != null);
+
+    try child.write("exit 0\n");
+    try std.testing.expectEqual(@as(u8, 0), try child.finish(gpa, &out, timeout_ms));
+}
+
+test "the tj dynamic-directory handler composes and registers once" {
+    if (!haveZsh()) return error.SkipZigTest;
+    const gpa = std.testing.allocator;
+
+    var journal = try Journal.open(gpa);
+    defer journal.close();
+
+    const child = try spawnJournalZsh(gpa, &journal);
+    var out: std.ArrayList(u8) = .empty;
+    defer out.deinit(gpa);
+    const prefix =
+        "zsh_directory_name() { [[ $1 == n && $2 == @standalone ]] || return 1; typeset -ga reply; reply=(/tmp/standalone); }; " ++
+        "_tj_existing_directory_name() { [[ $1 == n && $2 == @array ]] || return 1; typeset -ga reply; reply=(/tmp/array); }; " ++
+        "typeset -ga zsh_directory_name_functions=(_tj_existing_directory_name)";
+    try setupJournalZshWithPrefix(gpa, child, &out, prefix);
+
+    var command: std.ArrayList(u8) = .empty;
+    defer command.deinit(gpa);
+    try command.appendSlice(gpa, ". ");
+    try appendShellQuoted(gpa, &command, options.plugin);
+    try command.appendSlice(
+        gpa,
+        "; typeset -i tj_handler_count=0; " ++
+            "for tj_handler in \"${zsh_directory_name_functions[@]}\"; do [[ $tj_handler == _tj_directory_name ]] && (( tj_handler_count++ )); done; " ++
+            "print -r -- \"TJ_HANDLERS=${(j:,:)zsh_directory_name_functions}\"; " ++
+            "print -r -- \"TJ_HANDLER_COUNT=$tj_handler_count\"; " ++
+            "print -rn -- TJ_STANDALONE=; print -r -- ~[@standalone]; " ++
+            "print -rn -- TJ_ARRAY=; print -r -- ~[@array]; " ++
+            "_tj_directory_name d /tmp; print -r -- \"TJ_D_STATUS=$?\"\n",
+    );
+
+    const from = out.items.len;
+    try child.write(command.items);
+    try std.testing.expect(try child.readUntilFrom(gpa, &out, from, "TJ_D_STATUS=1", timeout_ms));
+    const transcript = out.items[from..];
+    try std.testing.expect(std.mem.indexOf(u8, transcript, "TJ_HANDLERS=_tj_existing_directory_name,_tj_directory_name") != null);
+    try std.testing.expect(std.mem.indexOf(u8, transcript, "TJ_HANDLER_COUNT=1") != null);
+    try std.testing.expect(std.mem.indexOf(u8, transcript, "TJ_STANDALONE=/tmp/standalone") != null);
+    try std.testing.expect(std.mem.indexOf(u8, transcript, "TJ_ARRAY=/tmp/array") != null);
+
+    try child.write("exit 0\n");
+    try std.testing.expectEqual(@as(u8, 0), try child.finish(gpa, &out, timeout_ms));
+}
 
 test "references resolve to paths inside the journal" {
     if (!haveZsh()) return error.SkipZigTest;
@@ -646,29 +736,163 @@ test "completion offers resources but never tj's own bookkeeping" {
     try std.testing.expect(std.mem.indexOf(u8, r.out.items, "meta.json") == null);
 }
 
-test "an unquoted reference on a command line becomes a path" {
+test "shorthand and canonical references become paths" {
     if (!haveZsh()) return error.SkipZigTest;
     const gpa = std.testing.allocator;
 
     var journal = try Journal.open(gpa);
     defer journal.close();
 
-    // The second command reads the first one's output through the journal.
-    try recordJournal(gpa, &journal, &.{ "echo alpha-marker", "cat @1/out" });
+    try recordJournal(gpa, &journal, &.{
+        "printf 'alpha-marker\\n'",
+        "cat @1/out",
+        "cat ~[@1]/out",
+        "cat @-/out",
+        "test -d @1 && printf 'directory-marker\\n'",
+        "grep alpha-marker < @1/out | cat",
+        "cmp @1/out @1/out && printf 'multiple-marker\\n'",
+        "alias tj_show='cat'",
+        "tj_show @1/out",
+        "cat @0001/out",
+    });
 
     const second_out = try journal.read(gpa, "2/out");
     defer gpa.free(second_out);
     try std.testing.expect(std.mem.indexOf(u8, second_out, "alpha-marker") != null);
+
+    const canonical_out = try journal.read(gpa, "3/out");
+    defer gpa.free(canonical_out);
+    try std.testing.expect(std.mem.indexOf(u8, canonical_out, "alpha-marker") != null);
+
+    const previous_out = try journal.read(gpa, "4/out");
+    defer gpa.free(previous_out);
+    try std.testing.expect(std.mem.indexOf(u8, previous_out, "alpha-marker") != null);
+
+    const directory_out = try journal.read(gpa, "5/out");
+    defer gpa.free(directory_out);
+    try std.testing.expect(std.mem.indexOf(u8, directory_out, "directory-marker") != null);
+
+    const pipeline_out = try journal.read(gpa, "6/out");
+    defer gpa.free(pipeline_out);
+    try std.testing.expect(std.mem.indexOf(u8, pipeline_out, "alpha-marker") != null);
+
+    const multiple_out = try journal.read(gpa, "7/out");
+    defer gpa.free(multiple_out);
+    try std.testing.expect(std.mem.indexOf(u8, multiple_out, "multiple-marker") != null);
+
+    const alias_out = try journal.read(gpa, "9/out");
+    defer gpa.free(alias_out);
+    try std.testing.expect(std.mem.indexOf(u8, alias_out, "alpha-marker") != null);
 
     // The journal records what was typed, not what ran.
     const second_cmd = try journal.read(gpa, "2/cmd");
     defer gpa.free(second_cmd);
     try std.testing.expectEqualStrings("cat @1/out", second_cmd);
 
+    const canonical_cmd = try journal.read(gpa, "3/cmd");
+    defer gpa.free(canonical_cmd);
+    try std.testing.expectEqualStrings("cat ~[@1]/out", canonical_cmd);
+
     // ...and what ran is kept alongside it.
     const meta = try journal.read(gpa, "2/meta.json");
     defer gpa.free(meta);
     try std.testing.expect(std.mem.indexOf(u8, meta, "expanded_cmd") != null);
+    try std.testing.expect(std.mem.indexOf(u8, meta, "/1/out") != null);
+
+    const canonical_meta = try journal.read(gpa, "3/meta.json");
+    defer gpa.free(canonical_meta);
+    try std.testing.expect(std.mem.indexOf(u8, canonical_meta, "expanded_cmd") != null);
+    try std.testing.expect(std.mem.indexOf(u8, canonical_meta, "/1/out") != null);
+
+    const alias_cmd = try journal.read(gpa, "9/cmd");
+    defer gpa.free(alias_cmd);
+    try std.testing.expectEqualStrings("tj_show @1/out", alias_cmd);
+    const alias_meta = try journal.read(gpa, "9/meta.json");
+    defer gpa.free(alias_meta);
+    try std.testing.expect(std.mem.indexOf(u8, alias_meta, "cat ") != null);
+    try std.testing.expect(std.mem.indexOf(u8, alias_meta, "/1/out") != null);
+
+    const leading_zero_out = try journal.read(gpa, "10/out");
+    defer gpa.free(leading_zero_out);
+    try std.testing.expect(std.mem.indexOf(u8, leading_zero_out, "alpha-marker") != null);
+}
+
+test "qualified shorthand resolves through a continued journal" {
+    if (!haveZsh()) return error.SkipZigTest;
+    const gpa = std.testing.allocator;
+
+    var journal = try Journal.open(gpa);
+    defer journal.close();
+    try recordJournal(gpa, &journal, &.{"echo qualified-marker"});
+
+    const name = try journal.journalName(gpa);
+    defer gpa.free(name);
+    const suffix = name[name.len - 4 ..];
+    const command = try std.fmt.allocPrint(gpa, "cat @{s}.1/out", .{suffix});
+    defer gpa.free(command);
+
+    const child = try spawnContinuedJournalZsh(gpa, &journal, name);
+    var out: std.ArrayList(u8) = .empty;
+    defer out.deinit(gpa);
+    try setupJournalZsh(gpa, child, &out);
+
+    const from = out.items.len;
+    try child.write(command);
+    try child.write("\n");
+    try std.testing.expect(try child.readUntilFrom(gpa, &out, from, "qualified-marker", timeout_ms));
+    try child.write("exit 0\n");
+    try std.testing.expectEqual(@as(u8, 0), try child.finish(gpa, &out, timeout_ms));
+
+    // The first writer's unfinished `exit` consumed 2, so continuation starts
+    // at 3 rather than reusing it.
+    const recorded = try journal.read(gpa, "3/cmd");
+    defer gpa.free(recorded);
+    try std.testing.expectEqualStrings(command, recorded);
+    const meta = try journal.read(gpa, "3/meta.json");
+    defer gpa.free(meta);
+    try std.testing.expect(std.mem.indexOf(u8, meta, "/1/out") != null);
+}
+
+test "history is canonical while journal metadata keeps shorthand and paths" {
+    if (!haveZsh()) return error.SkipZigTest;
+    const gpa = std.testing.allocator;
+
+    var journal = try Journal.open(gpa);
+    defer journal.close();
+    const child = try spawnJournalZsh(gpa, &journal);
+    var out: std.ArrayList(u8) = .empty;
+    defer out.deinit(gpa);
+    try setupJournalZsh(gpa, child, &out);
+
+    var from = out.items.len;
+    try child.write("echo history-marker\n");
+    try std.testing.expect(try child.readUntilFrom(gpa, &out, from, test_prompt, timeout_ms));
+
+    from = out.items.len;
+    try child.write("cat @1/out >/dev/null\n");
+    try std.testing.expect(try child.readUntilFrom(gpa, &out, from, test_prompt, timeout_ms));
+    const accepted = out.items[from..];
+    var visible: std.ArrayList(u8) = .empty;
+    defer visible.deinit(gpa);
+    var visible_writer = Io.Writer.Allocating.fromArrayList(gpa, &visible);
+    try plain.render(gpa, accepted, &visible_writer.writer);
+    visible = visible_writer.toArrayList();
+    try std.testing.expect(std.mem.indexOf(u8, visible.items, "~[@1]/out") != null);
+    const home = try journal.homeArg(gpa);
+    defer gpa.free(home);
+    try std.testing.expect(std.mem.indexOf(u8, accepted, home) == null);
+
+    from = out.items.len;
+    try child.write("fc -ln -1\n");
+    try std.testing.expect(try child.readUntilFrom(gpa, &out, from, "cat ~[@1]/out >/dev/null", timeout_ms));
+    try child.write("exit 0\n");
+    try std.testing.expectEqual(@as(u8, 0), try child.finish(gpa, &out, timeout_ms));
+
+    const command = try journal.read(gpa, "2/cmd");
+    defer gpa.free(command);
+    try std.testing.expectEqualStrings("cat @1/out >/dev/null", command);
+    const meta = try journal.read(gpa, "2/meta.json");
+    defer gpa.free(meta);
     try std.testing.expect(std.mem.indexOf(u8, meta, "/1/out") != null);
 }
 
@@ -682,6 +906,9 @@ test "quoted references and addresses are left alone" {
         "echo start",
         "echo 'literal @1/out here'",
         "echo user@host",
+        "echo 'literal ~[@1]/out here'",
+        "echo \"literal ~[@1]/out here\"",
+        "echo @0 @4294967296 @not-a-reference",
     });
 
     const quoted = try journal.read(gpa, "2/out");
@@ -692,8 +919,12 @@ test "quoted references and addresses are left alone" {
     defer gpa.free(address);
     try std.testing.expect(std.mem.indexOf(u8, address, "user@host") != null);
 
-    // Neither line was rewritten, so neither has an expansion recorded.
-    for ([_][]const u8{ "2/meta.json", "3/meta.json" }) |path| {
+    const malformed = try journal.read(gpa, "6/out");
+    defer gpa.free(malformed);
+    try std.testing.expect(std.mem.indexOf(u8, malformed, "@0 @4294967296 @not-a-reference") != null);
+
+    // None of these lines contains an eligible unquoted shell-word reference.
+    for ([_][]const u8{ "2/meta.json", "3/meta.json", "4/meta.json", "5/meta.json", "6/meta.json" }) |path| {
         const meta = try journal.read(gpa, path);
         defer gpa.free(meta);
         try std.testing.expect(std.mem.indexOf(u8, meta, "expanded_cmd") == null);
@@ -819,7 +1050,7 @@ test "tj cat defaults to the output and reads other resources by name" {
     try std.testing.expectEqual(@as(u8, 1), missing.code);
 }
 
-test "tj cat takes the path a reference expanded to, as well as the reference" {
+test "tj cat takes the path a named directory expanded to, as well as the reference" {
     if (!haveZsh()) return error.SkipZigTest;
     const gpa = std.testing.allocator;
 
@@ -831,8 +1062,9 @@ test "tj cat takes the path a reference expanded to, as well as the reference" {
     const home = try journal.homeArg(gpa);
     defer gpa.free(home);
 
-    // The shell integration rewrites `@1` before tj executes, so
-    // this is the form tj actually receives there.
+    // Inside the zsh integration, shorthand becomes `~[@1]` and zsh expands
+    // that dynamic named directory before tj executes. This is the resulting
+    // form tj actually receives there.
     var resolved = try run(gpa, &.{ "--home", home, "resolve", "@1" }, 24, 80);
     defer resolved.out.deinit(gpa);
     const path = std.mem.trim(u8, resolved.out.items, " \r\n");
@@ -1232,7 +1464,9 @@ test "zsh completion keeps special resource names as one inert argument" {
     try setupJournalZsh(gpa, child, &out);
 
     const publish = try publisher(gpa, "\\033]5107;tj;begin;files/note *$ file.txt;text/plain\\033\\\\" ++
-        "special-resource-content\\033]5107;tj;end\\033\\\\");
+        "special-resource-content\\033]5107;tj;end\\033\\\\" ++
+        "\\033]5107;tj;begin;top *$ note.txt;text/plain\\033\\\\" ++
+        "top-resource-content\\033]5107;tj;end\\033\\\\");
     defer gpa.free(publish);
     var from = out.items.len;
     try child.write(publish);
@@ -1243,6 +1477,46 @@ test "zsh completion keeps special resource names as one inert argument" {
     try child.write("autoload -Uz compinit; compinit -D; _tj_register_completion\n");
     try std.testing.expect(try child.readUntilFrom(gpa, &out, from, test_prompt, timeout_ms));
 
+    // An unambiguous name gets its closing bracket and then behaves as a path.
+    from = out.items.len;
+    try child.write("cat ~[@1");
+    try child.write("\t");
+    try std.testing.expect(try child.readUntilFrom(gpa, &out, from, "~[@1]", timeout_ms));
+    try child.write("/out\n");
+    try std.testing.expect(try child.readUntilFrom(gpa, &out, from, "special-resource-content", timeout_ms));
+
+    // Dynamic-directory name completion is offered inside ~[...].
+    from = out.items.len;
+    try child.write("cat ~[@");
+    try child.write("\t");
+    try std.testing.expect(try child.readUntilFrom(gpa, &out, from, "@1", timeout_ms));
+    try child.write("\x03");
+    try std.testing.expect(try child.readUntilFrom(gpa, &out, from, test_prompt, timeout_ms));
+
+    // Once the bracket is closed, ordinary filesystem completion lists the
+    // interaction directory rather than going through the shorthand completer.
+    from = out.items.len;
+    try child.write("cat ~[@1]/");
+    try child.write("\t");
+    try std.testing.expect(try child.readUntilFrom(gpa, &out, from, "files/", timeout_ms));
+    try child.write("\x03");
+    try std.testing.expect(try child.readUntilFrom(gpa, &out, from, test_prompt, timeout_ms));
+
+    from = out.items.len;
+    try child.write("cat ~[@1]/files/note");
+    try child.write("\t");
+    try std.testing.expect(try child.readUntilFrom(gpa, &out, from, "file.txt", timeout_ms));
+    try child.write("\n");
+    try std.testing.expect(try child.readUntilFrom(gpa, &out, from, "special-resource-content", timeout_ms));
+
+    from = out.items.len;
+    try child.write("cat ~[@1]/top");
+    try child.write("\t");
+    try std.testing.expect(try child.readUntilFrom(gpa, &out, from, "note.txt", timeout_ms));
+    try child.write("\n");
+    try std.testing.expect(try child.readUntilFrom(gpa, &out, from, "top-resource-content", timeout_ms));
+
+    // The original shorthand completion remains available.
     from = out.items.len;
     try child.write("cat @1/files/note");
     try child.write("\t");

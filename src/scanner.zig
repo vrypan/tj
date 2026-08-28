@@ -37,9 +37,9 @@ pub const Event = union(enum) {
     prompt_start,
     /// `OSC 5107;tj;cmd;<base64>` - the command line as the user typed it.
     command_line: []const u8,
-    /// `OSC 5107;tj;expanded;<base64>` - the same line after the shell
-    /// integration rewrote journal references into paths. Only sent when the
-    /// two differ.
+    /// `OSC 5107;tj;expanded;<base64>` - executable shell text after the zsh
+    /// integration resolved canonical TJ named-directory tokens for metadata.
+    /// Only sent when such a token was resolved.
     command_expanded: []const u8,
     /// `OSC 133;C` - the command starts running now.
     command_run,
