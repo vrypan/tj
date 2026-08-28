@@ -80,6 +80,15 @@ descriptors, or processes from an earlier writer.
 Starting a writer takes an explicit lifecycle command. `tj` on its own prints
 help rather than putting you somewhere you did not mean to be.
 
+Every command has focused help generated from the same command definition used
+to parse it:
+
+```sh
+tj --help
+tj cat --help
+tj grep --help
+```
+
 Everything inside behaves as it always did. Check that recording works:
 
 ```sh
@@ -679,11 +688,15 @@ Targets: `{aarch64,x86_64}` × `{macos, linux-musl, linux-gnu}`. The musl
 builds are static. Override `OPTIMIZE` (default `ReleaseSafe`) or `ZIG`
 to change how they are built.
 
+The build fetches the exactly pinned, std-only Zecli 0.2.0 source package on
+first use. Zecli is compiled into `tj`; release binaries remain self-contained
+and have no Zecli runtime dependency.
+
 The proxy uses `std.posix` wherever Zig 0.16 provides the call. Process
 control, `ioctl`, and the pty grant/unlock sequence have no `std`
 equivalent in this release, so `src/sys.zig` declares them against plain
-libc - no libutil or any other add-on library, which is what keeps the
-cross builds dependency-free.
+libc—no libutil or any other add-on runtime library—which keeps cross builds
+self-contained.
 
 ## Status
 

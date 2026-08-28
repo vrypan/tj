@@ -2,8 +2,10 @@
 
 const std = @import("std");
 const Io = std.Io;
+const zecli = @import("zecli");
 
 const cli = @import("cli.zig");
+const proxy = @import("proxy.zig");
 const store = @import("store.zig");
 const sys = @import("sys.zig");
 const reference = @import("reference.zig");
@@ -11,9 +13,6 @@ const plain = @import("plain.zig");
 const annotations = @import("annotations.zig");
 const search = @import("search.zig");
 const noout = @import("noout.zig");
-
-/// The parsed subcommand, exactly as `cli` produced it.
-const Subcommand = @FieldType(cli.Command, "subcommand");
 
 pub const Error = error{
     NotInJournal,
@@ -46,39 +45,67 @@ pub const Error = error{
 pub fn run(
     gpa: std.mem.Allocator,
     io: Io,
-    sub: Subcommand,
+    command: cli.RoutedCommand,
+    child: []const [:0]const u8,
+    parsed: *const zecli.Parsed,
     out: *Io.Writer,
 ) !u8 {
-    switch (sub.which) {
+    const home = command.root.home;
+    switch (command.which) {
+        .new => {
+            const result = try proxy.run(gpa, io, .{
+                .journal = .new,
+                .argv = child,
+                .keep_osc = command.root.keep_osc or parsed.present("keep-osc"),
+                .home = parsed.last("home") orelse home,
+            });
+            return result.exit_code;
+        },
+        .@"continue" => {
+            const result = try proxy.run(gpa, io, .{
+                .journal = .{ .existing = parsed.positionals.items[0] },
+                .argv = child,
+                .keep_osc = command.root.keep_osc or parsed.present("keep-osc"),
+                .home = parsed.last("home") orelse home,
+            });
+            return result.exit_code;
+        },
+        .noout => {
+            const result = try noout.run(gpa, child);
+            return result.exit_code;
+        },
         .current => try out.print("{s}\n", .{try currentJournal()}),
-        .journals => try listJournals(gpa, io, sub.home, out),
-        .hist => try listInteractions(gpa, io, sub.home, sub.args, out),
-        .last => try printLast(gpa, io, sub.home, out),
-        .resolve => try resolveReference(gpa, io, sub.home, sub.args, out),
-        .complete => try completeReference(gpa, io, sub.home, sub.args, out),
-        .cat => try catResource(gpa, io, sub.home, sub.args, out),
-        .replay => try replayJournal(gpa, io, sub.home, sub.args, out),
-        .name => try nameCommand(gpa, io, sub.home, sub.args, out),
-        .tag => try tagCommand(gpa, io, sub.home, sub.args, out),
-        .pin => try pinCommand(gpa, io, sub.home, sub.args, out),
-        .rm => try removeCommand(gpa, io, sub.home, sub.args, out),
-        .grep => return grepCommand(gpa, io, sub.home, sub.args, out),
+        .journals => try listJournals(gpa, io, home, out),
+        .hist => try listInteractions(gpa, io, home, parsed, out),
+        .last => try printLast(gpa, io, home, out),
+        .resolve => try resolveReference(gpa, io, home, parsed, out),
+        .complete => try completeReference(gpa, io, home, parsed, out),
+        .cat => try catResource(gpa, io, home, parsed, out),
+        .replay => try replayJournal(gpa, io, home, parsed, out),
+        .name => try nameCommand(gpa, io, home, parsed, out),
+        .tag => try tagCommand(gpa, io, home, parsed, out),
+        .pin => try pinCommand(gpa, io, home, parsed, out),
+        .rm => try removeCommand(gpa, io, home, parsed, out),
+        .grep => return grepCommand(gpa, io, home, parsed, out),
     }
     return 0;
+}
+
+fn parseTestCommand(which: cli.CommandName, args: []const [:0]const u8) !zecli.Parsed {
+    var discard_buf: [1024]u8 = undefined;
+    var discarding = Io.Writer.Discarding.init(&discard_buf);
+    return zecli.parseCommand(std.testing.allocator, &discarding.writer, args, which.spec());
+}
+
+fn grepRequestFromArgs(args: []const [:0]const u8) !GrepRequest {
+    var parsed = try parseTestCommand(.grep, args);
+    defer parsed.deinit(std.testing.allocator);
+    return grepRequest(&parsed);
 }
 
 fn currentJournal() Error![]const u8 {
     return sys.env("TJ_JOURNAL") orelse error.NotInJournal;
 }
-
-const grep_usage =
-    \\Usage: tj grep [--all] [--cmd] [--out] [-i|--ignore-case]
-    \\               [--color WHEN] [--] PATTERN
-    \\
-    \\Search journal commands and output for a literal byte string.
-    \\WHEN is never, auto, or always; the default is never.
-    \\
-;
 
 const ColorWhen = enum { never, auto, always };
 
@@ -88,58 +115,22 @@ const GrepRequest = struct {
     output: bool = true,
     ignore_case: bool = false,
     color: ColorWhen = .never,
-    help: bool = false,
     pattern: []const u8 = "",
 };
 
-fn parseGrepArgs(args: []const []const u8) !GrepRequest {
-    var request: GrepRequest = .{};
-    var resource_selected = false;
-    var options = true;
-    var i: usize = 0;
-    while (i < args.len) : (i += 1) {
-        const arg = args[i];
-        if (options and std.mem.eql(u8, arg, "--")) {
-            options = false;
-            continue;
-        }
-        if (options and std.mem.eql(u8, arg, "--help")) {
-            if (args.len != 1) return error.BadArguments;
-            request.help = true;
-            return request;
-        }
-        if (options and std.mem.eql(u8, arg, "--all")) {
-            request.all = true;
-            continue;
-        }
-        if (options and (std.mem.eql(u8, arg, "-i") or std.mem.eql(u8, arg, "--ignore-case"))) {
-            request.ignore_case = true;
-            continue;
-        }
-        if (options and (std.mem.eql(u8, arg, "--color") or std.mem.eql(u8, arg, "--colour"))) {
-            i += 1;
-            if (i >= args.len) return error.BadArguments;
-            request.color = std.meta.stringToEnum(ColorWhen, args[i]) orelse return error.BadArguments;
-            continue;
-        }
-        if (options and (std.mem.startsWith(u8, arg, "--color=") or std.mem.startsWith(u8, arg, "--colour="))) {
-            const value = arg[std.mem.indexOfScalar(u8, arg, '=').? + 1 ..];
-            request.color = std.meta.stringToEnum(ColorWhen, value) orelse return error.BadArguments;
-            continue;
-        }
-        if (options and (std.mem.eql(u8, arg, "--cmd") or std.mem.eql(u8, arg, "--out"))) {
-            if (!resource_selected) {
-                request.commands = false;
-                request.output = false;
-                resource_selected = true;
-            }
-            if (std.mem.eql(u8, arg, "--cmd")) request.commands = true else request.output = true;
-            continue;
-        }
-        if (options and std.mem.startsWith(u8, arg, "-")) return error.BadArguments;
-        if (request.pattern.len != 0) return error.BadArguments;
-        request.pattern = arg;
+fn grepRequest(parsed: *const zecli.Parsed) !GrepRequest {
+    var request: GrepRequest = .{
+        .all = parsed.present("all"),
+        .ignore_case = parsed.present("ignore-case"),
+    };
+    if (parsed.present("cmd") or parsed.present("out")) {
+        request.commands = parsed.present("cmd");
+        request.output = parsed.present("out");
     }
+    if (parsed.last("color")) |value| {
+        request.color = std.meta.stringToEnum(ColorWhen, value) orelse return error.BadArguments;
+    }
+    request.pattern = parsed.positionals.items[0];
     if (request.pattern.len == 0 or std.mem.indexOfScalar(u8, request.pattern, '\n') != null) {
         return error.BadArguments;
     }
@@ -244,17 +235,10 @@ fn grepCommand(
     gpa: std.mem.Allocator,
     io: Io,
     home: ?[]const u8,
-    args: []const []const u8,
+    parsed: *const zecli.Parsed,
     out: *Io.Writer,
 ) !u8 {
-    const request = parseGrepArgs(args) catch {
-        note("{s}", .{grep_usage});
-        return 2;
-    };
-    if (request.help) {
-        try out.writeAll(grep_usage);
-        return 0;
-    }
+    const request = try grepRequest(parsed);
 
     const current = sys.env("TJ_JOURNAL");
     if (!request.all and (current == null or current.?.len == 0)) {
@@ -345,36 +329,35 @@ fn grepJournal(
 }
 
 test "grep arguments select resources and preserve literal syntax" {
-    const defaults = try parseGrepArgs(&.{"needle"});
+    const defaults = try grepRequestFromArgs(&.{"needle"});
     try std.testing.expect(defaults.commands and defaults.output);
 
-    const selected = try parseGrepArgs(&.{ "--out", "--out", "--cmd", "-i", "[x].*" });
+    const selected = try grepRequestFromArgs(&.{ "--out", "--out", "--cmd", "-i", "[x].*" });
     try std.testing.expect(selected.commands and selected.output and selected.ignore_case);
     try std.testing.expectEqualStrings("[x].*", selected.pattern);
 
-    const leading = try parseGrepArgs(&.{ "--", "-needle" });
+    const leading = try grepRequestFromArgs(&.{ "--", "-needle" });
     try std.testing.expectEqualStrings("-needle", leading.pattern);
-    try std.testing.expect((try parseGrepArgs(&.{"--help"})).help);
 
-    try std.testing.expectEqual(ColorWhen.never, (try parseGrepArgs(&.{"x"})).color);
-    const automatic = try parseGrepArgs(&.{ "--color", "auto", "x" });
+    try std.testing.expectEqual(ColorWhen.never, (try grepRequestFromArgs(&.{"x"})).color);
+    const automatic = try grepRequestFromArgs(&.{ "--color", "auto", "x" });
     try std.testing.expectEqual(ColorWhen.auto, automatic.color);
     try std.testing.expectEqualStrings("x", automatic.pattern);
-    try std.testing.expectEqual(ColorWhen.always, (try parseGrepArgs(&.{ "--color", "always", "x" })).color);
-    try std.testing.expectEqual(ColorWhen.always, (try parseGrepArgs(&.{ "--colour=always", "x" })).color);
-    try std.testing.expectEqual(ColorWhen.never, (try parseGrepArgs(&.{ "--color=never", "x" })).color);
+    try std.testing.expectEqual(ColorWhen.always, (try grepRequestFromArgs(&.{ "--color", "always", "x" })).color);
+    try std.testing.expectEqual(ColorWhen.always, (try grepRequestFromArgs(&.{ "--colour=always", "x" })).color);
+    try std.testing.expectEqual(ColorWhen.never, (try grepRequestFromArgs(&.{ "--color=never", "x" })).color);
 }
 
 test "grep rejects missing multiline extra and unknown patterns" {
-    try std.testing.expectError(error.BadArguments, parseGrepArgs(&.{}));
-    try std.testing.expectError(error.BadArguments, parseGrepArgs(&.{""}));
-    try std.testing.expectError(error.BadArguments, parseGrepArgs(&.{"a\nb"}));
-    try std.testing.expectError(error.BadArguments, parseGrepArgs(&.{ "a", "b" }));
-    try std.testing.expectError(error.BadArguments, parseGrepArgs(&.{ "--wat", "a" }));
-    try std.testing.expectError(error.BadArguments, parseGrepArgs(&.{"--color"}));
-    try std.testing.expectError(error.BadArguments, parseGrepArgs(&.{ "--color", "a" }));
-    try std.testing.expectError(error.BadArguments, parseGrepArgs(&.{ "--color", "sometimes", "a" }));
-    try std.testing.expectError(error.BadArguments, parseGrepArgs(&.{ "--color=sometimes", "a" }));
+    try std.testing.expectError(error.ReportedCliError, grepRequestFromArgs(&.{}));
+    try std.testing.expectError(error.BadArguments, grepRequestFromArgs(&.{""}));
+    try std.testing.expectError(error.BadArguments, grepRequestFromArgs(&.{"a\nb"}));
+    try std.testing.expectError(error.ReportedCliError, grepRequestFromArgs(&.{ "a", "b" }));
+    try std.testing.expectError(error.ReportedCliError, grepRequestFromArgs(&.{ "--wat", "a" }));
+    try std.testing.expectError(error.ReportedCliError, grepRequestFromArgs(&.{"--color"}));
+    try std.testing.expectError(error.ReportedCliError, grepRequestFromArgs(&.{ "--color", "a" }));
+    try std.testing.expectError(error.ReportedCliError, grepRequestFromArgs(&.{ "--color", "sometimes", "a" }));
+    try std.testing.expectError(error.ReportedCliError, grepRequestFromArgs(&.{ "--color=sometimes", "a" }));
 }
 
 test "GNU grep selected-match colors use mt and ms capabilities" {
@@ -411,7 +394,13 @@ fn listJournals(gpa: std.mem.Allocator, io: Io, home: ?[]const u8, out: *Io.Writ
     }
 }
 
-fn listInteractions(gpa: std.mem.Allocator, io: Io, home: ?[]const u8, args: []const []const u8, out: *Io.Writer) !void {
+fn listInteractions(
+    gpa: std.mem.Allocator,
+    io: Io,
+    home: ?[]const u8,
+    parsed: *const zecli.Parsed,
+    out: *Io.Writer,
+) !void {
     var root = try store.openRoot(io, home);
     defer root.close(io);
 
@@ -420,25 +409,11 @@ fn listInteractions(gpa: std.mem.Allocator, io: Io, home: ?[]const u8, args: []c
         for (filters.items) |tag| gpa.free(tag);
         filters.deinit(gpa);
     }
-    var wanted: ?[]const u8 = null;
-    var i: usize = 0;
-    while (i < args.len) : (i += 1) {
-        const arg = args[i];
-        var tag_text: ?[]const u8 = null;
-        if (std.mem.eql(u8, arg, "--tag")) {
-            if (i + 1 >= args.len) return error.MissingArgument;
-            i += 1;
-            tag_text = args[i];
-        } else if (std.mem.startsWith(u8, arg, "--tag=")) {
-            tag_text = arg["--tag=".len..];
-        } else if (std.mem.startsWith(u8, arg, "-")) {
-            return error.BadArguments;
-        } else {
-            if (wanted != null) return error.BadArguments;
-            wanted = arg;
-        }
-        if (tag_text) |text| try filters.append(gpa, annotations.normalizeTag(gpa, text) catch return error.InvalidTag);
+    for (parsed.flags.items) |flag| {
+        if (!std.mem.eql(u8, flag.name, "tag")) continue;
+        try filters.append(gpa, annotations.normalizeTag(gpa, flag.value.?) catch return error.InvalidTag);
     }
+    const wanted = if (parsed.positionals.items.len == 1) parsed.positionals.items[0] else null;
 
     var journal_owned: ?[]u8 = null;
     defer if (journal_owned) |name| gpa.free(name);
@@ -547,11 +522,10 @@ fn resolveReference(
     gpa: std.mem.Allocator,
     io: Io,
     home: ?[]const u8,
-    args: []const []const u8,
+    parsed: *const zecli.Parsed,
     out: *Io.Writer,
 ) !void {
-    if (args.len == 0) return error.MissingArgument;
-    const ref = reference.parse(args[0]) catch return error.BadReference;
+    const ref = reference.parse(parsed.positionals.items[0]) catch return error.BadReference;
 
     var root = try store.openRoot(io, home);
     defer root.close(io);
@@ -571,10 +545,10 @@ fn completeReference(
     gpa: std.mem.Allocator,
     io: Io,
     home: ?[]const u8,
-    args: []const []const u8,
+    parsed: *const zecli.Parsed,
     out: *Io.Writer,
 ) !void {
-    const partial = if (args.len > 0) args[0] else "@";
+    const partial = if (parsed.positionals.items.len > 0) parsed.positionals.items[0] else "@";
     if (partial.len == 0 or partial[0] != '@') return;
 
     var root = store.openRoot(io, home) catch return;
@@ -815,115 +789,163 @@ fn pruneMissingAnnotations(
     }
 }
 
+const NameRequest = union(enum) {
+    list,
+    query: []const u8,
+    set: struct { ref: []const u8, name: []const u8 },
+    remove: []const u8,
+};
+
+fn nameRequest(parsed: *const zecli.Parsed) !NameRequest {
+    const args = parsed.positionals.items;
+    if (parsed.present("remove")) {
+        if (args.len != 1) return error.BadArguments;
+        return .{ .remove = args[0] };
+    }
+    return switch (args.len) {
+        0 => .list,
+        1 => .{ .query = args[0] },
+        2 => .{ .set = .{ .ref = args[0], .name = args[1] } },
+        else => error.BadArguments,
+    };
+}
+
 fn nameCommand(
     gpa: std.mem.Allocator,
     io: Io,
     home: ?[]const u8,
-    args: []const []const u8,
+    parsed: *const zecli.Parsed,
     out: *Io.Writer,
 ) !void {
-    if (args.len == 0) {
-        const current = try currentJournal();
-        var root = try store.openRoot(io, home);
-        defer root.close(io);
-        var manifest = try annotations.load(gpa, io, root, current);
-        defer manifest.deinit(gpa);
-        for (manifest.entries.items) |entry| {
-            const name = entry.name orelse continue;
-            if (!store.interactionExists(io, root, current, entry.number)) continue;
-            try out.print("{s}  @{d}\n", .{ name, entry.number });
-        }
-        return;
+    switch (try nameRequest(parsed)) {
+        .list => {
+            const current = try currentJournal();
+            var root = try store.openRoot(io, home);
+            defer root.close(io);
+            var manifest = try annotations.load(gpa, io, root, current);
+            defer manifest.deinit(gpa);
+            for (manifest.entries.items) |entry| {
+                const name = entry.name orelse continue;
+                if (!store.interactionExists(io, root, current, entry.number)) continue;
+                try out.print("{s}  @{d}\n", .{ name, entry.number });
+            }
+            return;
+        },
+        .query => |ref| {
+            var root = try store.openRoot(io, home);
+            defer root.close(io);
+            const target = try locateCommandTarget(gpa, io, root, ref);
+            defer target.deinit(gpa);
+            try requireInteraction(target);
+            var manifest = try annotations.load(gpa, io, root, target.journal);
+            defer manifest.deinit(gpa);
+            const entry = manifest.findConst(target.number) orelse return;
+            const name = entry.name orelse return;
+            try out.print("{s}  ", .{name});
+            try printCanonical(out, sys.env("TJ_JOURNAL"), target.journal, target.number);
+            return out.writeAll("\n");
+        },
+        .remove => |name| {
+            var mutation = try openCurrentMutation(gpa, io, home);
+            defer mutation.lock.close(io);
+            defer mutation.root.close(io);
+            var manifest = try annotations.load(gpa, io, mutation.root, mutation.journal);
+            defer manifest.deinit(gpa);
+            pruneMissingAnnotations(gpa, io, mutation.root, mutation.journal, &manifest);
+            try manifest.removeName(gpa, name);
+            return annotations.save(gpa, io, mutation.root, mutation.journal, &manifest);
+        },
+        .set => |request| {
+            var root = try store.openRoot(io, home);
+            defer root.close(io);
+            const target = try requireMutationTarget(gpa, io, root, request.ref);
+            defer target.deinit(gpa);
+            try requireInteraction(target);
+            var mutation = try openCurrentMutation(gpa, io, home);
+            defer mutation.lock.close(io);
+            defer mutation.root.close(io);
+            if (!store.interactionExists(io, mutation.root, mutation.journal, target.number)) return error.NoSuchInteraction;
+            var manifest = try annotations.load(gpa, io, mutation.root, mutation.journal);
+            defer manifest.deinit(gpa);
+            pruneMissingAnnotations(gpa, io, mutation.root, mutation.journal, &manifest);
+            try manifest.setName(gpa, target.number, request.name);
+            try annotations.save(gpa, io, mutation.root, mutation.journal, &manifest);
+        },
     }
+}
 
-    if (std.mem.eql(u8, args[0], "--remove")) {
-        if (args.len != 2) return error.BadArguments;
-        var mutation = try openCurrentMutation(gpa, io, home);
-        defer mutation.lock.close(io);
-        defer mutation.root.close(io);
-        var manifest = try annotations.load(gpa, io, mutation.root, mutation.journal);
-        defer manifest.deinit(gpa);
-        pruneMissingAnnotations(gpa, io, mutation.root, mutation.journal, &manifest);
-        try manifest.removeName(gpa, args[1]);
-        return annotations.save(gpa, io, mutation.root, mutation.journal, &manifest);
+const TagRequest = union(enum) {
+    list,
+    query: []const u8,
+    add: struct { ref: []const u8, tags: []const []const u8 },
+    remove: struct { ref: []const u8, tags: []const []const u8 },
+};
+
+fn tagRequest(parsed: *const zecli.Parsed) !TagRequest {
+    const args = parsed.positionals.items;
+    if (parsed.present("remove")) {
+        if (args.len < 2) return error.MissingArgument;
+        return .{ .remove = .{ .ref = args[0], .tags = args[1..] } };
     }
-    if (args.len > 2) return error.BadArguments;
-
-    var root = try store.openRoot(io, home);
-    defer root.close(io);
-    if (args.len == 1) {
-        const target = try locateCommandTarget(gpa, io, root, args[0]);
-        defer target.deinit(gpa);
-        try requireInteraction(target);
-        var manifest = try annotations.load(gpa, io, root, target.journal);
-        defer manifest.deinit(gpa);
-        const entry = manifest.findConst(target.number) orelse return;
-        const name = entry.name orelse return;
-        try out.print("{s}  ", .{name});
-        try printCanonical(out, sys.env("TJ_JOURNAL"), target.journal, target.number);
-        return out.writeAll("\n");
-    }
-
-    const target = try requireMutationTarget(gpa, io, root, args[0]);
-    defer target.deinit(gpa);
-    try requireInteraction(target);
-    var mutation = try openCurrentMutation(gpa, io, home);
-    defer mutation.lock.close(io);
-    defer mutation.root.close(io);
-    if (!store.interactionExists(io, mutation.root, mutation.journal, target.number)) return error.NoSuchInteraction;
-    var manifest = try annotations.load(gpa, io, mutation.root, mutation.journal);
-    defer manifest.deinit(gpa);
-    pruneMissingAnnotations(gpa, io, mutation.root, mutation.journal, &manifest);
-    try manifest.setName(gpa, target.number, args[1]);
-    try annotations.save(gpa, io, mutation.root, mutation.journal, &manifest);
+    return switch (args.len) {
+        0 => .list,
+        1 => .{ .query = args[0] },
+        else => .{ .add = .{ .ref = args[0], .tags = args[1..] } },
+    };
 }
 
 fn tagCommand(
     gpa: std.mem.Allocator,
     io: Io,
     home: ?[]const u8,
-    args: []const []const u8,
+    parsed: *const zecli.Parsed,
     out: *Io.Writer,
 ) !void {
-    if (args.len == 0) {
-        const current = try currentJournal();
-        var root = try store.openRoot(io, home);
-        defer root.close(io);
-        var manifest = try annotations.load(gpa, io, root, current);
-        defer manifest.deinit(gpa);
-        for (manifest.entries.items) |entry| {
-            if (entry.tags.items.len == 0 or !store.interactionExists(io, root, current, entry.number)) continue;
-            try out.print("@{d}", .{entry.number});
+    switch (try tagRequest(parsed)) {
+        .list => {
+            const current = try currentJournal();
+            var root = try store.openRoot(io, home);
+            defer root.close(io);
+            var manifest = try annotations.load(gpa, io, root, current);
+            defer manifest.deinit(gpa);
+            for (manifest.entries.items) |entry| {
+                if (entry.tags.items.len == 0 or !store.interactionExists(io, root, current, entry.number)) continue;
+                try out.print("@{d}", .{entry.number});
+                for (entry.tags.items) |tag| try out.print("  {s}", .{tag});
+                try out.writeAll("\n");
+            }
+        },
+        .query => |ref| {
+            var root = try store.openRoot(io, home);
+            defer root.close(io);
+            const target = try locateCommandTarget(gpa, io, root, ref);
+            defer target.deinit(gpa);
+            try requireInteraction(target);
+            var manifest = try annotations.load(gpa, io, root, target.journal);
+            defer manifest.deinit(gpa);
+            const entry = manifest.findConst(target.number) orelse return;
+            if (entry.tags.items.len == 0) return;
+            try printCanonical(out, sys.env("TJ_JOURNAL"), target.journal, target.number);
             for (entry.tags.items) |tag| try out.print("  {s}", .{tag});
             try out.writeAll("\n");
-        }
-        return;
+        },
+        .add => |request| try updateTags(gpa, io, home, request.ref, request.tags, false),
+        .remove => |request| try updateTags(gpa, io, home, request.ref, request.tags, true),
     }
+}
 
-    const removing = std.mem.eql(u8, args[0], "--remove");
-    const target_i: usize = if (removing) 1 else 0;
-    if (args.len <= target_i) return error.MissingArgument;
-
-    if (!removing and args.len == 1) {
-        var root = try store.openRoot(io, home);
-        defer root.close(io);
-        const target = try locateCommandTarget(gpa, io, root, args[0]);
-        defer target.deinit(gpa);
-        try requireInteraction(target);
-        var manifest = try annotations.load(gpa, io, root, target.journal);
-        defer manifest.deinit(gpa);
-        const entry = manifest.findConst(target.number) orelse return;
-        if (entry.tags.items.len == 0) return;
-        try printCanonical(out, sys.env("TJ_JOURNAL"), target.journal, target.number);
-        for (entry.tags.items) |tag| try out.print("  {s}", .{tag});
-        return out.writeAll("\n");
-    }
-
-    if (args.len <= target_i + 1) return error.MissingArgument;
+fn updateTags(
+    gpa: std.mem.Allocator,
+    io: Io,
+    home: ?[]const u8,
+    ref: []const u8,
+    tags: []const []const u8,
+    removing: bool,
+) !void {
     const target = blk: {
         var root = try store.openRoot(io, home);
         defer root.close(io);
-        break :blk try requireMutationTarget(gpa, io, root, args[target_i]);
+        break :blk try requireMutationTarget(gpa, io, root, ref);
     };
     defer target.deinit(gpa);
     try requireInteraction(target);
@@ -935,7 +957,7 @@ fn tagCommand(
     var manifest = try annotations.load(gpa, io, mutation.root, mutation.journal);
     defer manifest.deinit(gpa);
     pruneMissingAnnotations(gpa, io, mutation.root, mutation.journal, &manifest);
-    for (args[target_i + 1 ..]) |tag| {
+    for (tags) |tag| {
         if (removing) {
             try manifest.removeTag(gpa, target.number, tag);
         } else {
@@ -945,34 +967,55 @@ fn tagCommand(
     try annotations.save(gpa, io, mutation.root, mutation.journal, &manifest);
 }
 
+const PinRequest = union(enum) {
+    list,
+    set: []const u8,
+    remove: []const u8,
+};
+
+fn pinRequest(parsed: *const zecli.Parsed) !PinRequest {
+    const args = parsed.positionals.items;
+    if (parsed.present("remove")) {
+        if (args.len != 1) return error.BadArguments;
+        return .{ .remove = args[0] };
+    }
+    return switch (args.len) {
+        0 => .list,
+        1 => .{ .set = args[0] },
+        else => error.BadArguments,
+    };
+}
+
 fn pinCommand(
     gpa: std.mem.Allocator,
     io: Io,
     home: ?[]const u8,
-    args: []const []const u8,
+    parsed: *const zecli.Parsed,
     out: *Io.Writer,
 ) !void {
-    if (args.len == 0) {
-        const current = try currentJournal();
-        var root = try store.openRoot(io, home);
-        defer root.close(io);
-        var manifest = try annotations.load(gpa, io, root, current);
-        defer manifest.deinit(gpa);
-        for (manifest.entries.items) |entry| {
-            if (entry.pinned and store.interactionExists(io, root, current, entry.number)) {
-                try out.print("@{d}\n", .{entry.number});
+    switch (try pinRequest(parsed)) {
+        .list => {
+            const current = try currentJournal();
+            var root = try store.openRoot(io, home);
+            defer root.close(io);
+            var manifest = try annotations.load(gpa, io, root, current);
+            defer manifest.deinit(gpa);
+            for (manifest.entries.items) |entry| {
+                if (entry.pinned and store.interactionExists(io, root, current, entry.number)) {
+                    try out.print("@{d}\n", .{entry.number});
+                }
             }
-        }
-        return;
+        },
+        .set => |ref| try updatePin(gpa, io, home, ref, true),
+        .remove => |ref| try updatePin(gpa, io, home, ref, false),
     }
+}
 
-    const removing = std.mem.eql(u8, args[0], "--remove");
-    const target_i: usize = if (removing) 1 else 0;
-    if (args.len != target_i + 1) return error.BadArguments;
+fn updatePin(gpa: std.mem.Allocator, io: Io, home: ?[]const u8, ref: []const u8, pinned: bool) !void {
     const target = blk: {
         var root = try store.openRoot(io, home);
         defer root.close(io);
-        break :blk try requireMutationTarget(gpa, io, root, args[target_i]);
+        break :blk try requireMutationTarget(gpa, io, root, ref);
     };
     defer target.deinit(gpa);
     try requireInteraction(target);
@@ -984,79 +1027,133 @@ fn pinCommand(
     var manifest = try annotations.load(gpa, io, mutation.root, mutation.journal);
     defer manifest.deinit(gpa);
     pruneMissingAnnotations(gpa, io, mutation.root, mutation.journal, &manifest);
-    try manifest.setPinned(gpa, target.number, !removing);
+    try manifest.setPinned(gpa, target.number, pinned);
     try annotations.save(gpa, io, mutation.root, mutation.journal, &manifest);
+}
+
+const RemoveRequest = union(enum) {
+    interaction: []const u8,
+    journal: struct { selector: []const u8, force: bool },
+};
+
+fn removeRequest(parsed: *const zecli.Parsed) !RemoveRequest {
+    const journal_selector = parsed.last("journal");
+    const force = parsed.present("force");
+    const interaction = if (parsed.positionals.items.len == 1) parsed.positionals.items[0] else null;
+    if (journal_selector) |selector| {
+        if (interaction != null) return error.BadArguments;
+        return .{ .journal = .{ .selector = selector, .force = force } };
+    }
+    if (interaction) |target| {
+        if (force) return error.BadArguments;
+        return .{ .interaction = target };
+    }
+    if (force) return error.BadArguments;
+    return error.MissingArgument;
+}
+
+test "annotation and removal requests select one semantic mode" {
+    const gpa = std.testing.allocator;
+
+    {
+        var parsed = try parseTestCommand(.name, &.{});
+        defer parsed.deinit(gpa);
+        try std.testing.expect(try nameRequest(&parsed) == .list);
+    }
+    {
+        var parsed = try parseTestCommand(.name, &.{ "@2", "build-failure" });
+        defer parsed.deinit(gpa);
+        const request = (try nameRequest(&parsed)).set;
+        try std.testing.expectEqualStrings("@2", request.ref);
+        try std.testing.expectEqualStrings("build-failure", request.name);
+    }
+    {
+        var parsed = try parseTestCommand(.tag, &.{ "--remove", "@2", "bug", "parser" });
+        defer parsed.deinit(gpa);
+        const request = (try tagRequest(&parsed)).remove;
+        try std.testing.expectEqualStrings("@2", request.ref);
+        try std.testing.expectEqual(@as(usize, 2), request.tags.len);
+    }
+    {
+        var parsed = try parseTestCommand(.pin, &.{"@2"});
+        defer parsed.deinit(gpa);
+        try std.testing.expectEqualStrings("@2", (try pinRequest(&parsed)).set);
+    }
+    {
+        var parsed = try parseTestCommand(.rm, &.{ "--journal", "abcd", "--force" });
+        defer parsed.deinit(gpa);
+        const request = (try removeRequest(&parsed)).journal;
+        try std.testing.expectEqualStrings("abcd", request.selector);
+        try std.testing.expect(request.force);
+    }
+    {
+        var parsed = try parseTestCommand(.rm, &.{ "--force", "@2" });
+        defer parsed.deinit(gpa);
+        try std.testing.expectError(error.BadArguments, removeRequest(&parsed));
+    }
 }
 
 fn removeCommand(
     gpa: std.mem.Allocator,
     io: Io,
     home: ?[]const u8,
-    args: []const []const u8,
+    parsed: *const zecli.Parsed,
     out: *Io.Writer,
 ) !void {
-    if (args.len == 0) return error.MissingArgument;
+    switch (try removeRequest(parsed)) {
+        .journal => |request| return removeJournal(gpa, io, home, request.selector, request.force, out),
+        .interaction => |target| return removeInteraction(gpa, io, home, target),
+    }
+}
 
-    var journal_selector: ?[]const u8 = null;
-    var force = false;
-    var interaction_arg: ?[]const u8 = null;
-    var i: usize = 0;
-    while (i < args.len) : (i += 1) {
-        if (std.mem.eql(u8, args[i], "--journal")) {
-            if (i + 1 >= args.len or journal_selector != null) return error.BadArguments;
-            i += 1;
-            journal_selector = args[i];
-        } else if (std.mem.eql(u8, args[i], "--force")) {
-            if (force) return error.BadArguments;
-            force = true;
-        } else {
-            if (interaction_arg != null) return error.BadArguments;
-            interaction_arg = args[i];
+fn removeJournal(
+    gpa: std.mem.Allocator,
+    io: Io,
+    home: ?[]const u8,
+    selector: []const u8,
+    force: bool,
+    out: *Io.Writer,
+) !void {
+    if (sys.env("TJ_JOURNAL") != null) return error.InsideJournalRemoval;
+    var root = try store.openRoot(io, home);
+    defer root.close(io);
+    const journal = try store.findUniqueJournal(gpa, io, root, selector);
+    defer gpa.free(journal);
+
+    const interactions = try store.listInteractions(gpa, io, root, journal);
+    defer {
+        for (interactions) |info| info.deinit(gpa);
+        gpa.free(interactions);
+    }
+    if (!force) {
+        if (!sys.isTty(0)) return error.ConfirmationRequired;
+        try out.print("Remove journal {s} with {d} interaction{s}? [y/N] ", .{
+            journal,
+            interactions.len,
+            if (interactions.len == 1) "" else "s",
+        });
+        try out.flush();
+        var answer_buf: [32]u8 = undefined;
+        const read = try sys.read(0, &answer_buf);
+        const answer = std.mem.trim(u8, answer_buf[0..read], " \t\r\n");
+        if (!(std.ascii.eqlIgnoreCase(answer, "y") or std.ascii.eqlIgnoreCase(answer, "yes"))) {
+            return error.Cancelled;
         }
     }
+    return store.removeJournal(io, root, journal) catch |err| switch (err) {
+        error.ActiveJournal => error.ActiveJournal,
+        else => return err,
+    };
+}
 
-    if (journal_selector) |selector| {
-        if (interaction_arg != null) return error.BadArguments;
-        if (sys.env("TJ_JOURNAL") != null) return error.InsideJournalRemoval;
-        var root = try store.openRoot(io, home);
-        defer root.close(io);
-        const journal = try store.findUniqueJournal(gpa, io, root, selector);
-        defer gpa.free(journal);
-
-        const interactions = try store.listInteractions(gpa, io, root, journal);
-        defer {
-            for (interactions) |info| info.deinit(gpa);
-            gpa.free(interactions);
-        }
-        if (!force) {
-            if (!sys.isTty(0)) return error.ConfirmationRequired;
-            try out.print("Remove journal {s} with {d} interaction{s}? [y/N] ", .{
-                journal,
-                interactions.len,
-                if (interactions.len == 1) "" else "s",
-            });
-            try out.flush();
-            var answer_buf: [32]u8 = undefined;
-            const read = try sys.read(0, &answer_buf);
-            const answer = std.mem.trim(u8, answer_buf[0..read], " \t\r\n");
-            if (!(std.ascii.eqlIgnoreCase(answer, "y") or std.ascii.eqlIgnoreCase(answer, "yes"))) {
-                return error.Cancelled;
-            }
-        }
-        return store.removeJournal(io, root, journal) catch |err| switch (err) {
-            error.ActiveJournal => error.ActiveJournal,
-            else => return err,
-        };
-    }
-
-    if (force or interaction_arg == null) return error.BadArguments;
-    if (try parseRemovalRange(interaction_arg.?)) |range| {
+fn removeInteraction(gpa: std.mem.Allocator, io: Io, home: ?[]const u8, interaction: []const u8) !void {
+    if (try parseRemovalRange(interaction)) |range| {
         return removeInteractionRange(gpa, io, home, range);
     }
     const target = blk: {
         var root = try store.openRoot(io, home);
         defer root.close(io);
-        break :blk try requireMutationTarget(gpa, io, root, interaction_arg.?);
+        break :blk try requireMutationTarget(gpa, io, root, interaction);
     };
     defer target.deinit(gpa);
     const output_only = std.mem.eql(u8, target.subpath, "out");
@@ -1182,6 +1279,32 @@ test "interaction removal ranges are inclusive numeric current-journal reference
 
 const read_chunk_size = 64 * 1024;
 
+const CatRequest = struct {
+    as_written: bool,
+    window: Window,
+    refs: []const []const u8,
+};
+
+fn catRequest(parsed: *const zecli.Parsed, stdout_is_tty: bool) CatRequest {
+    var request: CatRequest = .{
+        .as_written = stdout_is_tty,
+        .window = .all,
+        .refs = parsed.positionals.items,
+    };
+    for (parsed.flags.items) |flag| {
+        if (std.mem.eql(u8, flag.name, "raw")) {
+            request.as_written = true;
+        } else if (std.mem.eql(u8, flag.name, "plain")) {
+            request.as_written = false;
+        } else if (std.mem.eql(u8, flag.name, "head")) {
+            request.window = .{ .head = std.fmt.parseInt(usize, flag.value.?, 10) catch unreachable };
+        } else if (std.mem.eql(u8, flag.name, "tail")) {
+            request.window = .{ .tail = std.fmt.parseInt(usize, flag.value.?, 10) catch unreachable };
+        }
+    }
+    return request;
+}
+
 /// `tj cat @42` - print what an interaction recorded, without needing the
 /// shell integration to expand anything. Useful from bash, from a script, or
 /// from a shell that is not running under tj at all.
@@ -1189,45 +1312,25 @@ fn catResource(
     gpa: std.mem.Allocator,
     io: Io,
     home: ?[]const u8,
-    args: []const []const u8,
+    parsed: *const zecli.Parsed,
     out: *Io.Writer,
 ) !void {
     // Terminals can render escape sequences, pipes cannot. Follow the usual
     // convention and let either flag settle it explicitly.
-    var as_written = sys.isTty(1);
-    var window: Window = .all;
-    var refs: std.ArrayList([]const u8) = .empty;
-    defer refs.deinit(gpa);
-
-    var i: usize = 0;
-    while (i < args.len) : (i += 1) {
-        const arg = args[i];
-        if (std.mem.eql(u8, arg, "--raw") or std.mem.eql(u8, arg, "-r")) {
-            as_written = true;
-        } else if (std.mem.eql(u8, arg, "--plain") or std.mem.eql(u8, arg, "-p")) {
-            as_written = false;
-        } else if (try takeCount(args, &i, "--head")) |n| {
-            window = .{ .head = n };
-        } else if (try takeCount(args, &i, "--tail")) |n| {
-            window = .{ .tail = n };
-        } else {
-            try refs.append(gpa, arg);
-        }
-    }
-    if (refs.items.len == 0) return error.MissingArgument;
+    const request = catRequest(parsed, sys.isTty(1));
 
     var root = try store.openRoot(io, home);
     defer root.close(io);
 
-    for (refs.items) |text| {
+    for (request.refs) |text| {
         var file = try openTarget(gpa, io, root, text);
         defer file.close(io);
 
         // Rendering feeds the same window as raw bytes, so line counts always
         // describe what the caller sees rather than terminal control traffic.
-        var sink = WindowSink.init(gpa, window, out);
+        var sink = WindowSink.init(gpa, request.window, out);
         defer sink.deinit();
-        if (as_written) {
+        if (request.as_written) {
             try copyFile(io, file, &sink);
         } else {
             try renderFile(gpa, io, file, &sink);
@@ -1278,6 +1381,20 @@ const Window = union(enum) {
     head: usize,
     tail: usize,
 };
+
+test "cat request preserves option occurrence order" {
+    const gpa = std.testing.allocator;
+    var parsed = try parseTestCommand(.cat, &.{
+        "--raw", "--plain", "--head", "10", "--tail=3", "--head=1", "--", "-recording",
+    });
+    defer parsed.deinit(gpa);
+    const request = catRequest(&parsed, true);
+    try std.testing.expect(!request.as_written);
+    try std.testing.expectEqual(@as(usize, 1), request.window.head);
+    try std.testing.expectEqualStrings("-recording", request.refs[0]);
+
+    try std.testing.expectError(error.ReportedCliError, parseTestCommand(.cat, &.{ "--head", "bad", "@1" }));
+}
 
 /// Applies a line window without retaining bytes that cannot be returned.
 /// Tail storage is proportional to the requested final lines, not the file.
@@ -1371,21 +1488,6 @@ const WindowSink = struct {
         };
     }
 };
-
-fn takeCount(args: []const []const u8, i: *usize, comptime name: []const u8) !?usize {
-    const arg = args[i.*];
-    var text: []const u8 = undefined;
-
-    if (std.mem.eql(u8, arg, name)) {
-        if (i.* + 1 >= args.len) return error.MissingFlagValue;
-        i.* += 1;
-        text = args[i.*];
-    } else if (std.mem.startsWith(u8, arg, name ++ "=")) {
-        text = arg[name.len + 1 ..];
-    } else return null;
-
-    return std.fmt.parseInt(usize, text, 10) catch error.BadCount;
-}
 
 fn note(comptime fmt: []const u8, args: anytype) void {
     var buf: [512]u8 = undefined;
@@ -1554,35 +1656,23 @@ const ReplayRequest = struct {
     wanted: ?[]const u8,
 };
 
-fn parseReplayArgs(args: []const []const u8) !ReplayRequest {
+fn replayRequest(parsed: *const zecli.Parsed) !ReplayRequest {
     var request: ReplayRequest = .{ .replay = .{}, .wanted = null };
-
-    var i: usize = 0;
-    while (i < args.len) : (i += 1) {
-        const arg = args[i];
-        if (try takeReplayMillis(args, &i, "--typing")) |n| {
-            request.replay.typing_ms = n;
-        } else if (try takeReplayMillis(args, &i, "--max-pause")) |n| {
-            request.replay.max_pause_ms = n;
-        } else if (try takeReplayNumber(args, &i, "--from")) |n| {
-            request.replay.from = n;
-        } else if (try takeReplayNumber(args, &i, "--to")) |n| {
-            request.replay.to = n;
-        } else if (try takeText(args, &i, "--prompt")) |text| {
-            request.replay.prompt = text;
-        } else if (try takeReplaySpeed(args, &i)) |speed| {
-            request.replay.speed = speed;
-        } else if (std.mem.eql(u8, arg, "--duration")) {
-            request.replay.duration_only = true;
-        } else if (std.mem.startsWith(u8, arg, "-")) {
-            return error.UnknownFlag;
-        } else {
-            if (request.wanted != null) return error.BadReplayOption;
-            request.wanted = arg;
-        }
-    }
-
+    if (parsed.last("typing")) |text| request.replay.typing_ms = parseReplayMillis(text) catch return error.BadReplayOption;
+    if (parsed.last("max-pause")) |text| request.replay.max_pause_ms = parseReplayMillis(text) catch return error.BadReplayOption;
+    if (parsed.last("from")) |text| request.replay.from = parseReplayNumber(text) catch return error.BadReplayOption;
+    if (parsed.last("to")) |text| request.replay.to = parseReplayNumber(text) catch return error.BadReplayOption;
+    if (parsed.last("prompt")) |text| request.replay.prompt = text;
+    if (parsed.last("speed")) |text| request.replay.speed = parseReplaySpeed(text) catch return error.BadReplayOption;
+    request.replay.duration_only = parsed.present("duration");
+    if (parsed.positionals.items.len == 1) request.wanted = parsed.positionals.items[0];
     return request;
+}
+
+fn replayRequestFromArgs(args: []const [:0]const u8) !ReplayRequest {
+    var parsed = try parseTestCommand(.replay, args);
+    defer parsed.deinit(std.testing.allocator);
+    return replayRequest(&parsed);
 }
 
 /// `tj replay <journal>` - play a recording back into the terminal.
@@ -1596,10 +1686,10 @@ fn replayJournal(
     gpa: std.mem.Allocator,
     io: Io,
     home: ?[]const u8,
-    args: []const []const u8,
+    parsed: *const zecli.Parsed,
     out: *Io.Writer,
 ) !void {
-    const request = try parseReplayArgs(args);
+    const request = try replayRequest(parsed);
     const replay = request.replay;
     const wanted = request.wanted;
 
@@ -1716,64 +1806,55 @@ fn typeOut(
     return total;
 }
 
-fn takeReplayNumber(args: []const []const u8, i: *usize, comptime name: []const u8) !?u32 {
-    const text = takeText(args, i, name) catch |err| switch (err) {
-        error.MissingFlagValue => return error.BadReplayOption,
-    } orelse return null;
+fn parseReplayNumber(text: []const u8) !u32 {
     const number = std.fmt.parseInt(u32, text, 10) catch return error.BadReplayOption;
     if (number == 0) return error.BadReplayOption;
     return number;
 }
 
-fn takeReplayMillis(args: []const []const u8, i: *usize, comptime name: []const u8) !?u64 {
-    const text = takeText(args, i, name) catch |err| switch (err) {
-        error.MissingFlagValue => return error.BadReplayOption,
-    } orelse return null;
+fn parseReplayMillis(text: []const u8) !u64 {
     return std.fmt.parseInt(u64, text, 10) catch error.BadReplayOption;
 }
 
-fn takeReplaySpeed(args: []const []const u8, i: *usize) !?f64 {
-    const text = takeText(args, i, "--speed") catch |err| switch (err) {
-        error.MissingFlagValue => return error.BadReplayOption,
-    } orelse return null;
+fn parseReplaySpeed(text: []const u8) !f64 {
     const speed = std.fmt.parseFloat(f64, text) catch return error.BadReplayOption;
     if (!std.math.isFinite(speed) or speed <= 0) return error.BadReplayOption;
     return speed;
 }
 
 test "replay interaction ranges parse directly into u32" {
-    const minimum = try parseReplayArgs(&.{ "--from", "1", "--to=4294967295" });
+    const minimum = try replayRequestFromArgs(&.{ "--from", "1", "--to=4294967295" });
     try std.testing.expectEqual(@as(u32, 1), minimum.replay.from);
     try std.testing.expectEqual(std.math.maxInt(u32), minimum.replay.to);
 
-    try std.testing.expectError(error.BadReplayOption, parseReplayArgs(&.{ "--from", "0" }));
-    try std.testing.expectError(error.BadReplayOption, parseReplayArgs(&.{"--to=4294967296"}));
+    try std.testing.expectError(error.BadReplayOption, replayRequestFromArgs(&.{ "--from", "0" }));
+    try std.testing.expectError(error.BadReplayOption, replayRequestFromArgs(&.{"--to=4294967296"}));
 }
 
 test "replay accepts only finite positive speeds" {
     for ([_][]const u8{ "0.5", "1", "2" }) |text| {
-        const parsed = try parseReplayArgs(&.{ "--speed", text });
-        try std.testing.expect(parsed.replay.speed > 0);
-        try std.testing.expect(std.math.isFinite(parsed.replay.speed));
+        const speed = try parseReplaySpeed(text);
+        try std.testing.expect(speed > 0);
+        try std.testing.expect(std.math.isFinite(speed));
     }
 
     for ([_][]const u8{ "nan", "inf", "-inf", "0", "-1" }) |text| {
-        try std.testing.expectError(error.BadReplayOption, parseReplayArgs(&.{ "--speed", text }));
+        try std.testing.expectError(error.BadReplayOption, parseReplaySpeed(text));
     }
 }
 
 test "replay millisecond options use their final u64 type" {
-    const parsed = try parseReplayArgs(&.{ "--typing=18446744073709551615", "--max-pause", "0" });
+    const parsed = try replayRequestFromArgs(&.{ "--typing=18446744073709551615", "--max-pause", "0" });
     try std.testing.expectEqual(std.math.maxInt(u64), parsed.replay.typing_ms);
     try std.testing.expectEqual(@as(u64, 0), parsed.replay.max_pause_ms);
     try std.testing.expectError(
         error.BadReplayOption,
-        parseReplayArgs(&.{ "--typing", "18446744073709551616" }),
+        replayRequestFromArgs(&.{ "--typing", "18446744073709551616" }),
     );
 }
 
 test "replay rejects more than one journal name" {
-    try std.testing.expectError(error.BadReplayOption, parseReplayArgs(&.{ "first", "second" }));
+    try std.testing.expectError(error.ReportedCliError, replayRequestFromArgs(&.{ "first", "second" }));
 }
 
 test "replay timing arithmetic rejects unrepresentable durations" {
@@ -1803,17 +1884,6 @@ fn writeResource(
     };
     defer file.close(io);
     try copyFile(io, file, out);
-}
-
-fn takeText(args: []const []const u8, i: *usize, comptime name: []const u8) !?[]const u8 {
-    const arg = args[i.*];
-    if (std.mem.eql(u8, arg, name)) {
-        if (i.* + 1 >= args.len) return error.MissingFlagValue;
-        i.* += 1;
-        return args[i.*];
-    }
-    if (std.mem.startsWith(u8, arg, name ++ "=")) return arg[name.len + 1 ..];
-    return null;
 }
 
 test "a recorded gap is capped so a demo stays watchable" {

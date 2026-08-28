@@ -99,6 +99,84 @@ fn runNonTtyInJournal(
     });
 }
 
+test "application and every command expose generated help" {
+    const gpa = std.testing.allocator;
+    leaveJournal();
+
+    const root_cases = [_][]const []const u8{ &.{}, &.{"--help"} };
+    for (root_cases) |args| {
+        const result = try runNonTty(gpa, args);
+        defer gpa.free(result.stdout);
+        defer gpa.free(result.stderr);
+        try std.testing.expectEqual(@as(u8, 0), result.term.exited);
+        try std.testing.expectEqualStrings("", result.stderr);
+        try std.testing.expect(std.mem.indexOf(u8, result.stdout, "Usage: tj [options] <command>") != null);
+        try std.testing.expect(std.mem.indexOf(u8, result.stdout, "Commands:") != null);
+        try std.testing.expect(std.mem.indexOf(u8, result.stdout, "hist, history") != null);
+        try std.testing.expect(std.mem.indexOf(u8, result.stdout, "--home <DIR>") != null);
+        try std.testing.expect(std.mem.indexOf(u8, result.stdout, "@pgsd.42/out") != null);
+        try std.testing.expect(std.mem.indexOf(u8, result.stdout, "source /path/to/tj.plugin.zsh") != null);
+    }
+
+    const command_names = [_][]const u8{
+        "new",  "continue", "noout",  "hist",    "journals", "current",
+        "last", "cat",      "replay", "resolve", "complete", "name",
+        "tag",  "pin",      "rm",     "grep",
+    };
+    for (command_names) |name| {
+        const result = try runNonTty(gpa, &.{ name, "--help" });
+        defer gpa.free(result.stdout);
+        defer gpa.free(result.stderr);
+        try std.testing.expectEqual(@as(u8, 0), result.term.exited);
+        try std.testing.expectEqualStrings("", result.stderr);
+        const usage = try std.fmt.allocPrint(gpa, "Usage: tj {s}", .{name});
+        defer gpa.free(usage);
+        try std.testing.expect(std.mem.indexOf(u8, result.stdout, usage) != null);
+    }
+
+    const alias = try runNonTty(gpa, &.{ "history", "--help" });
+    defer gpa.free(alias.stdout);
+    defer gpa.free(alias.stderr);
+    try std.testing.expectEqual(@as(u8, 0), alias.term.exited);
+    try std.testing.expect(std.mem.indexOf(u8, alias.stdout, "Usage: tj hist") != null);
+
+    const grep = try runNonTty(gpa, &.{ "grep", "--help" });
+    defer gpa.free(grep.stdout);
+    defer gpa.free(grep.stderr);
+    try std.testing.expect(std.mem.indexOf(u8, grep.stdout, "Arguments:") != null);
+    try std.testing.expect(std.mem.indexOf(u8, grep.stdout, "Options:") != null);
+    try std.testing.expect(std.mem.indexOf(u8, grep.stdout, "--color, --colour <WHEN>") != null);
+    try std.testing.expect(std.mem.indexOf(u8, grep.stdout, "choices: never, auto, always") != null);
+    try std.testing.expect(std.mem.indexOf(u8, grep.stdout, "default: never") != null);
+}
+
+test "schema errors use status two and command help" {
+    const gpa = std.testing.allocator;
+    leaveJournal();
+
+    const cases = [_]struct {
+        args: []const []const u8,
+        diagnostic: []const u8,
+        usage: []const u8,
+    }{
+        .{ .args = &.{ "journals", "extra" }, .diagnostic = "too many arguments", .usage = "Usage: tj journals" },
+        .{ .args = &.{ "grep", "--unknown", "x" }, .diagnostic = "unknown option", .usage = "Usage: tj grep" },
+        .{ .args = &.{ "cat", "--head" }, .diagnostic = "requires <N>", .usage = "Usage: tj cat" },
+        .{ .args = &.{"resolve"}, .diagnostic = "missing required argument", .usage = "Usage: tj resolve" },
+        .{ .args = &.{ "complete", "@1", "@2" }, .diagnostic = "too many arguments", .usage = "Usage: tj complete" },
+        .{ .args = &.{ "grep", "--color=sometimes", "x" }, .diagnostic = "invalid value", .usage = "Usage: tj grep" },
+    };
+    for (cases) |case| {
+        const result = try runNonTty(gpa, case.args);
+        defer gpa.free(result.stdout);
+        defer gpa.free(result.stderr);
+        try std.testing.expectEqual(@as(u8, 2), result.term.exited);
+        try std.testing.expectEqualStrings("", result.stdout);
+        try std.testing.expect(std.mem.indexOf(u8, result.stderr, case.diagnostic) != null);
+        try std.testing.expect(std.mem.indexOf(u8, result.stderr, case.usage) != null);
+    }
+}
+
 /// Drains a large PTY transcript without retaining bytes that precede its
 /// final marker. This keeps the large-file regression honest about memory.
 fn finishKeepingTail(
@@ -1614,6 +1692,30 @@ test "a new journal that recorded nothing leaves nothing behind" {
     try std.testing.expectEqual(@as(usize, 0), try scratch.journals());
 }
 
+test "new and continue leave child help flags after the argv boundary" {
+    const gpa = std.testing.allocator;
+    var scratch = try Scratch.open();
+    defer scratch.close();
+
+    var created = try run(gpa, &.{
+        "--home",                          scratch.path(), "new",    "--", "/bin/sh", "-c",
+        "printf 'NEW-CHILD:%s\\n' \"$1\"", "sh",           "--help",
+    }, 24, 80);
+    defer created.out.deinit(gpa);
+    try std.testing.expectEqual(@as(u8, 0), created.code);
+    try std.testing.expect(std.mem.indexOf(u8, created.out.items, "NEW-CHILD:--help") != null);
+
+    const id = ulid.encode(40, .{2} ** 10);
+    try scratch.makeJournal(id, &.{});
+    var continued = try run(gpa, &.{
+        "--home",                               scratch.path(), "continue", &id, "--", "/bin/sh", "-c",
+        "printf 'CONTINUE-CHILD:%s\\n' \"$1\"", "sh",           "--help",
+    }, 24, 80);
+    defer continued.out.deinit(gpa);
+    try std.testing.expectEqual(@as(u8, 0), continued.code);
+    try std.testing.expect(std.mem.indexOf(u8, continued.out.items, "CONTINUE-CHILD:--help") != null);
+}
+
 test "a new journal that recorded something is kept" {
     if (!haveZsh()) return error.SkipZigTest;
     const gpa = std.testing.allocator;
@@ -1833,7 +1935,7 @@ test "tj noout preserves output argv and child statuses while omitting bytes" {
     const producer = try journal.fixture(
         gpa,
         "wrapper-producer.sh",
-        "printf 'WRAPPER-STDOUT:%s|%s|%s\\n' \"$1\" \"$2\" \"$3\"\n" ++
+        "printf 'WRAPPER-STDOUT:%s|%s|%s|%s\\n' \"$1\" \"$2\" \"$3\" \"$4\"\n" ++
             "printf 'WRAPPER-STDERR\\n' >&2\n" ++
             "printf 'WRAPPER-CONTEXT:%s|%s|' \"$PWD\" \"$NOOUT_TEST_ENV\"\n" ++
             "if test -t 0 && test -t 1 && test -t 2; then printf 'tty\\n'; else printf 'not-tty\\n'; fi\n",
@@ -1846,7 +1948,7 @@ test "tj noout preserves output argv and child statuses while omitting bytes" {
     try setupJournalZsh(gpa, child, &transcript);
     const command = try std.fmt.allocPrint(
         gpa,
-        "cd /; NOOUT_TEST_ENV=preserved command \"$TJ\" noout -- /bin/sh '{s}' 'two words' '*' --flag",
+        "cd /; NOOUT_TEST_ENV=preserved command \"$TJ\" noout -- /bin/sh '{s}' 'two words' '*' --flag --help",
         .{producer},
     );
     defer gpa.free(command);
@@ -1868,7 +1970,7 @@ test "tj noout preserves output argv and child statuses while omitting bytes" {
     try std.testing.expectEqual(@as(u8, 0), try child.finish(gpa, &transcript, timeout_ms));
 
     const visible = transcript.items[visible_from..];
-    try std.testing.expect(std.mem.indexOf(u8, visible, "WRAPPER-STDOUT:two words|*|--flag") != null);
+    try std.testing.expect(std.mem.indexOf(u8, visible, "WRAPPER-STDOUT:two words|*|--flag|--help") != null);
     try std.testing.expect(std.mem.indexOf(u8, visible, "WRAPPER-STDERR") != null);
     try std.testing.expect(std.mem.indexOf(u8, visible, "WRAPPER-CONTEXT:/|preserved|tty") != null);
     try std.testing.expect(std.mem.indexOf(u8, visible, "5107;tj") == null);
@@ -2003,7 +2105,7 @@ test "native grep searches literal command and output lines with stable statuses
     defer gpa.free(help.stdout);
     defer gpa.free(help.stderr);
     try std.testing.expectEqual(@as(u8, 0), help.term.exited);
-    try std.testing.expect(std.mem.startsWith(u8, help.stdout, "Usage: tj grep"));
+    try std.testing.expect(std.mem.indexOf(u8, help.stdout, "Usage: tj grep") != null);
 
     var dir = try journal.journalDir();
     defer dir.close(io);
@@ -2395,7 +2497,7 @@ test "invalid replay numeric options exit cleanly" {
         var r = try run(gpa, args, 24, 80);
         defer r.out.deinit(gpa);
 
-        try std.testing.expectEqual(@as(u8, 1), r.code);
+        try std.testing.expectEqual(@as(u8, 2), r.code);
         try std.testing.expect(std.mem.indexOf(u8, r.out.items, "invalid replay numeric option") != null);
         try std.testing.expect(std.mem.indexOf(u8, r.out.items, "panic") == null);
         try std.testing.expect(std.mem.indexOf(u8, r.out.items, "error return trace") == null);

@@ -309,6 +309,26 @@ tj continue <id-or-suffix> [--keep-osc] [-- command ...]
 tj journals
 ```
 
+All public commands are first-class subcommands in one validated command
+schema. A bare `tj` or `tj --help` prints application help; `tj COMMAND
+--help` prints help for that command. Help is written to standard output and
+returns status 0.
+
+Command options accept `--option value` and `--option=value` when the option
+requires a value. A required-value option without one is invalid; there is no
+implicit value for options such as `grep --color`. `--` ends TJ option parsing
+where a command accepts dash-prefixed operands. For `new` and `continue`, it
+also explicitly begins the child argv, though it may be omitted before an
+ordinary executable name. For `noout`, the separator is mandatory. TJ never
+parses options in a child argv after that boundary.
+
+Every command enforces the arity in its published usage. Unknown commands,
+unknown options, missing option values, and missing or extra operands are
+command-line usage errors: they print the relevant generated help to standard
+error and return status 2. Operational and storage failures retain status 1,
+as do commands with a documented negative result such as a grep with no
+matches.
+
 The writer exports `TJ_JOURNAL`, `TJ_NEXT`, `TJ_HOME`, and `TJ`. The zsh
 integration derives `TJ_JOURNAL_SHORT` and `TJ_REF`. These variables describe
 the selected durable journal and its next unused interaction; they are not a
