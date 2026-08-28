@@ -471,6 +471,25 @@ fn setupJournalZsh(gpa: std.mem.Allocator, child: harness.PtyChild, out: *std.Ar
     return setupJournalZshWithPrefix(gpa, child, out, "");
 }
 
+/// Cancels an editable ZLE line and proves that the shell accepted a new
+/// command afterward. Waiting for the ordinary prompt is insufficient here:
+/// completion redraws that same prompt before Ctrl-C has been processed.
+fn cancelZleLine(gpa: std.mem.Allocator, child: harness.PtyChild, out: *std.ArrayList(u8)) !void {
+    const from = out.items.len;
+    try child.write("\x03");
+    // Split the marker in the typed command so terminal echo cannot satisfy
+    // the wait; only the executed print produces the contiguous text.
+    try child.write("print -r -- TJ_ZLE_CANCEL_\"\"READY\n");
+    if (!try child.readUntilFrom(gpa, out, from, "TJ_ZLE_CANCEL_READY", timeout_ms)) {
+        std.debug.print("ZLE cancellation did not execute its readiness command; transcript follows:\n{s}\n", .{out.items[from..]});
+        return error.ZleCancellationDidNotFinish;
+    }
+    if (!try child.readUntilFrom(gpa, out, from, test_prompt, timeout_ms)) {
+        std.debug.print("ZLE cancellation did not return a prompt; transcript follows:\n{s}\n", .{out.items[from..]});
+        return error.ZleCancellationPromptMissing;
+    }
+}
+
 fn haveZsh() bool {
     const io = std.testing.io;
     const file = Dir.cwd().openFile(io, "/bin/zsh", .{}) catch return false;
@@ -2424,8 +2443,7 @@ test "zsh completion keeps special resource names as one inert argument" {
     try child.write("cat ~[@");
     try child.write("\t");
     try std.testing.expect(try child.readUntilFrom(gpa, &out, from, "@1", timeout_ms));
-    try child.write("\x03");
-    try std.testing.expect(try child.readUntilFrom(gpa, &out, from, test_prompt, timeout_ms));
+    try cancelZleLine(gpa, child, &out);
 
     // Assigned names participate in dynamic-directory name completion. First
     // inspect the completed path exactly as a user can with the probe widget.
@@ -2445,8 +2463,7 @@ test "zsh completion keeps special resource names as one inert argument" {
         std.debug.print("named completion produced the wrong ZLE buffer; transcript follows:\n{s}\n", .{out.items[from..]});
         return error.NamedCompletionBufferMismatch;
     }
-    try child.write("\x03");
-    try std.testing.expect(try child.readUntilFrom(gpa, &out, from, test_prompt, timeout_ms));
+    try cancelZleLine(gpa, child, &out);
 
     // Repeat without the probe between completion and accept-line, then check
     // both what preexec received and what the resulting command produced.
@@ -2477,8 +2494,7 @@ test "zsh completion keeps special resource names as one inert argument" {
     try child.write("cat ~[@1]/");
     try child.write("\t");
     try std.testing.expect(try child.readUntilFrom(gpa, &out, from, "files/", timeout_ms));
-    try child.write("\x03");
-    try std.testing.expect(try child.readUntilFrom(gpa, &out, from, test_prompt, timeout_ms));
+    try cancelZleLine(gpa, child, &out);
 
     from = out.items.len;
     try child.write("cat ~[@1]/files/note");
