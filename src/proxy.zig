@@ -21,6 +21,7 @@ const ulid = @import("ulid.zig");
 const Store = @import("store.zig").Store;
 
 const io_buf_size = 64 * 1024;
+const max_protocol_error_log_bytes = 384;
 
 /// How often a running command's buffered output reaches the disk.
 const flush_interval_ms = 200;
@@ -304,7 +305,14 @@ const Recorder = struct {
             .resource_begin => |r| self.store.beginResource(r.path, r.mime),
             .noout_begin => self.store.beginNoout(),
             .region_end => self.store.endRegion(),
-            .protocol_error => |payload| self.store.warn("ignored tj sequence: {s}", .{payload}),
+            .protocol_error => |payload| {
+                const shown = payload[0..@min(payload.len, max_protocol_error_log_bytes)];
+                if (shown.len == payload.len) {
+                    self.store.warn("ignored tj sequence: {s}", .{shown});
+                } else {
+                    self.store.warn("ignored tj sequence (truncated): {s}", .{shown});
+                }
+            },
         }
     }
 };

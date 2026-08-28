@@ -52,6 +52,29 @@ under tj.
 but nothing is recorded** and `tj hist` comes back empty. That is the one
 setup step worth not skipping.
 
+### SSH and terminal descriptions
+
+TJ preserves `$TERM` when it starts its shell. This matters with terminals
+whose SSH support is provided by an automatically injected shell function:
+that function is not inherited by the new shell unless its integration is
+also sourced from the shell's startup files. For example, Ghostty may normally
+make a remote session use `xterm-256color`, while plain `ssh` inside a journal
+forwards `xterm-ghostty` instead.
+
+The best fix is to install the real terminal description on each remote host,
+so applications retain Ghostty's full capabilities rather than using the
+`xterm-256color` fallback:
+
+```sh
+infocmp -x xterm-ghostty | ssh HOST 'tic -x -'
+ssh HOST 'infocmp -x xterm-ghostty >/dev/null && echo installed'
+```
+
+The warning that an older `tic` may treat the description field as an alias is
+harmless. Reconnect after installation so the remote shell initializes with
+the new entry. See [Ghostty's terminfo guidance](https://ghostty.org/docs/help/terminfo)
+for alternatives and platform-specific caveats.
+
 ## Create or continue a journal
 
 Create a journal and attach a writer to it:

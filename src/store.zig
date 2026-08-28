@@ -41,6 +41,13 @@ const max_resource_bytes = 64 * 1024 * 1024;
 /// Per interaction. A program publishing more than this is misbehaving.
 const max_resources = 32;
 
+/// Diagnostics must not become a second unbounded recording stream. Keep a
+/// small journal-wide byte ceiling and stop after a bounded number of warning
+/// writes in any one writer run.
+const max_log_bytes: u64 = 64 * 1024;
+const max_log_warnings: usize = 64;
+const log_suppression_notice = "further journal warnings suppressed\n";
+
 /// Recorded once for a visible region deliberately omitted from `out`.
 pub const noout_placeholder = "<tj:noout>";
 
@@ -59,6 +66,12 @@ pub const Store = struct {
     next_number: ?u32 = 1,
     current: ?Interaction = null,
     out_buffer: []u8,
+    /// Opened lazily on the first warning and reused so malformed protocol on
+    /// the PTY hot path does not open and stat the log for every marker.
+    log_file: ?File = null,
+    log_bytes: u64 = 0,
+    warning_count: usize = 0,
+    warnings_suppressed: bool = false,
     /// Set after the first write failure; recording stops, forwarding does not.
     disabled: bool = false,
 
@@ -199,6 +212,8 @@ pub const Store = struct {
 
     pub fn close(self: *Store) void {
         self.finish(null);
+        if (self.log_file) |file| file.close(self.io);
+        self.log_file = null;
         self.journal_dir.close(self.io);
 
         // Only the invocation that created a journal may remove it as empty
@@ -557,19 +572,55 @@ pub const Store = struct {
     }
 
     /// Appends to `$TJ_HOME/<journal>/log`. Best effort: if even this fails
-    /// there is nothing useful left to do about it.
+    /// there is nothing useful left to do about it. The handle and current
+    /// length are cached after the first warning, and both a per-run warning
+    /// count and a journal-wide byte ceiling keep hostile protocol output from
+    /// turning this diagnostic path into an unbounded recording stream.
     pub fn warn(self: *Store, comptime fmt: []const u8, args: anytype) void {
+        if (self.warnings_suppressed) return;
+        if (self.warning_count >= max_log_warnings) {
+            _ = self.appendLog(log_suppression_notice);
+            self.stopLogging();
+            return;
+        }
+
         var buf: [512]u8 = undefined;
         const line = std.fmt.bufPrint(&buf, fmt ++ "\n", args) catch return;
-        const file = self.journal_dir.createFile(self.io, "log", .{
-            .truncate = false,
-            .permissions = file_permissions,
-        }) catch return;
-        defer file.close(self.io);
-        // Opening without truncating still starts writing at zero, so each
-        // warning has to be placed after the last one deliberately.
-        const end = file.length(self.io) catch return;
-        file.writePositionalAll(self.io, line, end) catch {};
+        self.warning_count += 1;
+        if (!self.appendLog(line)) self.stopLogging();
+    }
+
+    fn appendLog(self: *Store, line: []const u8) bool {
+        if (self.log_file == null) {
+            const file = self.journal_dir.createFile(self.io, "log", .{
+                .truncate = false,
+                .permissions = file_permissions,
+            }) catch return false;
+            const end = file.length(self.io) catch {
+                file.close(self.io);
+                return false;
+            };
+            if (end >= max_log_bytes) {
+                file.close(self.io);
+                return false;
+            }
+            self.log_file = file;
+            self.log_bytes = end;
+        }
+
+        const remaining = max_log_bytes - self.log_bytes;
+        const line_len: u64 = @intCast(line.len);
+        if (line_len > remaining) return false;
+        const file = self.log_file orelse return false;
+        file.writePositionalAll(self.io, line, self.log_bytes) catch return false;
+        self.log_bytes += line_len;
+        return true;
+    }
+
+    fn stopLogging(self: *Store) void {
+        self.warnings_suppressed = true;
+        if (self.log_file) |file| file.close(self.io);
+        self.log_file = null;
     }
 };
 
@@ -1630,6 +1681,51 @@ test "every warning is kept, not written over the last one" {
         "first warning, which is a long one\nsecond\nthird\n",
         text,
     );
+}
+
+test "warning logging stops after a bounded number per writer run" {
+    const io = std.testing.io;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+
+    var path_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const len = try tmp.dir.realPath(io, &path_buf);
+
+    var store = try Store.createJournal(std.testing.allocator, io, path_buf[0..len]);
+    defer store.close();
+    for (0..max_log_warnings + 100) |number| store.warn("warning {d}", .{number});
+
+    const text = try store.journal_dir.readFileAlloc(io, "log", std.testing.allocator, .limited(max_log_bytes + 1));
+    defer std.testing.allocator.free(text);
+    try std.testing.expect(std.mem.indexOf(u8, text, "warning 63\n") != null);
+    try std.testing.expect(std.mem.indexOf(u8, text, "warning 64\n") == null);
+    try std.testing.expectEqual(@as(usize, 1), std.mem.count(u8, text, log_suppression_notice));
+    try std.testing.expect(text.len <= max_log_bytes);
+
+    const length_after_suppression = text.len;
+    for (0..100) |_| store.warn("never written", .{});
+    const unchanged = try store.journal_dir.readFileAlloc(io, "log", std.testing.allocator, .limited(max_log_bytes + 1));
+    defer std.testing.allocator.free(unchanged);
+    try std.testing.expectEqual(length_after_suppression, unchanged.len);
+}
+
+test "the journal warning log has an absolute byte ceiling" {
+    const io = std.testing.io;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+
+    var path_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const len = try tmp.dir.realPath(io, &path_buf);
+
+    var store = try Store.createJournal(std.testing.allocator, io, path_buf[0..len]);
+    defer store.close();
+    while (store.appendLog("X" ** 512)) {}
+    store.stopLogging();
+
+    const text = try store.journal_dir.readFileAlloc(io, "log", std.testing.allocator, .limited(max_log_bytes + 1));
+    defer std.testing.allocator.free(text);
+    try std.testing.expectEqual(@as(usize, max_log_bytes), text.len);
+    try std.testing.expect(store.warnings_suppressed);
 }
 
 test "a resource keeps the newlines the program wrote, not the pty's" {

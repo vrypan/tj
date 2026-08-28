@@ -288,10 +288,20 @@ _tj_accept_line() {
     BUFFER=$_tj_expanded
     zle redisplay
   fi
-  zle .accept-line
+  zle _tj_accept_line_next -- "$@"
 }
 
-zle -N accept-line _tj_accept_line
+_tj_register_accept_line() {
+  # Preserve the widget that was active when TJ was first sourced. The global
+  # guard matters when a plugin manager reloads this file: replacing the saved
+  # alias with TJ's own wrapper would make accept-line recurse forever.
+  (( ${+_TJ_ACCEPT_LINE_REGISTERED} )) && return 0
+  zle -A accept-line _tj_accept_line_next || return 1
+  zle -N accept-line _tj_accept_line || return 1
+  typeset -g _TJ_ACCEPT_LINE_REGISTERED=1
+}
+
+_tj_register_accept_line
 
 # --- dynamic named directories ---------------------------------------------
 

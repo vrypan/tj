@@ -726,6 +726,42 @@ test "an interrupted writer leaves the interaction without an rc" {
 
 // --- the journal namespace --------------------------------------------------
 
+test "the tj accept-line widget preserves an existing widget and registers once" {
+    if (!haveZsh()) return error.SkipZigTest;
+    const gpa = std.testing.allocator;
+
+    var journal = try Journal.open(gpa);
+    defer journal.close();
+
+    const child = try spawnJournalZsh(gpa, &journal);
+    var out: std.ArrayList(u8) = .empty;
+    defer out.deinit(gpa);
+    const prefix =
+        "typeset -gi TJ_PRIOR_ACCEPT_COUNT=0; " ++
+        "_tj_prior_accept_line() { (( TJ_PRIOR_ACCEPT_COUNT++ )); zle .accept-line; }; " ++
+        "zle -N accept-line _tj_prior_accept_line";
+    try setupJournalZshWithPrefix(gpa, child, &out, prefix);
+
+    // Sourcing TJ again must neither replace the saved widget nor make TJ's
+    // wrapper save and invoke itself recursively.
+    var source: std.ArrayList(u8) = .empty;
+    defer source.deinit(gpa);
+    try source.appendSlice(gpa, ". ");
+    try appendShellQuoted(gpa, &source, options.plugin);
+    try source.append(gpa, '\n');
+    var from = out.items.len;
+    try child.write(source.items);
+    try std.testing.expect(try child.readUntilFrom(gpa, &out, from, test_prompt, timeout_ms));
+
+    from = out.items.len;
+    try child.write("print -r -- TJ_PRIOR_ACCEPT_COUNT=$TJ_PRIOR_ACCEPT_COUNT\n");
+    try std.testing.expect(try child.readUntilFrom(gpa, &out, from, "TJ_PRIOR_ACCEPT_COUNT=2", timeout_ms));
+    try std.testing.expect(try child.readUntilFrom(gpa, &out, from, test_prompt, timeout_ms));
+
+    try child.write("exit 0\n");
+    try std.testing.expectEqual(@as(u8, 0), try child.finish(gpa, &out, timeout_ms));
+}
+
 test "zsh preexec precedes dynamic named-directory expansion" {
     if (!haveZsh()) return error.SkipZigTest;
     const gpa = std.testing.allocator;

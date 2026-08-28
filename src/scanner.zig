@@ -10,8 +10,9 @@
 //!
 //! Two rules drive the design. Any sequence may be split across reads, so all
 //! partial-match state lives in the struct rather than on the stack. And no
-//! byte the program wrote may ever be swallowed: a sequence that never
-//! terminates is abandoned after `max_osc` bytes and replayed verbatim.
+//! byte from an unknown sequence may ever be swallowed: a sequence that is
+//! not tj's is replayed or passed through verbatim. Once the tj prefix is
+//! confirmed, however, the bytes are protocol and never become recorded data.
 //!
 //! Only sequences that might still turn out to be tj's are withheld. The
 //! moment the payload cannot match `tj_prefix`, everything buffered so far is
@@ -23,8 +24,11 @@ const std = @import("std");
 const esc = 0x1b;
 const bel = 0x07;
 
-/// Also the point at which an unterminated sequence is abandoned.
+/// The largest OSC payload retained for parsing or diagnostics.
 pub const max_osc = 8192;
+
+const overflow_error = "tj sequence exceeded the 8192-byte limit";
+const unterminated_error = "unterminated tj sequence";
 
 const tj_prefix = "5107;tj;";
 
@@ -52,8 +56,8 @@ pub const Event = union(enum) {
     noout_begin,
     /// `OSC 5107;tj;end` - the current resource or noout region is complete.
     region_end,
-    /// A malformed or unsupported tj sequence. Carries the payload for the
-    /// journal log; the sequence itself is dropped.
+    /// A malformed or unsupported tj sequence. Carries a bounded payload or
+    /// diagnostic for the journal log; the sequence itself is dropped.
     protocol_error: []const u8,
 };
 
@@ -66,6 +70,10 @@ const State = enum {
     probe,
     /// Inside a confirmed tj sequence. Withheld.
     capture,
+    /// A confirmed tj sequence exceeded `max_osc`. Its remaining bytes are
+    /// discarded until the terminator, or forwarded as control under
+    /// `keep_osc`, but can never become terminal output recorded in `out`.
+    discard_tj,
     /// Inside an OSC that is not tj's. Already forwarded; still buffered so
     /// the payload can be parsed for OSC 133 events.
     pass,
@@ -119,6 +127,7 @@ pub const Scanner = struct {
                 }
             },
             .probe, .capture => i = self.scanWithheld(bytes, i, sink),
+            .discard_tj => i = self.scanDiscardedTj(bytes, i, sink),
             .pass => i = self.scanPassthrough(bytes, i, sink),
         };
     }
@@ -127,8 +136,19 @@ pub const Scanner = struct {
     pub fn flush(self: *Scanner, sink: anytype) void {
         switch (self.state) {
             .esc => sink.data(&[_]u8{esc}),
-            // An ESC seen but not yet resolved was never forwarded either.
-            .probe, .capture => self.abandon(sink, if (self.esc_pending) &[_]u8{esc} else &.{}),
+            // An unknown partial OSC may still be another program's, so give
+            // it back. A confirmed tj sequence remains protocol even without
+            // its terminator and must not leak into `out`.
+            .probe => self.abandon(sink, if (self.esc_pending) &[_]u8{esc} else &.{}),
+            .capture => {
+                if (self.keep_osc) {
+                    sink.control(&[_]u8{ esc, ']' });
+                    sink.control(self.buf[0..self.len]);
+                    if (self.esc_pending) sink.control(&[_]u8{esc});
+                }
+                sink.event(.{ .protocol_error = unterminated_error });
+            },
+            .discard_tj => sink.event(.{ .protocol_error = overflow_error }),
             .ground, .pass => {},
         }
         self.state = .ground;
@@ -152,11 +172,11 @@ pub const Scanner = struct {
                     return i;
                 }
                 if (!self.push(esc)) {
-                    self.abandon(sink, &[_]u8{ esc, byte });
+                    self.discardTj(sink, &[_]u8{ esc, byte });
                     return i;
                 }
                 if (!self.push(byte)) {
-                    self.abandon(sink, &[_]u8{byte});
+                    self.discardTj(sink, &[_]u8{byte});
                     return i;
                 }
             } else if (byte == esc) {
@@ -167,7 +187,7 @@ pub const Scanner = struct {
                 self.finishTj(sink);
                 return i;
             } else if (!self.push(byte)) {
-                self.abandon(sink, &[_]u8{byte});
+                self.discardTj(sink, &[_]u8{byte});
                 return i;
             }
 
@@ -175,6 +195,43 @@ pub const Scanner = struct {
                 self.classify(sink);
                 if (self.state == .pass) return i;
             }
+        }
+        return i;
+    }
+
+    /// Scans the tail of an oversized, confirmed tj sequence without ever
+    /// handing it to `sink.data`. Under `keep_osc` the bytes still reach the
+    /// terminal through the control-only path, including an exact terminator.
+    fn scanDiscardedTj(self: *Scanner, bytes: []const u8, from: usize, sink: anytype) usize {
+        var i = from;
+        const start = i;
+        var terminated = false;
+
+        while (i < bytes.len) {
+            const byte = bytes[i];
+            i += 1;
+
+            if (self.esc_pending) {
+                self.esc_pending = false;
+                if (byte == '\\') {
+                    terminated = true;
+                    break;
+                }
+            } else if (byte == esc) {
+                self.esc_pending = true;
+            } else if (byte == bel) {
+                terminated = true;
+                break;
+            }
+        }
+
+        if (self.keep_osc and i > start) sink.control(bytes[start..i]);
+        if (terminated) {
+            sink.event(.{ .protocol_error = overflow_error });
+            self.state = .ground;
+            self.len = 0;
+            self.overflowed = false;
+            self.esc_pending = false;
         }
         return i;
     }
@@ -256,6 +313,16 @@ pub const Scanner = struct {
         if (pending.len > 0) sink.data(pending);
         self.state = .ground;
         self.len = 0;
+        self.esc_pending = false;
+    }
+
+    fn discardTj(self: *Scanner, sink: anytype, pending: []const u8) void {
+        if (self.keep_osc) {
+            sink.control(&[_]u8{ esc, ']' });
+            sink.control(self.buf[0..self.len]);
+            if (pending.len > 0) sink.control(pending);
+        }
+        self.state = .discard_tj;
         self.esc_pending = false;
     }
 
@@ -489,27 +556,77 @@ test "a tj-lookalike prefix is not stripped" {
     try std.testing.expectEqualStrings(input, r.forwarded.items);
 }
 
-test "an unterminated sequence is replayed rather than swallowed" {
+test "an oversized confirmed tj sequence is dropped through its terminator" {
+    const gpa = std.testing.allocator;
+    for ([_][]const u8{ "\x1b\\", "\x07" }) |terminator| {
+        var input: std.ArrayList(u8) = .empty;
+        defer input.deinit(gpa);
+        try input.appendSlice(gpa, "before\x1b]5107;tj;cmd;");
+        try input.appendSlice(gpa, "A" ** (max_osc + 100));
+        try input.appendSlice(gpa, terminator);
+        try input.appendSlice(gpa, "after");
+
+        for ([_]usize{ 1, 7, 512, input.items.len }) |chunk| {
+            var r = run(gpa, input.items, chunk, false);
+            defer r.deinit();
+            try std.testing.expectEqualStrings("beforeafter", r.forwarded.items);
+            try std.testing.expectEqualStrings("beforeafter", r.recorded.items);
+            try std.testing.expectEqual(@as(usize, 1), r.events.items.len);
+            try std.testing.expectEqualStrings(overflow_error, r.events.items[0].protocol_error);
+        }
+    }
+}
+
+test "keep_osc forwards an oversized tj sequence as control only" {
     const gpa = std.testing.allocator;
     var input: std.ArrayList(u8) = .empty;
     defer input.deinit(gpa);
-    try input.appendSlice(gpa, "\x1b]5107;tj;cmd;");
+    try input.appendSlice(gpa, "before\x1b]5107;tj;expanded;");
     try input.appendSlice(gpa, "A" ** (max_osc + 100));
+    try input.appendSlice(gpa, "\x1b\\after");
 
-    var r = run(gpa, input.items, 512, false);
+    var r = run(gpa, input.items, 31, true);
     defer r.deinit();
-    // Everything up to the abandon point comes back out, and the tail streams
-    // through as ordinary bytes: no byte is lost.
-    try std.testing.expectEqual(input.items.len, r.forwarded.items.len);
     try std.testing.expectEqualStrings(input.items, r.forwarded.items);
+    try std.testing.expectEqualStrings("beforeafter", r.recorded.items);
+    try std.testing.expectEqual(@as(usize, 1), r.events.items.len);
+    try std.testing.expectEqualStrings(overflow_error, r.events.items[0].protocol_error);
 }
 
-test "a stream ending mid-sequence releases what was withheld" {
+test "an oversized foreign OSC still passes through byte for byte" {
+    const gpa = std.testing.allocator;
+    var input: std.ArrayList(u8) = .empty;
+    defer input.deinit(gpa);
+    try input.appendSlice(gpa, "\x1b]5107;other;");
+    try input.appendSlice(gpa, "A" ** (max_osc + 100));
+    try input.appendSlice(gpa, "\x1b\\");
+
+    var r = run(gpa, input.items, 19, false);
+    defer r.deinit();
+    try std.testing.expectEqualStrings(input.items, r.forwarded.items);
+    try std.testing.expectEqualStrings(input.items, r.recorded.items);
+    try std.testing.expectEqual(@as(usize, 0), r.events.items.len);
+}
+
+test "a stream ending mid-confirmed tj sequence is dropped and reported" {
     const gpa = std.testing.allocator;
     const input = "x\x1b]5107;tj;cm";
     var r = run(gpa, input, input.len, false);
     defer r.deinit();
+    try std.testing.expectEqualStrings("x", r.forwarded.items);
+    try std.testing.expectEqualStrings("x", r.recorded.items);
+    try std.testing.expectEqual(@as(usize, 1), r.events.items.len);
+    try std.testing.expectEqualStrings(unterminated_error, r.events.items[0].protocol_error);
+}
+
+test "a stream ending while probing an unknown OSC releases what was withheld" {
+    const gpa = std.testing.allocator;
+    const input = "x\x1b]5107;t";
+    var r = run(gpa, input, input.len, false);
+    defer r.deinit();
     try std.testing.expectEqualStrings(input, r.forwarded.items);
+    try std.testing.expectEqualStrings(input, r.recorded.items);
+    try std.testing.expectEqual(@as(usize, 0), r.events.items.len);
 }
 
 test "a lone trailing ESC is not eaten" {
