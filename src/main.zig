@@ -7,7 +7,7 @@ const cli_spec = @import("cli_spec.zig");
 const proxy = @import("proxy.zig");
 const commands = @import("commands.zig");
 
-pub const version = "0.1.0";
+pub const version = "0.2.0";
 
 pub const panic = std.debug.FullPanic(onPanic);
 
