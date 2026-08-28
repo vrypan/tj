@@ -59,6 +59,12 @@ after a writer has ended, and would throw away exactly the recordings worth
 keeping. Only journals newly created by an empty `tj new` may be removed at
 writer exit; `tj continue` never deletes its existing journal.
 
+Explicit `tj rm`, interaction names, tags, and pins do not settle retention.
+In particular, a pin is currently only a user annotation: it neither protects
+an interaction from explicit deletion nor promises that a future policy will
+keep it. Any retention design must make that relationship as a separate
+product decision.
+
 What is wanted instead is deliberate: something like `tj prune --older-than
 30d`, or a size cap, or both.
 

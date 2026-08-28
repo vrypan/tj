@@ -8,6 +8,7 @@ const store = @import("store.zig");
 const sys = @import("sys.zig");
 const reference = @import("reference.zig");
 const plain = @import("plain.zig");
+const annotations = @import("annotations.zig");
 
 /// The parsed subcommand, exactly as `cli` produced it.
 const Subcommand = @FieldType(cli.Command, "subcommand");
@@ -23,6 +24,20 @@ pub const Error = error{
     BadCount,
     BadReplayOption,
     InsideJournal,
+    CrossJournalMutation,
+    InvalidName,
+    InvalidTag,
+    NameTaken,
+    InvalidAnnotations,
+    UnsupportedRemoval,
+    CurrentInteraction,
+    ActiveJournal,
+    AmbiguousJournal,
+    ConfirmationRequired,
+    Cancelled,
+    BadArguments,
+    InvalidMetadata,
+    InsideJournalRemoval,
 };
 
 pub fn run(
@@ -40,6 +55,10 @@ pub fn run(
         .complete => try completeReference(gpa, io, sub.home, sub.args, out),
         .cat => try catResource(gpa, io, sub.home, sub.args, out),
         .replay => try replayJournal(gpa, io, sub.home, sub.args, out),
+        .name => try nameCommand(gpa, io, sub.home, sub.args, out),
+        .tag => try tagCommand(gpa, io, sub.home, sub.args, out),
+        .pin => try pinCommand(gpa, io, sub.home, sub.args, out),
+        .rm => try removeCommand(gpa, io, sub.home, sub.args, out),
     }
 }
 
@@ -75,10 +94,46 @@ fn listJournals(gpa: std.mem.Allocator, io: Io, home: ?[]const u8, out: *Io.Writ
 }
 
 fn listInteractions(gpa: std.mem.Allocator, io: Io, home: ?[]const u8, args: []const []const u8, out: *Io.Writer) !void {
-    const journal = if (args.len > 0) args[0] else try currentJournal();
-
     var root = try store.openRoot(io, home);
     defer root.close(io);
+
+    var filters: std.ArrayList([]u8) = .empty;
+    defer {
+        for (filters.items) |tag| gpa.free(tag);
+        filters.deinit(gpa);
+    }
+    var wanted: ?[]const u8 = null;
+    var i: usize = 0;
+    while (i < args.len) : (i += 1) {
+        const arg = args[i];
+        var tag_text: ?[]const u8 = null;
+        if (std.mem.eql(u8, arg, "--tag")) {
+            if (i + 1 >= args.len) return error.MissingArgument;
+            i += 1;
+            tag_text = args[i];
+        } else if (std.mem.startsWith(u8, arg, "--tag=")) {
+            tag_text = arg["--tag=".len..];
+        } else if (std.mem.startsWith(u8, arg, "-")) {
+            return error.BadArguments;
+        } else {
+            if (wanted != null) return error.BadArguments;
+            wanted = arg;
+        }
+        if (tag_text) |text| try filters.append(gpa, annotations.normalizeTag(gpa, text) catch return error.InvalidTag);
+    }
+
+    var journal_owned: ?[]u8 = null;
+    defer if (journal_owned) |name| gpa.free(name);
+    const journal: []const u8 = if (wanted) |selector| blk: {
+        journal_owned = try store.findNewestJournal(gpa, io, root, selector) orelse return error.NoSuchJournal;
+        break :blk journal_owned.?;
+    } else try currentJournal();
+
+    var manifest = annotations.load(gpa, io, root, journal) catch |err| switch (err) {
+        error.InvalidAnnotations => return error.InvalidAnnotations,
+        else => return err,
+    };
+    defer manifest.deinit(gpa);
 
     const interactions = store.listInteractions(gpa, io, root, journal) catch |err| switch (err) {
         error.FileNotFound => return error.NoSuchJournal,
@@ -90,6 +145,8 @@ fn listInteractions(gpa: std.mem.Allocator, io: Io, home: ?[]const u8, args: []c
     }
 
     for (interactions) |info| {
+        if (!manifest.hasAllTags(info.number, filters.items)) continue;
+        const annotation = manifest.findConst(info.number);
         // A missing status means the interaction never finished; it must not
         // be shown as if it succeeded.
         var status_buf: [8]u8 = undefined;
@@ -98,10 +155,27 @@ fn listInteractions(gpa: std.mem.Allocator, io: Io, home: ?[]const u8, args: []c
         else
             "-";
         var size_buf: [8]u8 = undefined;
-        try out.print("{d: >5}  {s: <3}  {s: >5}  {s}\n", .{
+        var name_buf: [80]u8 = undefined;
+        const name = if (annotation) |entry|
+            if (entry.name) |value| std.fmt.bufPrint(&name_buf, "@{s}", .{value}) catch "-" else "-"
+        else
+            "-";
+        var tags_text: std.ArrayList(u8) = .empty;
+        defer tags_text.deinit(gpa);
+        if (annotation) |entry| {
+            for (entry.tags.items, 0..) |tag, tag_i| {
+                if (tag_i != 0) try tags_text.append(gpa, ',');
+                try tags_text.appendSlice(gpa, tag);
+            }
+        }
+        const tags = if (tags_text.items.len == 0) "-" else tags_text.items;
+        try out.print("{d: >5}{s}  {s: <3}  {s: >5}  {s: <20}  {s: <20}  {s}\n", .{
             info.number,
+            if (annotation != null and annotation.?.pinned) "*" else " ",
             status,
             humanSize(info.out_bytes, &size_buf),
+            name,
+            tags,
             firstLine(info.command),
         });
     }
@@ -216,9 +290,6 @@ fn completeInteractions(
         break :blk journal_owned.?;
     } else sys.env("TJ_JOURNAL") orelse return;
 
-    // A body being typed as a journal suffix has no numbers to offer yet.
-    for (prefix) |char| if (!std.ascii.isDigit(char)) return;
-
     const numbers = store.listNumbers(gpa, io, root, journal) catch return;
     defer gpa.free(numbers);
 
@@ -227,6 +298,15 @@ fn completeInteractions(
         const text = std.fmt.bufPrint(&buf, "{d}", .{number}) catch continue;
         if (!std.mem.startsWith(u8, text, prefix)) continue;
         try out.print("@{s}{s}\n", .{ qualifier, text });
+    }
+
+    var manifest = annotations.load(gpa, io, root, journal) catch return;
+    defer manifest.deinit(gpa);
+    for (manifest.entries.items) |entry| {
+        const name = entry.name orelse continue;
+        if (!store.interactionExists(io, root, journal, entry.number)) continue;
+        if (!std.mem.startsWith(u8, name, prefix)) continue;
+        try out.print("@{s}{s}\n", .{ qualifier, name });
     }
 }
 
@@ -242,7 +322,9 @@ fn completeResources(
     // Everything before the last slash is settled; only the last segment is
     // still being typed.
     const cut = std.mem.indexOfScalar(u8, body, '/') orelse body.len;
-    const ref = reference.parse(std.fmt.allocPrint(gpa, "@{s}", .{body[0..cut]}) catch return) catch return;
+    const ref_text = std.fmt.allocPrint(gpa, "@{s}", .{body[0..cut]}) catch return;
+    defer gpa.free(ref_text);
+    const ref = reference.parse(ref_text) catch return;
     const directory = if (cut < body.len) body[cut + 1 ..] else "";
 
     const found = store.locate(gpa, io, root, sys.env("TJ_JOURNAL"), ref) catch return;
@@ -293,6 +375,397 @@ fn listWithin(
         try found.append(gpa, name);
     }
     return found.toOwnedSlice(gpa);
+}
+
+// --- interaction annotations ----------------------------------------------
+
+const CommandTarget = struct {
+    journal: []u8,
+    number: u32,
+    subpath: []const u8,
+    syntactically_qualified: bool = false,
+
+    fn deinit(self: CommandTarget, gpa: std.mem.Allocator) void {
+        gpa.free(self.journal);
+    }
+};
+
+fn locateCommandTarget(
+    gpa: std.mem.Allocator,
+    io: Io,
+    root: store.Dir,
+    text: []const u8,
+) !CommandTarget {
+    if (reference.parse(text)) |parsed| {
+        const qualified = parsed.body == .qualified;
+        const found = try store.locate(gpa, io, root, sys.env("TJ_JOURNAL"), parsed);
+        defer found.deinit(gpa);
+        if (!found.exists) return error.NoSuchInteraction;
+        return .{
+            .journal = try gpa.dupe(u8, found.journal),
+            .number = found.number,
+            .subpath = parsed.subpath,
+            .syntactically_qualified = qualified,
+        };
+    } else |err| switch (err) {
+        error.Malformed => return error.BadReference,
+        error.NotAReference => {},
+    }
+
+    var root_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const root_len = try root.realPath(io, &root_buf);
+    const root_path = root_buf[0..root_len];
+    if (!std.mem.startsWith(u8, text, root_path) or text.len <= root_path.len or text[root_path.len] != '/') {
+        return error.BadReference;
+    }
+    const relative = text[root_path.len + 1 ..];
+    const journal_end = std.mem.indexOfScalar(u8, relative, '/') orelse return error.BadReference;
+    const journal = relative[0..journal_end];
+    const after_journal = relative[journal_end + 1 ..];
+    const number_end = std.mem.indexOfScalar(u8, after_journal, '/') orelse after_journal.len;
+    const number = std.fmt.parseInt(u32, after_journal[0..number_end], 10) catch return error.BadReference;
+    if (number == 0 or !store.interactionExists(io, root, journal, number)) return error.NoSuchInteraction;
+    const subpath = if (number_end < after_journal.len) after_journal[number_end + 1 ..] else "";
+    if (subpath.len != 0) {
+        const check = try std.fmt.allocPrint(gpa, "@1/{s}", .{subpath});
+        defer gpa.free(check);
+        _ = reference.parse(check) catch return error.BadReference;
+    }
+    return .{
+        .journal = try gpa.dupe(u8, journal),
+        .number = number,
+        .subpath = subpath,
+    };
+}
+
+fn requireMutationTarget(
+    gpa: std.mem.Allocator,
+    io: Io,
+    root: store.Dir,
+    text: []const u8,
+) !CommandTarget {
+    const current = try currentJournal();
+    const target = try locateCommandTarget(gpa, io, root, text);
+    errdefer target.deinit(gpa);
+    if (target.syntactically_qualified or !std.mem.eql(u8, target.journal, current)) {
+        return error.CrossJournalMutation;
+    }
+    return target;
+}
+
+fn requireInteraction(target: CommandTarget) !void {
+    if (target.subpath.len != 0) return error.BadReference;
+}
+
+fn printCanonical(out: *Io.Writer, current: ?[]const u8, journal: []const u8, number: u32) !void {
+    if (current) |id| {
+        if (std.mem.eql(u8, id, journal)) return out.print("@{d}", .{number});
+    }
+    try out.print("@{s}.{d}", .{ journal, number });
+}
+
+fn openCurrentMutation(
+    gpa: std.mem.Allocator,
+    io: Io,
+    home: ?[]const u8,
+) !struct { root: store.Dir, journal: []const u8, lock: Io.File } {
+    const journal = try currentJournal();
+    var root = try store.openRoot(io, home);
+    errdefer root.close(io);
+    const lock = try annotations.acquireMutationLock(io, root, journal);
+    errdefer lock.close(io);
+    try store.recoverPendingOutputRemovals(gpa, io, root, journal);
+    store.cleanupJournalTrash(io, root, journal);
+    return .{ .root = root, .journal = journal, .lock = lock };
+}
+
+fn pruneMissingAnnotations(
+    gpa: std.mem.Allocator,
+    io: Io,
+    root: store.Dir,
+    journal: []const u8,
+    manifest: *annotations.Manifest,
+) void {
+    var i: usize = 0;
+    while (i < manifest.entries.items.len) {
+        const number = manifest.entries.items[i].number;
+        if (store.interactionExists(io, root, journal, number)) {
+            i += 1;
+        } else {
+            manifest.removeInteraction(gpa, number);
+        }
+    }
+}
+
+fn nameCommand(
+    gpa: std.mem.Allocator,
+    io: Io,
+    home: ?[]const u8,
+    args: []const []const u8,
+    out: *Io.Writer,
+) !void {
+    if (args.len == 0) {
+        const current = try currentJournal();
+        var root = try store.openRoot(io, home);
+        defer root.close(io);
+        var manifest = try annotations.load(gpa, io, root, current);
+        defer manifest.deinit(gpa);
+        for (manifest.entries.items) |entry| {
+            const name = entry.name orelse continue;
+            if (!store.interactionExists(io, root, current, entry.number)) continue;
+            try out.print("{s}  @{d}\n", .{ name, entry.number });
+        }
+        return;
+    }
+
+    if (std.mem.eql(u8, args[0], "--remove")) {
+        if (args.len != 2) return error.BadArguments;
+        var mutation = try openCurrentMutation(gpa, io, home);
+        defer mutation.lock.close(io);
+        defer mutation.root.close(io);
+        var manifest = try annotations.load(gpa, io, mutation.root, mutation.journal);
+        defer manifest.deinit(gpa);
+        pruneMissingAnnotations(gpa, io, mutation.root, mutation.journal, &manifest);
+        try manifest.removeName(gpa, args[1]);
+        return annotations.save(gpa, io, mutation.root, mutation.journal, &manifest);
+    }
+    if (args.len > 2) return error.BadArguments;
+
+    var root = try store.openRoot(io, home);
+    defer root.close(io);
+    if (args.len == 1) {
+        const target = try locateCommandTarget(gpa, io, root, args[0]);
+        defer target.deinit(gpa);
+        try requireInteraction(target);
+        var manifest = try annotations.load(gpa, io, root, target.journal);
+        defer manifest.deinit(gpa);
+        const entry = manifest.findConst(target.number) orelse return;
+        const name = entry.name orelse return;
+        try out.print("{s}  ", .{name});
+        try printCanonical(out, sys.env("TJ_JOURNAL"), target.journal, target.number);
+        return out.writeAll("\n");
+    }
+
+    const target = try requireMutationTarget(gpa, io, root, args[0]);
+    defer target.deinit(gpa);
+    try requireInteraction(target);
+    var mutation = try openCurrentMutation(gpa, io, home);
+    defer mutation.lock.close(io);
+    defer mutation.root.close(io);
+    if (!store.interactionExists(io, mutation.root, mutation.journal, target.number)) return error.NoSuchInteraction;
+    var manifest = try annotations.load(gpa, io, mutation.root, mutation.journal);
+    defer manifest.deinit(gpa);
+    pruneMissingAnnotations(gpa, io, mutation.root, mutation.journal, &manifest);
+    try manifest.setName(gpa, target.number, args[1]);
+    try annotations.save(gpa, io, mutation.root, mutation.journal, &manifest);
+}
+
+fn tagCommand(
+    gpa: std.mem.Allocator,
+    io: Io,
+    home: ?[]const u8,
+    args: []const []const u8,
+    out: *Io.Writer,
+) !void {
+    if (args.len == 0) {
+        const current = try currentJournal();
+        var root = try store.openRoot(io, home);
+        defer root.close(io);
+        var manifest = try annotations.load(gpa, io, root, current);
+        defer manifest.deinit(gpa);
+        for (manifest.entries.items) |entry| {
+            if (entry.tags.items.len == 0 or !store.interactionExists(io, root, current, entry.number)) continue;
+            try out.print("@{d}", .{entry.number});
+            for (entry.tags.items) |tag| try out.print("  {s}", .{tag});
+            try out.writeAll("\n");
+        }
+        return;
+    }
+
+    const removing = std.mem.eql(u8, args[0], "--remove");
+    const target_i: usize = if (removing) 1 else 0;
+    if (args.len <= target_i) return error.MissingArgument;
+
+    if (!removing and args.len == 1) {
+        var root = try store.openRoot(io, home);
+        defer root.close(io);
+        const target = try locateCommandTarget(gpa, io, root, args[0]);
+        defer target.deinit(gpa);
+        try requireInteraction(target);
+        var manifest = try annotations.load(gpa, io, root, target.journal);
+        defer manifest.deinit(gpa);
+        const entry = manifest.findConst(target.number) orelse return;
+        if (entry.tags.items.len == 0) return;
+        try printCanonical(out, sys.env("TJ_JOURNAL"), target.journal, target.number);
+        for (entry.tags.items) |tag| try out.print("  {s}", .{tag});
+        return out.writeAll("\n");
+    }
+
+    if (args.len <= target_i + 1) return error.MissingArgument;
+    const target = blk: {
+        var root = try store.openRoot(io, home);
+        defer root.close(io);
+        break :blk try requireMutationTarget(gpa, io, root, args[target_i]);
+    };
+    defer target.deinit(gpa);
+    try requireInteraction(target);
+
+    var mutation = try openCurrentMutation(gpa, io, home);
+    defer mutation.lock.close(io);
+    defer mutation.root.close(io);
+    if (!store.interactionExists(io, mutation.root, mutation.journal, target.number)) return error.NoSuchInteraction;
+    var manifest = try annotations.load(gpa, io, mutation.root, mutation.journal);
+    defer manifest.deinit(gpa);
+    pruneMissingAnnotations(gpa, io, mutation.root, mutation.journal, &manifest);
+    for (args[target_i + 1 ..]) |tag| {
+        if (removing) {
+            try manifest.removeTag(gpa, target.number, tag);
+        } else {
+            try manifest.addTag(gpa, target.number, tag);
+        }
+    }
+    try annotations.save(gpa, io, mutation.root, mutation.journal, &manifest);
+}
+
+fn pinCommand(
+    gpa: std.mem.Allocator,
+    io: Io,
+    home: ?[]const u8,
+    args: []const []const u8,
+    out: *Io.Writer,
+) !void {
+    if (args.len == 0) {
+        const current = try currentJournal();
+        var root = try store.openRoot(io, home);
+        defer root.close(io);
+        var manifest = try annotations.load(gpa, io, root, current);
+        defer manifest.deinit(gpa);
+        for (manifest.entries.items) |entry| {
+            if (entry.pinned and store.interactionExists(io, root, current, entry.number)) {
+                try out.print("@{d}\n", .{entry.number});
+            }
+        }
+        return;
+    }
+
+    const removing = std.mem.eql(u8, args[0], "--remove");
+    const target_i: usize = if (removing) 1 else 0;
+    if (args.len != target_i + 1) return error.BadArguments;
+    const target = blk: {
+        var root = try store.openRoot(io, home);
+        defer root.close(io);
+        break :blk try requireMutationTarget(gpa, io, root, args[target_i]);
+    };
+    defer target.deinit(gpa);
+    try requireInteraction(target);
+
+    var mutation = try openCurrentMutation(gpa, io, home);
+    defer mutation.lock.close(io);
+    defer mutation.root.close(io);
+    if (!store.interactionExists(io, mutation.root, mutation.journal, target.number)) return error.NoSuchInteraction;
+    var manifest = try annotations.load(gpa, io, mutation.root, mutation.journal);
+    defer manifest.deinit(gpa);
+    pruneMissingAnnotations(gpa, io, mutation.root, mutation.journal, &manifest);
+    try manifest.setPinned(gpa, target.number, !removing);
+    try annotations.save(gpa, io, mutation.root, mutation.journal, &manifest);
+}
+
+fn removeCommand(
+    gpa: std.mem.Allocator,
+    io: Io,
+    home: ?[]const u8,
+    args: []const []const u8,
+    out: *Io.Writer,
+) !void {
+    if (args.len == 0) return error.MissingArgument;
+
+    var journal_selector: ?[]const u8 = null;
+    var force = false;
+    var interaction_arg: ?[]const u8 = null;
+    var i: usize = 0;
+    while (i < args.len) : (i += 1) {
+        if (std.mem.eql(u8, args[i], "--journal")) {
+            if (i + 1 >= args.len or journal_selector != null) return error.BadArguments;
+            i += 1;
+            journal_selector = args[i];
+        } else if (std.mem.eql(u8, args[i], "--force")) {
+            if (force) return error.BadArguments;
+            force = true;
+        } else {
+            if (interaction_arg != null) return error.BadArguments;
+            interaction_arg = args[i];
+        }
+    }
+
+    if (journal_selector) |selector| {
+        if (interaction_arg != null) return error.BadArguments;
+        if (sys.env("TJ_JOURNAL") != null) return error.InsideJournalRemoval;
+        var root = try store.openRoot(io, home);
+        defer root.close(io);
+        const journal = try store.findUniqueJournal(gpa, io, root, selector);
+        defer gpa.free(journal);
+
+        const interactions = try store.listInteractions(gpa, io, root, journal);
+        defer {
+            for (interactions) |info| info.deinit(gpa);
+            gpa.free(interactions);
+        }
+        if (!force) {
+            if (!sys.isTty(0)) return error.ConfirmationRequired;
+            try out.print("Remove journal {s} with {d} interaction{s}? [y/N] ", .{
+                journal,
+                interactions.len,
+                if (interactions.len == 1) "" else "s",
+            });
+            try out.flush();
+            var answer_buf: [32]u8 = undefined;
+            const read = try sys.read(0, &answer_buf);
+            const answer = std.mem.trim(u8, answer_buf[0..read], " \t\r\n");
+            if (!(std.ascii.eqlIgnoreCase(answer, "y") or std.ascii.eqlIgnoreCase(answer, "yes"))) {
+                return error.Cancelled;
+            }
+        }
+        return store.removeJournal(io, root, journal) catch |err| switch (err) {
+            error.ActiveJournal => error.ActiveJournal,
+            else => return err,
+        };
+    }
+
+    if (force or interaction_arg == null) return error.BadArguments;
+    const target = blk: {
+        var root = try store.openRoot(io, home);
+        defer root.close(io);
+        break :blk try requireMutationTarget(gpa, io, root, interaction_arg.?);
+    };
+    defer target.deinit(gpa);
+    const output_only = std.mem.eql(u8, target.subpath, "out");
+    if (target.subpath.len != 0 and !output_only) return error.UnsupportedRemoval;
+
+    var mutation = try openCurrentMutation(gpa, io, home);
+    defer mutation.lock.close(io);
+    defer mutation.root.close(io);
+    if (!std.mem.eql(u8, target.journal, mutation.journal)) return error.CrossJournalMutation;
+    if (!store.interactionExists(io, mutation.root, mutation.journal, target.number)) return error.NoSuchInteraction;
+    const highest = try store.highestNumber(gpa, io, mutation.root, mutation.journal) orelse
+        return error.NoSuchInteraction;
+    if (target.number >= highest) return error.CurrentInteraction;
+
+    var manifest = try annotations.load(gpa, io, mutation.root, mutation.journal);
+    defer manifest.deinit(gpa);
+    pruneMissingAnnotations(gpa, io, mutation.root, mutation.journal, &manifest);
+
+    if (output_only) {
+        return store.removeOutput(gpa, io, mutation.root, mutation.journal, target.number) catch |err| switch (err) {
+            error.InvalidMetadata => error.InvalidMetadata,
+            else => return err,
+        };
+    }
+
+    const staged = try store.stageInteractionRemoval(gpa, io, mutation.root, mutation.journal, target.number);
+    defer gpa.free(staged);
+    manifest.removeInteraction(gpa, target.number);
+    try annotations.save(gpa, io, mutation.root, mutation.journal, &manifest);
+    try store.finishStagedRemoval(io, mutation.root, staged);
 }
 
 // --- reading resources ------------------------------------------------------

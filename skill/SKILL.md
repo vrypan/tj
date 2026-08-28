@@ -32,12 +32,13 @@ tj hist
 ```
 
 ```
-    1  0      185  git status
-    2  1      12K  go test ./...
-    3  -      53K  vi parser.go
+    1   0      185  -                    -                     git status
+    2*  1      12K  @build-failure       bug,parser            go test ./...
+    3   -      53K  -                    -                     vi parser.go
 ```
 
-Columns: number, exit status, size of the output, first line of the command.
+Columns: number (followed by `*` when pinned), exit status, output size,
+interaction name, comma-separated tags, and first line of the command.
 The whole index is a few hundred tokens even for a long journal. The output
 of a single interaction can be 50K. **Read the index first and fetch
 deliberately.**
@@ -111,6 +112,19 @@ Two things will look wrong and are not:
 `@42` means this journal. Another journal is named by a suffix of its id:
 `@pgsd.42/out`. `$TJ_JOURNAL_SHORT` holds the current one's suffix. `tj
 journals` lists them, newest first.
+
+An interaction may also have a journal-local name, such as
+`@build-failure/out`; `@pgsd.build-failure/out` reads the same name from
+another journal. Names and numbers resolve through `tj cat` in the same way.
+An unresolved `@name` remains literal in an interactive command so it can
+still be an ordinary `@handle`.
+
+Names, tags, and pins are user annotations. Tags can be used to narrow the
+index with repeatable AND filters such as `tj hist --tag bug --tag parser`.
+Pins are markers only and imply neither retention nor deletion protection.
+Do not add, remove, or change annotations unless the user asks. Annotation
+writes and interaction/output deletion are current-journal-only; qualified
+references are read-only.
 
 ## Published resources
 

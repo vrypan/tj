@@ -84,14 +84,14 @@ Everything inside behaves as it always did. Check that recording works:
 
 ```sh
 echo hello
-tj hist                   # 1  0    echo hello
+tj hist                   # 1  0  6  -  -  echo hello
 tj cat @1                 # hello
 ```
 
 Each command becomes a numbered interaction:
 
 ```sh
-tj hist                   # interactions of this journal: number, status, command
+tj hist                   # number/pin, status, size, name, tags, command
 tj journals               # every journal, newest first
 tj current                # this journal's id
 tj last                   # the last interaction that completed
@@ -105,8 +105,10 @@ zsh, the canonical filesystem namespace uses dynamic named directories:
 
 ```sh
 ~[@42]/out                 # interaction 42 of this journal
+~[@build-failure]/out      # a named interaction in this journal
 ~[@-]/out                  # the last completed interaction
 ~[@pgsd.42]/out            # interaction 42 of another journal
+~[@pgsd.build-failure]/out # a named interaction in another journal
 ```
 
 For interactive use, `@REF` remains shorthand. When a shorthand reference is
@@ -115,6 +117,7 @@ component to canonical notation:
 
 ```text
 @42/out       -> ~[@42]/out
+@build-failure/out -> ~[@build-failure]/out
 @-/out        -> ~[@-]/out
 @pgsd.42/out  -> ~[@pgsd.42]/out
 ```
@@ -132,8 +135,10 @@ cat @-/cmd                                # the last command that completed
 | TJ reference | Canonical zsh name | Names |
 |---|---|---|
 | `@42` | `~[@42]` | interaction 42 of this journal |
+| `@build-failure` | `~[@build-failure]` | the interaction with that journal-local name |
 | `@-` | `~[@-]` | the last interaction that *completed*, never the one running |
 | `@pgsd.42` | `~[@pgsd.42]` | interaction 42 of another journal, by a suffix of its id |
+| `@pgsd.build-failure` | `~[@pgsd.build-failure]` | a named interaction in another journal |
 
 Suffixes rather than prefixes, because every journal started in the same
 millisecond shares the ULID's timestamp prefix and only the tail tells them
@@ -143,13 +148,70 @@ use; anything that must stay valid should use the full id.
 `~[@<TAB>` completes dynamic interaction names and appends `]`.
 `~[@42]/<TAB>` uses ordinary filesystem completion for `cmd`, `out`, `rc`,
 `files/`, and published resources. The shorthand `@42/<TAB>` remains
-available. Words that merely contain an `@`, quoted text, and `user@host` are
-left alone.
+available, including beneath assigned names. An unresolved name such as
+`@someone` stays literal, so commands that use `@handles` keep working. Words
+that merely contain an `@`, quoted text, and `user@host` are left alone.
 
 The accepted line shown by the terminal and stored in zsh history uses
 `~[@REF]`, never TJ's internal storage path. The journal's `cmd` preserves the
 original shorthand you typed; `meta.json` keeps a diagnostic `expanded_cmd`
 with the resolved filesystem path.
+
+## Names, tags, and pins
+
+Annotations belong to interactions in one journal:
+
+```sh
+tj name @42 build-failure       # assign or replace the one name
+tj name @42                     # query it
+tj name --remove build-failure
+tj name                         # list names in this journal
+
+tj tag @42 bug parser           # add normalized tags
+tj tag --remove @42 parser
+tj tag @42                      # query tags
+tj tag                          # list tagged interactions
+
+tj pin @42
+tj pin --remove @42
+tj pin                          # list pins
+```
+
+Names are lowercase words made from letters, digits, and internal hyphens;
+they begin with a letter and are unique within their journal. One interaction
+has at most one name. Tags are normalized to lowercase, may also contain `.`,
+`_`, and `-`, and are idempotent. Pins are idempotent markers only: they do not
+protect data from explicit deletion and do not define retention.
+
+`tj hist --tag bug --tag parser` shows interactions having every requested
+tag. History marks a pin with `*` after the number and shows the name and
+comma-separated tags before the command.
+
+Qualified references are read-only. You can read and complete
+`@pgsd.build-failure/out`, but names, tags, pins, and interaction/output
+deletion may modify only `$TJ_JOURNAL`. Continue that journal first if it needs
+changing; the mutation command is then recorded there like any other command.
+
+## Removing recorded data
+
+```sh
+tj rm @42                    # the entire interaction
+tj rm @42/out                # output and resources derived from it
+tj rm --journal pgsd         # prompt before removing an inactive journal
+tj rm --journal pgsd --force # non-interactive journal removal
+```
+
+Interaction and output removal are current-journal-only, do not prompt, and
+refuse the currently running interaction. Removing an interaction also removes
+its annotations and resources. Removing only `out` preserves `cmd`, `rc`, the
+interaction annotations, and other recording metadata, but removes every
+published resource derived from that output. Individual published resources
+cannot be removed because their bytes would still remain in `out`.
+
+An interaction removal leaves a numbering hole. The removal command itself is
+already a newer interaction in the same journal, so later numbers continue
+upward and the hole is never reused. Whole-journal removal is allowed only
+outside a tj writer, requires a unique selector, and refuses an active journal.
 
 ## Showing the reference in your prompt
 
@@ -404,7 +466,7 @@ addressability.
 
 Names are the program's choice, so they are checked: a name cannot escape
 its interaction directory, and cannot be `cmd`, `out`, `rc`, `meta.json` or
-`log`. Refusals are recorded in the journal log. `files/` is a convention,
+TJ's private removal bookkeeping. Refusals are recorded in the journal log. `files/` is a convention,
 not a rule — `err` is a resource too.
 
 Line endings are normalised: a program writes `\n`, the terminal turns it
@@ -478,6 +540,17 @@ The journal is plain files under `~/.tj` (override with `$TJ_HOME` or
 ├── rc         exit status; absent means the command never finished
 └── meta.json
 ```
+
+Journal-local user annotations are separate from recording metadata:
+
+```text
+~/.tj/<journal-ulid>/annotations.json
+```
+
+The versioned file maps interaction numbers to their optional name, sorted
+tags, and pin. It is replaced atomically under one short-lived journal mutation
+lock, so concurrent annotation child processes cannot lose one another's
+updates. Copying or deleting a journal carries its annotations with it.
 
 Writer coordination uses private `~/.tj/.locks/<journal-ulid>` files. The
 file's held advisory lock—not its mere presence—indicates a live writer.

@@ -20,6 +20,10 @@ pub const Subcommand = enum {
     replay,
     resolve,
     complete,
+    name,
+    tag,
+    pin,
+    rm,
 
     pub fn parse(name: []const u8) ?Subcommand {
         if (std.mem.eql(u8, name, "history")) return .hist;

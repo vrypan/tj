@@ -36,6 +36,15 @@ const usage =
     \\                  --from N, --to N)
     \\  resolve <ref>  print the path a reference names
     \\  complete <ref> completion candidates for a partial reference
+    \\  name [@ref [name] | --remove name]
+    \\                  name, query, remove, or list interaction names
+    \\  tag [@ref [tag ...] | --remove @ref tag ...]
+    \\                  tag, query, remove, or list interaction tags
+    \\  pin [@ref | --remove @ref]
+    \\                  pin, unpin, or list pinned interactions
+    \\  rm <@ref | @ref/out>
+    \\  rm --journal <id> [--force]
+    \\                  remove recorded data or an inactive journal
     \\
     \\Flags:
     \\  --home <dir>   journal location (default: $TJ_HOME, else ~/.tj)
@@ -47,6 +56,8 @@ const usage =
     \\  @42/out        interaction 42 of this journal
     \\  @-/out         the last interaction that completed
     \\  @pgsd.42/out   interaction 42 of another journal, by a suffix of its id
+    \\  @build-failure/out  a named interaction in this journal
+    \\  @pgsd.build-failure/out  a named interaction in another journal
     \\  ~[@42]/out     canonical zsh form; unquoted @42/out is shorthand
     \\
     \\Recording and reference expansion need the shell integration:
@@ -95,6 +106,20 @@ pub fn main(init: std.process.Init) !u8 {
                     error.NoSuchInteraction => "tj: no such interaction\n",
                     error.NoSuchResource => "tj: no such resource or file\n",
                     error.InsideJournal => "tj: cannot replay inside a live journal writer, because it would record the replay; run it from a shell that is not under tj\n",
+                    error.CrossJournalMutation => "tj: writes and interaction deletion are limited to the current journal\n",
+                    error.InvalidName => "tj: invalid interaction name\n",
+                    error.InvalidTag => "tj: invalid tag\n",
+                    error.NameTaken => "tj: that interaction name is already in use\n",
+                    error.InvalidAnnotations => "tj: invalid annotations.json; refusing to overwrite it\n",
+                    error.UnsupportedRemoval => "tj: only an interaction or its out may be removed\n",
+                    error.CurrentInteraction => "tj: cannot remove the currently running interaction\n",
+                    error.ActiveJournal => "tj: cannot remove a journal while it is being written\n",
+                    error.AmbiguousJournal => "tj: journal suffix is ambiguous\n",
+                    error.ConfirmationRequired => "tj: use --force to remove a journal non-interactively\n",
+                    error.Cancelled => "tj: journal removal cancelled\n",
+                    error.BadArguments => "tj: invalid arguments for this subcommand\n",
+                    error.InvalidMetadata => "tj: invalid interaction metadata; refusing partial removal\n",
+                    error.InsideJournalRemoval => "tj: remove a whole journal only from outside a tj writer\n",
                     error.FileNotFound => "tj: no journal yet\n",
                     else => "tj: cannot read the journal\n",
                 });

@@ -100,25 +100,39 @@ _tj_valid_reference_head() {
   emulate -L zsh
   setopt extendedglob
 
-  local head=$1 body qualifier digits significant
+  local head=$1 body qualifier target significant
   [[ $head == @- ]] && return 0
   [[ $head == @?* ]] || return 1
   body=${head#@}
 
   if [[ $body == *.* ]]; then
     qualifier=${body%.*}
-    digits=${body##*.}
+    target=${body##*.}
     [[ $qualifier == [A-Za-z0-9]## && ${#qualifier} -le 26 ]] || return 1
   else
-    digits=$body
+    target=$body
   fi
 
-  [[ $digits == [0-9]## ]] || return 1
-  significant=${digits##0#}
-  [[ -n $significant ]] || return 1
-  (( ${#significant} < 10 )) && return 0
-  (( ${#significant} == 10 )) || return 1
-  [[ $significant == 4294967295 || $significant < 4294967295 ]]
+  if [[ $target == [0-9]## ]]; then
+    significant=${target##0#}
+    [[ -n $significant ]] || return 1
+    (( ${#significant} < 10 )) && return 0
+    (( ${#significant} == 10 )) || return 1
+    [[ $significant == 4294967295 || $significant < 4294967295 ]]
+    return
+  fi
+
+  # Interaction names are deliberately conservative and disjoint from
+  # numbers. Zig remains authoritative; this mirror only decides whether a
+  # shell word is worth asking `tj resolve` about.
+  (( ${#target} >= 1 && ${#target} <= 63 )) || return 1
+  [[ $target == [a-z]* && $target == [a-z0-9-]## && $target != *- ]]
+}
+
+_tj_reference_head_is_name() {
+  local body=${1#@} target
+  target=${body##*.}
+  [[ $target != [0-9]## && $target != - ]]
 }
 
 # Rewrites valid unquoted shorthand in $1 into canonical ~[...] notation,
@@ -171,8 +185,14 @@ _tj_canonicalize_shorthand() {
         suffix=${word#$head}
         if (( at_word_start )) && [[ $head == @* ]] &&
            _tj_valid_reference_head "$head"; then
-          out+="~[$head]$suffix"
-          changed=1
+          if ! _tj_reference_head_is_name "$head" ||
+             command "$(_tj_bin)" resolve "$head" >/dev/null 2>&1; then
+            out+="~[$head]$suffix"
+            changed=1
+          else
+            # Unassigned names stay literal for commands that use @handles.
+            out+=$word
+          fi
         else
           # Never drop a word: malformed shorthand reaches the command
           # literally. A well-formed but missing name is rejected later by zsh.

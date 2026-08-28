@@ -2,8 +2,10 @@
 //! filesystem's names for files.
 //!
 //!     @42/out                          interaction 42, current journal
+//!     @build-failure/out               named interaction, current journal
 //!     @-/out                           the last completed interaction
 //!     @01knxf1n5ffvk9jsm8wve1pgsd.42   another journal, by full id
+//!     @pgsd.build-failure/out           named interaction in another journal
 //!     @pgsd.42/files/data.csv          the same, by a suffix of it
 //!
 //! Suffixes rather than prefixes: every journal started in the same
@@ -14,16 +16,22 @@
 //! store's job, since only it knows what is on disk.
 
 const std = @import("std");
+const annotations = @import("annotations.zig");
 
 pub const max_suffix = 26;
+
+pub const Target = union(enum) {
+    number: u32,
+    name: []const u8,
+};
 
 pub const Body = union(enum) {
     /// `@-`
     previous,
-    /// `@N`
-    current: u32,
-    /// `@SUFFIX.N`
-    qualified: struct { suffix: []const u8, number: u32 },
+    /// `@N` or `@NAME`
+    current: Target,
+    /// `@SUFFIX.N` or `@SUFFIX.NAME`
+    qualified: struct { suffix: []const u8, target: Target },
 };
 
 pub const Reference = struct {
@@ -68,16 +76,25 @@ fn parseBody(text: []const u8) Error!Body {
 
     if (std.mem.indexOfScalar(u8, text, '.')) |dot| {
         const suffix = text[0..dot];
-        const digits = text[dot + 1 ..];
+        const target = text[dot + 1 ..];
         if (suffix.len == 0 or suffix.len > max_suffix) return error.NotAReference;
         for (suffix) |char| if (!isBase32(char)) return error.NotAReference;
-        return .{ .qualified = .{ .suffix = suffix, .number = try parseNumber(digits) } };
+        return .{ .qualified = .{ .suffix = suffix, .target = try parseTarget(target) } };
     }
 
-    // An all-digit reference always means the current journal and is never
-    // read as a journal suffix.
-    for (text) |char| if (!std.ascii.isDigit(char)) return error.NotAReference;
-    return .{ .current = try parseNumber(text) };
+    return .{ .current = try parseTarget(text) };
+}
+
+fn parseTarget(text: []const u8) Error!Target {
+    if (text.len == 0) return error.Malformed;
+    var all_digits = true;
+    for (text) |char| if (!std.ascii.isDigit(char)) {
+        all_digits = false;
+        break;
+    };
+    if (all_digits) return .{ .number = try parseNumber(text) };
+    if (annotations.validName(text)) return .{ .name = text };
+    return error.NotAReference;
 }
 
 fn parseNumber(text: []const u8) Error!u32 {
@@ -119,14 +136,14 @@ pub fn looksLikeReference(word: []const u8) bool {
 
 test "plain interaction references" {
     const ref = try parse("@42");
-    try std.testing.expectEqual(@as(u32, 42), ref.body.current);
+    try std.testing.expectEqual(@as(u32, 42), ref.body.current.number);
     try std.testing.expectEqualStrings("", ref.subpath);
     try std.testing.expect(!ref.trailing_slash);
 }
 
 test "a subpath is kept verbatim" {
     const ref = try parse("@42/files/data.csv");
-    try std.testing.expectEqual(@as(u32, 42), ref.body.current);
+    try std.testing.expectEqual(@as(u32, 42), ref.body.current.number);
     try std.testing.expectEqualStrings("files/data.csv", ref.subpath);
     try std.testing.expect(ref.trailing_slash);
 }
@@ -145,18 +162,28 @@ test "the previous interaction" {
 test "journal-qualified references" {
     const ref = try parse("@pgsd.42/out");
     try std.testing.expectEqualStrings("pgsd", ref.body.qualified.suffix);
-    try std.testing.expectEqual(@as(u32, 42), ref.body.qualified.number);
+    try std.testing.expectEqual(@as(u32, 42), ref.body.qualified.target.number);
     try std.testing.expectEqualStrings("out", ref.subpath);
 
     const full = try parse("@01knxf1n5ffvk9jsm8wve1pgsd.7");
     try std.testing.expectEqualStrings("01knxf1n5ffvk9jsm8wve1pgsd", full.body.qualified.suffix);
-    try std.testing.expectEqual(@as(u32, 7), full.body.qualified.number);
+    try std.testing.expectEqual(@as(u32, 7), full.body.qualified.target.number);
+}
+
+test "interaction names share the reference namespace" {
+    const current = try parse("@build-failure/out");
+    try std.testing.expectEqualStrings("build-failure", current.body.current.name);
+    try std.testing.expectEqualStrings("out", current.subpath);
+
+    const qualified = try parse("@pgsd.build-failure/out");
+    try std.testing.expectEqualStrings("pgsd", qualified.body.qualified.suffix);
+    try std.testing.expectEqualStrings("build-failure", qualified.body.qualified.target.name);
 }
 
 test "an all-digit reference is never read as a journal suffix" {
     const ref = try parse("@1234567890");
     try std.testing.expect(ref.body == .current);
-    try std.testing.expectEqual(@as(u32, 1234567890), ref.body.current);
+    try std.testing.expectEqual(@as(u32, 1234567890), ref.body.current.number);
 }
 
 test "ordinary words are left alone" {
@@ -164,8 +191,8 @@ test "ordinary words are left alone" {
     for ([_][]const u8{
         "user@host",
         "@",
-        "@foo",
-        "@foo/bar",
+        "@Uppercase",
+        "@bad_name/bar",
         "git@github.com:me/repo.git",
         "me@example.com",
         "",

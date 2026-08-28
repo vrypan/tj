@@ -25,6 +25,7 @@ const File = std.Io.File;
 const sys = @import("sys.zig");
 const ulid = @import("ulid.zig");
 const altscreen = @import("altscreen.zig");
+const annotations = @import("annotations.zig");
 
 /// The journal holds whatever appears on the terminal, which includes secrets.
 /// It gets the same treatment as shell history.
@@ -42,7 +43,7 @@ const max_resources = 32;
 
 /// tj's own bookkeeping, which a program may not overwrite by publishing a
 /// resource with the same name.
-const reserved_names = [_][]const u8{ "cmd", "out", "rc", "meta.json", "log" };
+const reserved_names = [_][]const u8{ "cmd", "out", "rc", "meta.json", "out.removed", ".meta.tmp", "log" };
 
 pub const Store = struct {
     io: Io,
@@ -781,10 +782,18 @@ pub fn locate(
     };
     errdefer gpa.free(journal);
 
-    const number: u32 = switch (ref.body) {
-        .current => |n| n,
-        .qualified => |q| q.number,
-        .previous => try lastCompleted(gpa, io, root, journal) orelse return error.NothingCompleted,
+    const target: reference.Target = switch (ref.body) {
+        .current => |value| value,
+        .qualified => |q| q.target,
+        .previous => .{ .number = try lastCompleted(gpa, io, root, journal) orelse return error.NothingCompleted },
+    };
+    const number: u32 = switch (target) {
+        .number => |value| value,
+        .name => |name| blk: {
+            var manifest = try annotations.load(gpa, io, root, journal);
+            defer manifest.deinit(gpa);
+            break :blk manifest.numberForName(name) orelse return error.NoSuchInteraction;
+        },
     };
 
     var base: [std.fs.max_path_bytes]u8 = undefined;
@@ -877,6 +886,324 @@ pub fn listNumbers(gpa: std.mem.Allocator, io: Io, root: Dir, journal: []const u
 
     std.mem.sort(u32, found.items, {}, std.sort.asc(u32));
     return found.toOwnedSlice(gpa);
+}
+
+pub fn interactionExists(io: Io, root: Dir, journal: []const u8, number: u32) bool {
+    var path_buf: [64]u8 = undefined;
+    const path = std.fmt.bufPrint(&path_buf, "{s}/{d}", .{ journal, number }) catch return false;
+    var dir = root.openDir(io, path, .{}) catch return false;
+    dir.close(io);
+    return true;
+}
+
+pub fn highestNumber(gpa: std.mem.Allocator, io: Io, root: Dir, journal: []const u8) !?u32 {
+    const numbers = try listNumbers(gpa, io, root, journal);
+    defer gpa.free(numbers);
+    return if (numbers.len == 0) null else numbers[numbers.len - 1];
+}
+
+/// Makes an interaction disappear atomically from the journal namespace.
+/// Annotation cleanup happens after this rename; stale annotations are hidden
+/// by readers and pruned by the next mutation if that later write fails.
+pub fn stageInteractionRemoval(
+    gpa: std.mem.Allocator,
+    io: Io,
+    root: Dir,
+    journal: []const u8,
+    number: u32,
+) ![]u8 {
+    var journal_dir = try root.openDir(io, journal, .{ .follow_symlinks = false });
+    defer journal_dir.close(io);
+    _ = journal_dir.createDir(io, ".trash", dir_permissions) catch |err| switch (err) {
+        error.PathAlreadyExists => {},
+        else => return err,
+    };
+    var trash = try journal_dir.openDir(io, ".trash", .{ .follow_symlinks = false });
+    defer trash.close(io);
+
+    const staged = try std.fmt.allocPrint(gpa, "{s}/.trash/{d}.interaction", .{ journal, number });
+    errdefer gpa.free(staged);
+    var trash_name_buf: [32]u8 = undefined;
+    const trash_name = try std.fmt.bufPrint(&trash_name_buf, "{d}.interaction", .{number});
+    try deleteOptionalEntry(io, trash, trash_name);
+    var number_buf: [16]u8 = undefined;
+    const source = try std.fmt.bufPrint(&number_buf, "{d}", .{number});
+    var source_dir = try journal_dir.openDir(io, source, .{ .follow_symlinks = false });
+    source_dir.close(io);
+    try journal_dir.rename(source, trash, trash_name, io);
+    return staged;
+}
+
+pub fn finishStagedRemoval(io: Io, root: Dir, staged: []const u8) !void {
+    try root.deleteTree(io, staged);
+}
+
+pub fn cleanupJournalTrash(io: Io, root: Dir, journal: []const u8) void {
+    var path_buf: [64]u8 = undefined;
+    const path = std.fmt.bufPrint(&path_buf, "{s}/.trash", .{journal}) catch return;
+    root.deleteTree(io, path) catch {};
+}
+
+pub fn recoverPendingOutputRemovals(
+    gpa: std.mem.Allocator,
+    io: Io,
+    root: Dir,
+    journal: []const u8,
+) !void {
+    const numbers = try listNumbers(gpa, io, root, journal);
+    defer gpa.free(numbers);
+    for (numbers) |number| {
+        var marker_buf: [96]u8 = undefined;
+        const marker_path = try std.fmt.bufPrint(&marker_buf, "{s}/{d}/out.removed", .{ journal, number });
+        const marker = root.openFile(io, marker_path, .{}) catch |err| switch (err) {
+            error.FileNotFound => continue,
+            else => return err,
+        };
+        marker.close(io);
+        if (outputRemovalComplete(gpa, io, root, journal, number)) continue;
+        try removeOutput(gpa, io, root, journal, number);
+    }
+}
+
+fn outputRemovalComplete(
+    gpa: std.mem.Allocator,
+    io: Io,
+    root: Dir,
+    journal: []const u8,
+    number: u32,
+) bool {
+    var path_buf: [96]u8 = undefined;
+    const out_path = std.fmt.bufPrint(&path_buf, "{s}/{d}/out", .{ journal, number }) catch return false;
+    if (root.openFile(io, out_path, .{})) |file| {
+        file.close(io);
+        return false;
+    } else |_| {}
+
+    const meta_path = std.fmt.bufPrint(&path_buf, "{s}/{d}/meta.json", .{ journal, number }) catch return false;
+    const text = root.readFileAlloc(io, meta_path, gpa, .limited(4 * 1024 * 1024)) catch return false;
+    defer gpa.free(text);
+    const parsed = std.json.parseFromSlice(std.json.Value, gpa, text, .{}) catch return false;
+    defer parsed.deinit();
+    if (parsed.value != .object or parsed.value.object.get("resources") != null) return false;
+    const removed = parsed.value.object.get("out_removed") orelse return false;
+    return removed == .bool and removed.bool;
+}
+
+/// Removes output and every resource derived from it. `out.removed` is the
+/// one-way boundary: once it exists, retrying this function only completes the
+/// same deletion.
+pub fn removeOutput(
+    gpa: std.mem.Allocator,
+    io: Io,
+    root: Dir,
+    journal: []const u8,
+    number: u32,
+) !void {
+    var journal_dir = try root.openDir(io, journal, .{ .follow_symlinks = false });
+    defer journal_dir.close(io);
+    var number_buf: [16]u8 = undefined;
+    const interaction_name = try std.fmt.bufPrint(&number_buf, "{d}", .{number});
+    var interaction = try journal_dir.openDir(io, interaction_name, .{ .follow_symlinks = false });
+    defer interaction.close(io);
+
+    const meta_text = interaction.readFileAlloc(io, "meta.json", gpa, .limited(4 * 1024 * 1024)) catch |err| switch (err) {
+        error.FileNotFound => return error.InvalidMetadata,
+        else => return err,
+    };
+    defer gpa.free(meta_text);
+    var parsed = std.json.parseFromSlice(std.json.Value, gpa, meta_text, .{}) catch return error.InvalidMetadata;
+    defer parsed.deinit();
+    if (parsed.value != .object) return error.InvalidMetadata;
+
+    const resources_value = parsed.value.object.get("resources");
+    if (resources_value) |resources| {
+        if (resources != .object) return error.InvalidMetadata;
+        var validate = resources.object.iterator();
+        while (validate.next()) |item| {
+            if (!validResourcePath(item.key_ptr.*)) return error.InvalidMetadata;
+        }
+    }
+
+    try validateOptionalFile(io, interaction, "out");
+    if (resources_value) |resources| {
+        var validate = resources.object.iterator();
+        while (validate.next()) |item| try validateOptionalFile(io, interaction, item.key_ptr.*);
+    }
+
+    const marker = interaction.createFile(io, "out.removed", .{
+        .exclusive = true,
+        .permissions = file_permissions,
+    }) catch |err| switch (err) {
+        error.PathAlreadyExists => blk: {
+            const stat = try interaction.statFile(io, "out.removed", .{ .follow_symlinks = false });
+            if (stat.kind != .file) return error.InvalidMetadata;
+            break :blk null;
+        },
+        else => return err,
+    };
+    if (marker) |file| {
+        try file.sync(io);
+        file.close(io);
+    }
+
+    _ = journal_dir.createDir(io, ".trash", dir_permissions) catch |err| switch (err) {
+        error.PathAlreadyExists => {},
+        else => return err,
+    };
+    var trash = try journal_dir.openDir(io, ".trash", .{ .iterate = true, .follow_symlinks = false });
+    defer trash.close(io);
+
+    var out_dest_buf: [32]u8 = undefined;
+    const out_dest = try std.fmt.bufPrint(&out_dest_buf, "{d}.0", .{number});
+    try stageOptional(io, interaction, trash, "out", out_dest);
+    if (resources_value) |resources| {
+        var it = resources.object.iterator();
+        var index: usize = 1;
+        while (it.next()) |item| : (index += 1) {
+            var dest_buf: [32]u8 = undefined;
+            const dest = try std.fmt.bufPrint(&dest_buf, "{d}.{d}", .{ number, index });
+            try stageOptional(io, interaction, trash, item.key_ptr.*, dest);
+            removeEmptyResourceParents(io, interaction, item.key_ptr.*);
+        }
+    }
+
+    _ = parsed.value.object.orderedRemove("resources");
+    try parsed.value.object.put(parsed.arena.allocator(), "out_removed", .{ .bool = true });
+    try writeJsonAtomic(gpa, io, interaction, "meta.json", ".meta.tmp", parsed.value);
+
+    // All staged paths have names beginning with this interaction number. The
+    // mutation lock prevents another remover from sharing the staging area.
+    var it = trash.iterate();
+    var prefix_buf: [24]u8 = undefined;
+    const prefix = try std.fmt.bufPrint(&prefix_buf, "{d}.", .{number});
+    while (try it.next(io)) |entry| {
+        if (!std.mem.startsWith(u8, entry.name, prefix)) continue;
+        deleteOptionalEntry(io, trash, entry.name) catch {};
+    }
+}
+
+/// Moves one output-derived file using directory handles opened without
+/// following symlinks. Metadata is user-visible and may have been edited, so
+/// lexical path validation alone is not a sufficient deletion boundary.
+fn stageOptional(io: Io, source_dir: Dir, trash: Dir, source_subpath: []const u8, index: []const u8) !void {
+    if (std.mem.indexOfScalar(u8, source_subpath, '/')) |cut| {
+        var child = source_dir.openDir(io, source_subpath[0..cut], .{ .follow_symlinks = false }) catch |err| switch (err) {
+            error.FileNotFound => return,
+            error.NotDir, error.SymLinkLoop => return error.InvalidMetadata,
+            else => return err,
+        };
+        defer child.close(io);
+        return stageOptional(io, child, trash, source_subpath[cut + 1 ..], index);
+    }
+
+    const stat = source_dir.statFile(io, source_subpath, .{ .follow_symlinks = false }) catch |err| switch (err) {
+        error.FileNotFound => return,
+        else => return err,
+    };
+    if (stat.kind != .file) return error.InvalidMetadata;
+
+    var dest_buf: [64]u8 = undefined;
+    const dest = try std.fmt.bufPrint(&dest_buf, "{s}", .{index});
+    try deleteOptionalEntry(io, trash, dest);
+    source_dir.rename(source_subpath, trash, dest, io) catch |err| switch (err) {
+        error.FileNotFound => return,
+        else => return err,
+    };
+}
+
+fn validateOptionalFile(io: Io, source_dir: Dir, source_subpath: []const u8) !void {
+    if (std.mem.indexOfScalar(u8, source_subpath, '/')) |cut| {
+        var child = source_dir.openDir(io, source_subpath[0..cut], .{ .follow_symlinks = false }) catch |err| switch (err) {
+            error.FileNotFound => return,
+            error.NotDir, error.SymLinkLoop => return error.InvalidMetadata,
+            else => return err,
+        };
+        defer child.close(io);
+        return validateOptionalFile(io, child, source_subpath[cut + 1 ..]);
+    }
+    const stat = source_dir.statFile(io, source_subpath, .{ .follow_symlinks = false }) catch |err| switch (err) {
+        error.FileNotFound => return,
+        else => return err,
+    };
+    if (stat.kind != .file) return error.InvalidMetadata;
+}
+
+fn deleteOptionalEntry(io: Io, dir: Dir, name: []const u8) !void {
+    const stat = dir.statFile(io, name, .{ .follow_symlinks = false }) catch |err| switch (err) {
+        error.FileNotFound => return,
+        else => return err,
+    };
+    switch (stat.kind) {
+        .directory => try dir.deleteTree(io, name),
+        else => try dir.deleteFile(io, name),
+    }
+}
+
+fn removeEmptyResourceParents(io: Io, interaction: Dir, resource: []const u8) void {
+    var end = std.mem.lastIndexOfScalar(u8, resource, '/') orelse return;
+    while (true) {
+        interaction.deleteDir(io, resource[0..end]) catch return;
+        end = std.mem.lastIndexOfScalar(u8, resource[0..end], '/') orelse return;
+    }
+}
+
+fn writeJsonAtomic(
+    gpa: std.mem.Allocator,
+    io: Io,
+    dir: Dir,
+    final_name: []const u8,
+    temp_name: []const u8,
+    value: std.json.Value,
+) !void {
+    var bytes: std.ArrayList(u8) = .empty;
+    defer bytes.deinit(gpa);
+    var allocating = Io.Writer.Allocating.fromArrayList(gpa, &bytes);
+    defer bytes = allocating.toArrayList();
+    try std.json.Stringify.value(value, .{}, &allocating.writer);
+    try allocating.writer.writeAll("\n");
+
+    dir.deleteFile(io, temp_name) catch {};
+    const file = try dir.createFile(io, temp_name, .{ .permissions = file_permissions });
+    var renamed = false;
+    defer if (!renamed) dir.deleteFile(io, temp_name) catch {};
+    errdefer file.close(io);
+    try file.writePositionalAll(io, allocating.writer.buffered(), 0);
+    try file.sync(io);
+    file.close(io);
+    try dir.rename(temp_name, dir, final_name, io);
+    renamed = true;
+}
+
+pub fn removeJournal(io: Io, root: Dir, journal: []const u8) !void {
+    const lock = acquireJournalLock(io, root, journal) catch |err| switch (err) {
+        error.JournalLocked => return error.ActiveJournal,
+        else => return err,
+    };
+    var lock_open = true;
+    defer if (lock_open) lock.close(io);
+    const mutation_lock = try annotations.acquireMutationLock(io, root, journal);
+    var mutation_lock_open = true;
+    defer if (mutation_lock_open) mutation_lock.close(io);
+
+    var journal_dir = try root.openDir(io, journal, .{ .follow_symlinks = false });
+    journal_dir.close(io);
+    _ = root.createDir(io, ".trash", dir_permissions) catch |err| switch (err) {
+        error.PathAlreadyExists => {},
+        else => return err,
+    };
+    var trash = try root.openDir(io, ".trash", .{ .follow_symlinks = false });
+    defer trash.close(io);
+    var staged_buf: [64]u8 = undefined;
+    const staged = try std.fmt.bufPrint(&staged_buf, "{s}.journal", .{journal});
+    try deleteOptionalEntry(io, trash, staged);
+    try root.rename(journal, trash, staged, io);
+    try deleteOptionalEntry(io, trash, staged);
+    mutation_lock.close(io);
+    mutation_lock_open = false;
+    lock.close(io);
+    lock_open = false;
+    annotations.removeMutationLockFile(io, root, journal);
+    removeLockFile(io, root, journal);
 }
 
 fn parseInteractionDirName(name: []const u8) ?u32 {
@@ -1036,11 +1363,16 @@ pub fn listResources(gpa: std.mem.Allocator, io: Io, root: Dir, journal: []const
 }
 
 fn isPrivate(name: []const u8) bool {
-    return std.mem.eql(u8, name, "meta.json") or std.mem.eql(u8, name, "log");
+    return std.mem.eql(u8, name, "meta.json") or
+        std.mem.eql(u8, name, "out.removed") or
+        std.mem.eql(u8, name, ".meta.tmp") or
+        std.mem.eql(u8, name, "log");
 }
 
 test "tj's bookkeeping files are not part of the namespace" {
     try std.testing.expect(isPrivate("meta.json"));
+    try std.testing.expect(isPrivate("out.removed"));
+    try std.testing.expect(isPrivate(".meta.tmp"));
     try std.testing.expect(isPrivate("log"));
     try std.testing.expect(!isPrivate("cmd"));
     try std.testing.expect(!isPrivate("out"));
@@ -1105,10 +1437,10 @@ test "resource paths that must be refused" {
         "./x",    "..",
         // Overwriting tj's own bookkeeping.
                             "cmd",         "out",
-        "rc",     "meta.json",              "log",
+        "rc",     "meta.json",              "out.removed", ".meta.tmp",
+        "log",
         // Nothing, or control characters.
-                "",
-        "a\x00b", "a\nb",
+           "",                       "a\x00b",      "a\nb",
     }) |path| {
         try std.testing.expect(!validResourcePath(path));
     }
@@ -1247,6 +1579,112 @@ test "metadata preserves every accepted resource beyond eight kibibytes" {
         try std.testing.expectEqualStrings(long_mime, entry.get("mime").?.string);
         try std.testing.expectEqual(i % 3 == 0, entry.get("truncated").?.bool);
     }
+}
+
+test "output removal redacts out and published resources but keeps the interaction" {
+    const io = std.testing.io;
+    const gpa = std.testing.allocator;
+    var tmp = std.testing.tmpDir(.{ .iterate = true });
+    defer tmp.cleanup();
+    var root_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const root_len = try tmp.dir.realPath(io, &root_buf);
+
+    var journal = try Store.createJournal(gpa, io, root_buf[0..root_len]);
+    const id = journal.journal;
+    journal.begin("publish", null);
+    journal.beginResource("files/report.txt", "text/plain");
+    journal.append("published bytes\r\n");
+    journal.endResource();
+    journal.finish(0);
+    journal.begin("later", null);
+    journal.finish(0);
+    journal.close();
+
+    var root = try tmp.dir.openDir(io, ".", .{ .iterate = true });
+    defer root.close(io);
+    var marker_path_buf: [96]u8 = undefined;
+    const marker_path = try std.fmt.bufPrint(&marker_path_buf, "{s}/1/out.removed", .{id});
+    try root.writeFile(io, .{ .sub_path = marker_path, .data = "", .flags = .{ .permissions = file_permissions } });
+    try recoverPendingOutputRemovals(gpa, io, root, &id);
+
+    var path_buf: [96]u8 = undefined;
+    const interaction_path = try std.fmt.bufPrint(&path_buf, "{s}/1", .{id});
+    var interaction = try root.openDir(io, interaction_path, .{});
+    defer interaction.close(io);
+    try std.testing.expectError(error.FileNotFound, interaction.openFile(io, "out", .{}));
+    try std.testing.expectError(error.FileNotFound, interaction.openFile(io, "files/report.txt", .{}));
+    var cmd = try interaction.openFile(io, "cmd", .{});
+    cmd.close(io);
+    var rc = try interaction.openFile(io, "rc", .{});
+    rc.close(io);
+    var marker = try interaction.openFile(io, "out.removed", .{});
+    marker.close(io);
+
+    const meta = try interaction.readFileAlloc(io, "meta.json", gpa, .limited(64 * 1024));
+    defer gpa.free(meta);
+    const parsed = try std.json.parseFromSlice(std.json.Value, gpa, meta, .{});
+    defer parsed.deinit();
+    try std.testing.expect(parsed.value.object.get("resources") == null);
+    try std.testing.expect(parsed.value.object.get("out_removed").?.bool);
+}
+
+test "output removal refuses resource paths that traverse symlinks" {
+    const io = std.testing.io;
+    const gpa = std.testing.allocator;
+    var tmp = std.testing.tmpDir(.{ .iterate = true });
+    defer tmp.cleanup();
+    var root_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const root_len = try tmp.dir.realPath(io, &root_buf);
+
+    try tmp.dir.createDir(io, "outside", dir_permissions);
+    try tmp.dir.writeFile(io, .{
+        .sub_path = "outside/report.txt",
+        .data = "must survive",
+        .flags = .{ .permissions = file_permissions },
+    });
+
+    var journal = try Store.createJournal(gpa, io, root_buf[0..root_len]);
+    const id = journal.journal;
+    journal.begin("publish", null);
+    journal.beginResource("files/report.txt", "text/plain");
+    journal.append("recorded\r\n");
+    journal.endResource();
+    journal.finish(0);
+    journal.close();
+
+    var root = try tmp.dir.openDir(io, ".", .{ .iterate = true });
+    defer root.close(io);
+    var interaction_path_buf: [96]u8 = undefined;
+    const interaction_path = try std.fmt.bufPrint(&interaction_path_buf, "{s}/1", .{id});
+    var interaction = try root.openDir(io, interaction_path, .{});
+    defer interaction.close(io);
+    try interaction.deleteTree(io, "files");
+    try interaction.symLink(io, "../../outside", "files", .{ .is_directory = true });
+
+    try std.testing.expectError(error.InvalidMetadata, removeOutput(gpa, io, root, &id, 1));
+    var out = try interaction.openFile(io, "out", .{});
+    out.close(io);
+    try std.testing.expectError(error.FileNotFound, interaction.openFile(io, "out.removed", .{}));
+    const outside = try root.readFileAlloc(io, "outside/report.txt", gpa, .limited(64));
+    defer gpa.free(outside);
+    try std.testing.expectEqualStrings("must survive", outside);
+}
+
+test "staged interaction removal leaves a numbering hole" {
+    const io = std.testing.io;
+    const gpa = std.testing.allocator;
+    var tmp = std.testing.tmpDir(.{ .iterate = true });
+    defer tmp.cleanup();
+    const id = ulid.encode(30, .{9} ** 10);
+    try makeTestJournal(&tmp, io, id, &.{ "1", "2", "3" });
+    var root = try tmp.dir.openDir(io, ".", .{ .iterate = true });
+    defer root.close(io);
+
+    const staged = try stageInteractionRemoval(gpa, io, root, &id, 2);
+    defer gpa.free(staged);
+    try std.testing.expect(!interactionExists(io, root, &id, 2));
+    try std.testing.expectEqual(@as(u32, 4), try nextInteractionNumber(gpa, io, root, &id));
+    try finishStagedRemoval(io, root, staged);
 }
 
 // --- reading back what a journal recorded ------------------------------------

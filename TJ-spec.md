@@ -28,7 +28,8 @@ A **Terminal Journal** treats every command interaction as a first-class
 object.
 
 Rather than viewing the terminal as a stream of characters, TJ models it
-as an append-only journal of computational interactions.
+as an append-numbered journal of computational interactions. Numbers are never
+reassigned; explicit removal may leave holes.
 
 Each interaction receives an identifier. Journal references use `@N`;
 `@-` refers to the immediately preceding interaction.
@@ -320,9 +321,11 @@ the journal ULID or any suffix of it:
 
 ``` text
 @42/out                                  interaction 42, current journal
+@build-failure/out                       named interaction, current journal
 @01knxf1n5ffvk9jsm8wve1pgsd.42/out       interaction 42, full journal id
 @wve1pgsd.42/out                         same, using a suffix
 @pgsd.42/out                             same, using a shorter suffix
+@pgsd.build-failure/out                  named interaction in that journal
 @-/out                                   previous interaction, current journal
 ```
 
@@ -342,6 +345,13 @@ Because the ULID is time-ordered, journals sort chronologically in
 
 An all-digit reference (`@42`) always means the current journal and is
 never interpreted as a suffix.
+
+An interaction name begins with lowercase ASCII, contains only lowercase
+ASCII, digits, and internal hyphens, ends with lowercase ASCII or a digit, and
+is at most 63 bytes. It is therefore disjoint from numbers and `@-`. A dot
+separates a journal selector from a numeric or named interaction selector.
+Names are resolved from the selected journal's annotations. An unassigned
+name is unresolved.
 
 ## Zsh integration
 
@@ -370,7 +380,9 @@ TJ references are shell-neutral identifiers accepted by TJ commands:
 
 ``` text
 @10
+@build-failure
 @pgsd.10
+@pgsd.build-failure
 @-
 ```
 
@@ -380,8 +392,10 @@ are ordinary filesystem suffixes:
 
 ``` text
 ~[@10]/out
+~[@build-failure]/out
 ~[@10]/files/data.csv
 ~[@pgsd.10]/out
+~[@pgsd.build-failure]/out
 ~[@-]/out
 ```
 
@@ -425,12 +439,15 @@ head and preserves the resource suffix:
 
 ``` text
 @10/out       → ~[@10]/out
+@build-failure/out → ~[@build-failure]/out
 @-/out        → ~[@-]/out
 @pgsd.10/out  → ~[@pgsd.10]/out
 ```
 
 Quoted references, malformed references, and words such as `user@host` are
-unaffected. Explicit `~[@REF]` input is already canonical and is not rewritten.
+unaffected. A syntactically valid named shorthand is rewritten only after
+`tj resolve` confirms that the name is assigned; unresolved `@handles` remain
+literal. Explicit `~[@REF]` input is already canonical and is not rewritten.
 The widget never inserts a storage path. Its canonical buffer is what the
 terminal accepts and zsh history stores.
 
@@ -484,6 +501,10 @@ The global shorthand completer remains available for `@10/<TAB>`. Normal zsh
 completion runs before that fallback so dynamic named-directory and ordinary
 filesystem completion retain their native behavior.
 
+Numeric and assigned-name candidates are offered in both completion paths.
+Resources below a named interaction complete exactly as resources below its
+numeric identity.
+
 The suffix after `~[@REF]` has ordinary filesystem semantics, including `.`
 and `..`. This differs deliberately from `tj resolve @REF/subpath`, whose
 shell-neutral reference subpath remains containment-validated by TJ.
@@ -491,6 +512,108 @@ shell-neutral reference subpath remains containment-validated by TJ.
 This makes the journal namespace behave like a filesystem from the
 user's perspective while allowing TJ to change its underlying storage
 implementation later.
+
+## Interaction annotations
+
+Names, tags, and pins are user annotations on one interaction in one journal.
+They are not recording-time metadata and are never stored in an interaction's
+`meta.json`.
+
+``` text
+tj name @42 build-failure
+tj name @42
+tj name --remove build-failure
+tj name
+
+tj tag @42 bug parser
+tj tag --remove @42 parser
+tj tag @42
+tj tag
+
+tj pin @42
+tj pin --remove @42
+tj pin
+```
+
+One interaction has at most one name. Assigning another name renames it; a
+name already owned by another interaction in the same journal is rejected.
+The same name may exist independently in another journal.
+
+Tags are 1-63 ASCII bytes and normalize to lowercase. Their first and last
+bytes are alphanumeric; interior bytes may additionally be `.`, `_`, or `-`.
+Adding an existing tag and removing a missing tag are successful no-ops. Tags
+are stored uniquely and sorted. `tj hist --tag TAG` is repeatable and multiple
+filters use AND semantics.
+
+A pin is an idempotent boolean annotation. It appears as `*` beside the
+interaction number in history. Pins have no retention or deletion-protection
+semantics.
+
+Targeted name and tag queries may read qualified references. Every annotation
+write is restricted to the journal whose full id is in `TJ_JOURNAL`.
+Syntactically qualified references and canonical paths belonging to another
+journal are rejected before mutation. To annotate another journal, a user
+continues it and runs the annotation command there.
+
+Annotations are held in the journal root:
+
+```json
+{
+  "v": 1,
+  "interactions": {
+    "42": {
+      "name": "build-failure",
+      "tags": ["bug", "parser"],
+      "pinned": true
+    }
+  }
+}
+```
+
+Absent fields are omitted and an interaction with no annotations has no map
+entry. The manifest is bounded to 4 MiB, validated strictly, serialized in
+numeric/tag order, and replaced by same-directory sync-and-rename. A malformed
+or unsupported manifest fails closed and is never overwritten.
+
+The lifetime writer lock does not serialize child commands. Therefore one
+blocking advisory lock at `.locks/<journal-ulid>.mutation` covers every
+annotation read-modify-write and interaction/output removal. The manifest is
+reloaded after acquiring it. No per-interaction or high-water lock exists.
+
+## Explicit removal
+
+``` text
+tj rm @42
+tj rm @42/out
+tj rm --journal <id-or-suffix> [--force]
+```
+
+Interaction and output removal require a current journal and may target only
+that journal. The target number must be lower than the highest numeric
+interaction present while the mutation lock is held. In normal use the
+removal command itself has already become that newer interaction, which both
+refuses the running command and preserves monotonic numbering without a
+high-water manifest. Removed interactions leave holes; remaining interactions
+are never renumbered.
+
+Removing an interaction first renames its directory into private journal
+trash, removes its annotation entry atomically, and deletes the staged tree.
+Readers ignore stale annotations whose numeric directory is absent, so a crash
+after the rename cannot restore the interaction or reserve its old name.
+
+`tj rm @42/out` removes `out` and every published resource named by
+`meta.json.resources`. Before the first rename it creates `out.removed`; this
+marker is a one-way deletion boundary. It then preserves unknown metadata,
+removes the resource map, and sets `out_removed` to true. `cmd`, `rc`, the
+interaction, and user annotations remain. Removing an individual resource is
+unsupported because it would not redact that resource's bytes from `out`.
+
+Whole-journal removal is a lifecycle operation available only when
+`TJ_JOURNAL` is unset. It selects one journal unambiguously, prompts on a TTY
+unless `--force` is present, acquires the existing writer lock nonblockingly,
+then takes the journal mutation lock, and refuses an active journal. Successful
+removal renames the ULID directory to root-private trash before recursive deletion. `--force` skips confirmation
+only; it never bypasses selection, locking, or validation.
 
 ## Semantic output resources
 
@@ -553,7 +676,8 @@ The v1 protocol has deliberately simple rules:
 -   one open resource at a time
 -   resource names are relative paths
 -   absolute paths and `..` are rejected
--   `cmd`, `out`, and `rc` are reserved and rejected as resource names
+-   `cmd`, `out`, `rc`, `meta.json`, and private removal bookkeeping names are
+    reserved and rejected as resource names
 -   the bytes between `begin` and `end` are exactly the resource
     contents
 -   OSC markers are control metadata and are not part of `@N/out`
@@ -581,8 +705,10 @@ A proof of concept does not require a database.
 ``` text
 ~/.tj/
 ├── .locks/
-│   └── <journal>
+│   ├── <journal>
+│   └── <journal>.mutation
 └── <journal>/
+    ├── annotations.json
     └── 42/
         ├── cmd
         ├── out
@@ -606,9 +732,9 @@ user-facing interface.
 
 ## Open questions
 
--   Retention and redaction. `cmd` will capture secrets typed on the
-    command line, and the journal is exactly what gets fed to agents.
-    Deferred for now.
+-   Retention. `cmd` captures secrets typed on the command line, and the
+    journal is exactly what gets fed to agents. Explicit removal and pins do
+    not define an automatic retention policy. Deferred for now.
 -   Interactive programs (editors, pagers, TUIs) produce large `out`
     entries consisting mostly of escape sequences. Whether the plugin
     should mark these as opaque is not yet decided.
