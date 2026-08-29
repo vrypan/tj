@@ -67,10 +67,9 @@ If your zsh setup does not already include your installation prefix's
 fpath=(~/.local/share/zsh/site-functions $fpath)
 ```
 
-Adjust the path for the prefix passed to `make install`. The plugin starts
-with a guard on `$TJ_JOURNAL`, so outside a tj journal writer it does nothing
-at all — loading it unconditionally is safe, and it costs nothing in shells
-that never run under tj.
+Adjust the path for the prefix passed to `make install`. Outside a tj journal
+writer the recording hooks remain inactive; only the lightweight `tjcd`
+helper is defined. Loading the plugin unconditionally is safe.
 
 **Without this line tj still runs and your terminal still behaves normally,
 but nothing is recorded** and `tj hist` comes back empty. That is the one
@@ -212,8 +211,8 @@ apart. The most recent match wins, so short suffixes are for interactive
 use; anything that must stay valid should use the full id.
 
 `~[@<TAB>` completes dynamic entry names and appends `]`.
-`~[@42]/<TAB>` uses ordinary filesystem completion for `cmd`, `out`, `prompt`,
-`rc`, `files/`, and published resources. The shorthand `@42/<TAB>` remains
+`~[@42]/<TAB>` uses ordinary filesystem completion for `cmd`, `cwd`, `out`,
+`prompt`, `rc`, `files/`, and published resources. The shorthand `@42/<TAB>` remains
 available, including beneath assigned names. An unresolved name such as
 `@someone` stays literal, so commands that use `@handles` keep working. Words
 that merely contain an `@`, quoted text, and `user@host` are left alone.
@@ -222,6 +221,19 @@ The accepted line shown by the terminal and stored in zsh history uses
 `~[@REF]`, never TJ's internal storage path. The journal's `cmd` preserves the
 original shorthand you typed; `meta.json` keeps a diagnostic `expanded_cmd`
 with the resolved filesystem path.
+
+Every entry recorded by the zsh integration also keeps the absolute logical
+working directory in `@N/cwd`, without a trailing newline. To return to the
+directory in which an entry ran, use the plugin's shell function:
+
+```sh
+tjcd @42
+tjcd @pgsd.42             # qualified references also work outside a writer
+```
+
+`tjcd` deliberately keeps its reference literal instead of canonicalizing it
+to `~[@REF]`: it resolves the entry, reads `cwd`, verifies that the directory
+still exists, and changes the calling zsh process with `builtin cd`.
 
 ## Names, tags, and pins
 
@@ -693,7 +705,7 @@ while either kind is already open is refused; the first region remains open
 until the next generic end marker.
 
 Names are the program's choice, so they are checked: a name cannot escape
-its entry directory, and cannot be `cmd`, `out`, `prompt`, `rc`, `meta.json` or
+its entry directory, and cannot be `cmd`, `cwd`, `out`, `prompt`, `rc`, `meta.json` or
 TJ's private removal bookkeeping. Refusals are recorded in the journal log. `files/` is a convention,
 not a rule — `err` is a resource too.
 
@@ -769,6 +781,7 @@ The journal is plain files under `~/.tj` (override with `$TJ_HOME` or
 ```
 ~/.tj/<journal-ulid>/42/
 ├── cmd        the command line as entered
+├── cwd        absolute logical directory in which the command started
 ├── out        what you could scroll back to, escape sequences and all
 ├── prompt     exact rendered zsh prompt; absent in older journals
 ├── rc         exit status; absent means the command never finished
@@ -846,7 +859,7 @@ terminal, both byte streams are forwarded unchanged, `SIGWINCH` propagates,
 signals sent to `tj` reach the shell, and the terminal is handed back with
 its original settings on every exit path.
 
-Recording works for `cmd`, `out`, `prompt` and `rc`; zsh canonicalizes interactive
+Recording works for `cmd`, `cwd`, `out`, `prompt` and `rc`; zsh canonicalizes interactive
 `@REF` shorthand into the `~[@REF]` dynamic named-directory namespace, then
 resolves and completes it through normal filesystem behavior. Selecting,
 locking, and numbering a journal are strict startup requirements and fail

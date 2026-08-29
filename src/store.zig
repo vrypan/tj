@@ -5,6 +5,7 @@
 //!         ├── log               warnings from this journal, if any
 //!         └── 1/
 //!             ├── cmd           the command line as entered
+//!             ├── cwd           absolute logical working directory
 //!             ├── out           what the terminal saw
 //!             ├── prompt        prompt drawn before the command
 //!             ├── rc            exit status, absent while incomplete
@@ -57,7 +58,7 @@ pub const noout_placeholder = "<tj:noout>";
 
 /// tj's own bookkeeping, which a program may not overwrite by publishing a
 /// resource with the same name.
-const reserved_names = [_][]const u8{ "cmd", "out", "prompt", "rc", "meta.json", "out.removed", ".meta.tmp", "log" };
+const reserved_names = [_][]const u8{ "cmd", "cwd", "out", "prompt", "rc", "meta.json", "out.removed", ".meta.tmp", "log" };
 
 const PromptState = enum { idle, capturing, ready };
 
@@ -250,7 +251,7 @@ pub const Store = struct {
 
     /// Opens interaction N and writes `cmd` immediately, so a journal that
     /// dies mid-command still shows what was running.
-    pub fn begin(self: *Store, cmd: []const u8, expanded: ?[]const u8) void {
+    pub fn begin(self: *Store, cmd: []const u8, expanded: ?[]const u8, cwd: ?[]const u8) void {
         defer self.discardPrompt();
         if (self.disabled) return;
         if (self.current != null) self.finish(null);
@@ -265,7 +266,7 @@ pub const Store = struct {
         const name = std.fmt.bufPrint(&name_buf, "{d}", .{number}) catch return;
 
         const prompt = if (self.prompt_state == .ready) self.pending_prompt.items else null;
-        self.beginFallible(number, name, cmd, expanded, prompt) catch |err| {
+        self.beginFallible(number, name, cmd, expanded, cwd, prompt) catch |err| {
             self.warn("cannot start entry {s}: {t}", .{ name, err });
             self.disable();
         };
@@ -277,6 +278,7 @@ pub const Store = struct {
         name: []const u8,
         cmd: []const u8,
         expanded: ?[]const u8,
+        cwd: ?[]const u8,
         prompt: ?[]const u8,
     ) !void {
         try self.journal_dir.createDir(self.io, name, dir_permissions);
@@ -286,6 +288,11 @@ pub const Store = struct {
         try dir.writeFile(self.io, .{
             .sub_path = "cmd",
             .data = cmd,
+            .flags = .{ .permissions = file_permissions },
+        });
+        if (cwd) |path| try dir.writeFile(self.io, .{
+            .sub_path = "cwd",
+            .data = path,
             .flags = .{ .permissions = file_permissions },
         });
         if (prompt) |bytes| try dir.writeFile(self.io, .{
@@ -1571,10 +1578,29 @@ test "tj's bookkeeping files are not part of the namespace" {
     try std.testing.expect(isPrivate(".meta.tmp"));
     try std.testing.expect(isPrivate("log"));
     try std.testing.expect(!isPrivate("cmd"));
+    try std.testing.expect(!isPrivate("cwd"));
     try std.testing.expect(!isPrivate("out"));
     try std.testing.expect(!isPrivate("prompt"));
     try std.testing.expect(!isPrivate("rc"));
     try std.testing.expect(!isPrivate("files"));
+}
+
+test "a reported working directory is a core entry resource" {
+    const io = std.testing.io;
+    const gpa = std.testing.allocator;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var root_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const root_len = try tmp.dir.realPath(io, &root_buf);
+
+    var store = try Store.createJournal(gpa, io, root_buf[0..root_len]);
+    defer store.close();
+    store.begin("pwd", null, "/tmp/work dir");
+    store.finish(0);
+
+    const cwd = try store.journal_dir.readFileAlloc(io, "1/cwd", gpa, .limited(4096));
+    defer gpa.free(cwd);
+    try std.testing.expectEqualStrings("/tmp/work dir", cwd);
 }
 
 test "a rendered prompt belongs to the next entry" {
@@ -1599,7 +1625,7 @@ test "a rendered prompt belongs to the next entry" {
     store.append(rendered);
     store.append(prompt_end_st);
     store.promptEnd();
-    store.begin("echo captured", null);
+    store.begin("echo captured", null, null);
     store.finish(0);
 
     const prompt = try store.journal_dir.readFileAlloc(io, "1/prompt", gpa, .limited(4096));
@@ -1611,7 +1637,7 @@ test "a rendered prompt belongs to the next entry" {
     // command start rather than being attached as if it were complete.
     store.promptStart();
     store.append("unfinished prompt");
-    store.begin("echo no-prompt", null);
+    store.begin("echo no-prompt", null, null);
     store.finish(0);
     try std.testing.expectError(error.FileNotFound, store.journal_dir.openFile(io, "2/prompt", .{}));
 }
@@ -1642,7 +1668,7 @@ test "noout records one placeholder while keeping region bytes out of metadata" 
     const root_len = try tmp.dir.realPath(io, &root_buf);
 
     var store = try Store.createJournal(gpa, io, root_buf[0..root_len]);
-    store.begin("demo", null);
+    store.begin("demo", null, null);
     store.append("before");
     store.beginNoout();
     store.append("secret bytes");
@@ -1672,7 +1698,7 @@ test "an empty noout region still records its placeholder once" {
     const root_len = try tmp.dir.realPath(io, &root_buf);
 
     var store = try Store.createJournal(gpa, io, root_buf[0..root_len]);
-    store.begin("demo", null);
+    store.begin("demo", null, null);
     store.beginNoout();
     store.endRegion();
     store.finish(0);
@@ -1691,7 +1717,7 @@ test "region nesting is refused and the first open region wins" {
     const root_len = try tmp.dir.realPath(io, &root_buf);
 
     var store = try Store.createJournal(gpa, io, root_buf[0..root_len]);
-    store.begin("resource-first", null);
+    store.begin("resource-first", null, null);
     store.beginResource("kept", "text/plain");
     store.beginNoout();
     store.append("resource body");
@@ -1705,7 +1731,7 @@ test "region nesting is refused and the first open region wins" {
     defer gpa.free(first_out);
     try std.testing.expectEqualStrings("resource body", first_out);
 
-    store.begin("noout-first", null);
+    store.begin("noout-first", null, null);
     store.beginNoout();
     store.beginResource("refused", "text/plain");
     store.append("omitted");
@@ -1731,11 +1757,11 @@ test "an unfinished noout region is reset at the entry boundary" {
     const root_len = try tmp.dir.realPath(io, &root_buf);
 
     var store = try Store.createJournal(gpa, io, root_buf[0..root_len]);
-    store.begin("unfinished", null);
+    store.begin("unfinished", null, null);
     store.beginNoout();
     store.append("omitted");
     store.finish(0);
-    store.begin("next", null);
+    store.begin("next", null, null);
     store.append("recorded normally");
     store.finish(0);
 
@@ -1784,15 +1810,15 @@ test "resource paths that programs may use" {
 test "resource paths that must be refused" {
     for ([_][]const u8{
         // Escaping the interaction directory.
-        "../out",    "files/../../etc/passwd", "/etc/passwd", "a//b",
-        "./x",       "..",
+        "../out",      "files/../../etc/passwd", "/etc/passwd", "a//b",
+        "./x",         "..",
         // Overwriting tj's own bookkeeping.
-                            "cmd",         "out",
-        "prompt",    "rc",                     "meta.json",   "out.removed",
-        ".meta.tmp", "log",
+                            "cmd",         "cwd",
+        "out",         "prompt",                 "rc",          "meta.json",
+        "out.removed", ".meta.tmp",              "log",
         // Nothing, or control characters.
-                           "",            "a\x00b",
-        "a\nb",
+                "",
+        "a\x00b",      "a\nb",
     }) |path| {
         try std.testing.expect(!validResourcePath(path));
     }
@@ -1882,7 +1908,7 @@ test "a resource keeps the newlines the program wrote, not the pty's" {
     // Fed one byte at a time, so a CRLF straddling two reads is covered too.
     for ([_]usize{ 1, 2, 3, 64 }) |chunk| {
         var store = try Store.createJournal(std.testing.allocator, io, path_buf[0..len]);
-        store.begin("demo", null);
+        store.begin("demo", null, null);
         store.beginResource("script.sh", "text/x-shellscript");
 
         const written = "#!/bin/sh\r\necho hi\r\n\rlone cr\r\n";
@@ -1912,7 +1938,7 @@ test "a carriage return at the very end of a resource is kept" {
     const len = try tmp.dir.realPath(io, &path_buf);
 
     var store = try Store.createJournal(std.testing.allocator, io, path_buf[0..len]);
-    store.begin("demo", null);
+    store.begin("demo", null, null);
     store.beginResource("trailing", "text/plain");
     store.append("ends with cr\r");
     store.endRegion();
@@ -1943,7 +1969,7 @@ test "metadata preserves every accepted resource beyond eight kibibytes" {
         "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx";
 
     var store = try Store.createJournal(gpa, io, root_buf[0..root_len]);
-    store.begin("demo", "expanded \"command\" with \\ and a newline\n");
+    store.begin("demo", "expanded \"command\" with \\ and a newline\n", null);
 
     for (0..max_resources) |i| {
         var path_buf: [96]u8 = undefined;
@@ -1988,12 +2014,12 @@ test "output removal redacts out and published resources but keeps the entry" {
 
     var journal = try Store.createJournal(gpa, io, root_buf[0..root_len]);
     const id = journal.journal;
-    journal.begin("publish", null);
+    journal.begin("publish", null, null);
     journal.beginResource("files/report.txt", "text/plain");
     journal.append("published bytes\r\n");
     journal.endRegion();
     journal.finish(0);
-    journal.begin("later", null);
+    journal.begin("later", null, null);
     journal.finish(0);
     journal.close();
 
@@ -2042,7 +2068,7 @@ test "output removal refuses resource paths that traverse symlinks" {
 
     var journal = try Store.createJournal(gpa, io, root_buf[0..root_len]);
     const id = journal.journal;
-    journal.begin("publish", null);
+    journal.begin("publish", null, null);
     journal.beginResource("files/report.txt", "text/plain");
     journal.append("recorded\r\n");
     journal.endRegion();

@@ -38,12 +38,15 @@ Every entry exposes core resources:
 ``` text
 @42/
 ├── cmd
+├── cwd
 ├── out
 ├── prompt
 └── rc
 ```
 
-`cmd` is the command line as entered. `out` is the terminal output as
+`cmd` is the command line as entered. `cwd` is the absolute logical `$PWD` at
+the command boundary, stored without a trailing newline; it is absent in
+journals recorded without cwd-aware shell integration. `out` is the terminal output as
 rendered: the bytes the program wrote to the tty, including escape
 sequences. `prompt` is the exact terminal byte sequence zsh rendered before
 the command, including dynamic prompt-engine output; it is absent in journals
@@ -55,6 +58,7 @@ resources:
 ``` text
 @42/
 ├── cmd
+├── cwd
 ├── out
 ├── prompt
 ├── rc
@@ -133,6 +137,7 @@ The core resources are directly addressable:
 
 ``` text
 @103/cmd
+@103/cwd
 @103/out
 @103/prompt
 @103/rc
@@ -144,6 +149,7 @@ named resources:
 ``` text
 @103/
 ├── cmd
+├── cwd
 ├── out
 ├── prompt
 ├── rc
@@ -404,6 +410,11 @@ the next command that actually starts. It does not read or re-evaluate prompt
 variables, so prompt substitutions and external engines such as Starship are
 captured exactly as displayed.
 
+At `preexec`, the plugin also base64-encodes the current logical `$PWD` in
+`OSC 5107;tj;cwd;DATA ST`. The recorder strips this marker and writes the
+decoded bytes to the entry's `cwd` resource when the following `OSC 133;C`
+opens the entry. Continuing a journal does not restore this directory.
+
 The pending prompt is replaced if zsh draws another prompt before a command
 starts, and an unfinished prompt is discarded at the command boundary. The B
 marker itself is not stored in `prompt`. Prompt capture is bounded at 64 KiB;
@@ -416,6 +427,7 @@ Each completed entry becomes a journal entry:
 ``` text
 @42/
 ├── cmd
+├── cwd
 ├── out
 ├── prompt
 └── rc
@@ -514,6 +526,14 @@ canonical TJ directory tokens for diagnostic metadata. It never evaluates the
 command line, and zsh remains solely responsible for the expansion used by the
 actual process.
 
+The plugin defines `tjcd REF` as a zsh function because a subprocess cannot
+change its parent shell's directory. For a simple `tjcd @REF` line, the
+accept-line widget exempts the target from shorthand canonicalization. The
+function resolves the literal reference, reads its `cwd`, requires an absolute
+path naming an existing directory, and invokes `builtin cd --`. Qualified
+references work when no current journal is active. Missing `cwd` resources in
+older entries are reported rather than inferred.
+
 ### Completion
 
 Dynamic-directory `c` mode completes entry names inside `~[...]` and
@@ -533,7 +553,7 @@ cat ~[@10]/<TAB>
 can offer:
 
 ``` text
-cmd  files/  out  prompt  rc
+cmd  cwd  files/  out  prompt  rc
 ```
 
 and:
@@ -922,7 +942,7 @@ The v1 protocol has deliberately simple rules:
 -   `end` closes whichever region is open
 -   resource names are relative paths
 -   absolute paths and `..` are rejected
--   `cmd`, `out`, `prompt`, `rc`, `meta.json`, and private removal bookkeeping names are
+-   `cmd`, `cwd`, `out`, `prompt`, `rc`, `meta.json`, and private removal bookkeeping names are
     reserved and rejected as resource names
 -   the bytes between `begin` and `end` are exactly the resource
     contents
@@ -974,6 +994,7 @@ A proof of concept does not require a database.
     ├── annotations.json
     └── 42/
         ├── cmd
+        ├── cwd
         ├── out
         ├── rc
         └── files/

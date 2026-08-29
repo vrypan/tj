@@ -815,6 +815,101 @@ test "an interrupted writer leaves the entry without an rc" {
     try std.testing.expectError(error.FileNotFound, dir.openFile(std.testing.io, "1/rc", .{}));
 }
 
+test "entries record cwd and tjcd changes zsh without expanding its reference" {
+    if (!haveZsh()) return error.SkipZigTest;
+    const gpa = std.testing.allocator;
+    const io = std.testing.io;
+    var journal = try Journal.open(gpa);
+    defer journal.close();
+    try journal.tmp.dir.createDir(io, "cwd target", @enumFromInt(0o700));
+    const target = try std.fmt.allocPrint(gpa, "{s}/cwd target", .{journal.path()});
+    defer gpa.free(target);
+
+    const child = try spawnJournalZsh(gpa, &journal);
+    var transcript: std.ArrayList(u8) = .empty;
+    defer transcript.deinit(gpa);
+    try setupJournalZsh(gpa, child, &transcript);
+
+    var cd_command: std.ArrayList(u8) = .empty;
+    defer cd_command.deinit(gpa);
+    try cd_command.appendSlice(gpa, "cd ");
+    try appendShellQuoted(gpa, &cd_command, target);
+    try cd_command.append(gpa, '\n');
+    var from = transcript.items.len;
+    try child.write(cd_command.items);
+    try std.testing.expect(try child.readUntilFrom(gpa, &transcript, from, test_prompt, timeout_ms));
+
+    from = transcript.items.len;
+    try child.write("print -r -- CWD_CAPTURE_BODY\n");
+    try std.testing.expect(try child.readUntilFrom(gpa, &transcript, from, "CWD_CAPTURE_BODY", timeout_ms));
+    try std.testing.expect(try child.readUntilFrom(gpa, &transcript, from, test_prompt, timeout_ms));
+
+    from = transcript.items.len;
+    try child.write("cd /\n");
+    try std.testing.expect(try child.readUntilFrom(gpa, &transcript, from, test_prompt, timeout_ms));
+
+    from = transcript.items.len;
+    try child.write("tjcd @2\n");
+    try std.testing.expect(try child.readUntilFrom(gpa, &transcript, from, test_prompt, timeout_ms));
+
+    const expected = try std.fmt.allocPrint(gpa, "TJCD_PWD={s}", .{target});
+    defer gpa.free(expected);
+    from = transcript.items.len;
+    try child.write("print -r -- \"TJCD_PWD=$PWD\"\n");
+    try std.testing.expect(try child.readUntilFrom(gpa, &transcript, from, expected, timeout_ms));
+    try std.testing.expect(try child.readUntilFrom(gpa, &transcript, from, test_prompt, timeout_ms));
+
+    try child.write("exit 0\n");
+    try std.testing.expectEqual(@as(u8, 0), try child.finish(gpa, &transcript, timeout_ms));
+
+    const recorded_target = try journal.read(gpa, "2/cwd");
+    defer gpa.free(recorded_target);
+    try std.testing.expectEqualStrings(target, recorded_target);
+    const tjcd_cmd = try journal.read(gpa, "4/cmd");
+    defer gpa.free(tjcd_cmd);
+    try std.testing.expectEqualStrings("tjcd @2", tjcd_cmd);
+    const tjcd_start = try journal.read(gpa, "4/cwd");
+    defer gpa.free(tjcd_start);
+    try std.testing.expectEqualStrings("/", tjcd_start);
+    const after_tjcd = try journal.read(gpa, "5/cwd");
+    defer gpa.free(after_tjcd);
+    try std.testing.expectEqualStrings(target, after_tjcd);
+
+    // The lightweight function is defined even when recording hooks are
+    // inactive, so a qualified reference works from an ordinary zsh too.
+    const id = try journal.journalName(gpa);
+    defer gpa.free(id);
+    const home = try journal.homeArg(gpa);
+    defer gpa.free(home);
+    var outside_script: std.ArrayList(u8) = .empty;
+    defer outside_script.deinit(gpa);
+    try outside_script.appendSlice(gpa, ". ");
+    try appendShellQuoted(gpa, &outside_script, options.plugin);
+    try outside_script.appendSlice(gpa, "; tjcd ");
+    const qualified = try std.fmt.allocPrint(gpa, "@{s}.2", .{id});
+    defer gpa.free(qualified);
+    try appendShellQuoted(gpa, &outside_script, qualified);
+    try outside_script.appendSlice(gpa, " || exit; print -r -- \"OUTSIDE_TJCD=$PWD\"");
+    var environ = try std.process.Environ.createMap(std.testing.environ, gpa);
+    defer environ.deinit();
+    try environ.put("TJ_HOME", home);
+    try environ.put("TJ_JOURNAL", "");
+    try environ.put("TJ", tj);
+    const outside = try std.process.run(gpa, io, .{
+        .argv = &.{ "/bin/zsh", "-f", "-c", outside_script.items },
+        .environ_map = &environ,
+        .stdout_limit = .limited(1 << 20),
+        .stderr_limit = .limited(1 << 20),
+    });
+    defer gpa.free(outside.stdout);
+    defer gpa.free(outside.stderr);
+    try std.testing.expectEqual(@as(u8, 0), outside.term.exited);
+    const outside_expected = try std.fmt.allocPrint(gpa, "OUTSIDE_TJCD={s}\n", .{target});
+    defer gpa.free(outside_expected);
+    try std.testing.expectEqualStrings(outside_expected, outside.stdout);
+    try std.testing.expectEqualStrings("", outside.stderr);
+}
+
 // --- the journal namespace --------------------------------------------------
 
 test "the tj zle hooks preserve existing widgets and register once" {
@@ -1868,6 +1963,7 @@ test "completion offers resources but never tj's own bookkeeping" {
     var r = try run(gpa, &.{ "--home", home, "complete", "@1/" }, 24, 80);
     defer r.out.deinit(gpa);
     try std.testing.expect(std.mem.indexOf(u8, r.out.items, "@1/cmd") != null);
+    try std.testing.expect(std.mem.indexOf(u8, r.out.items, "@1/cwd") != null);
     try std.testing.expect(std.mem.indexOf(u8, r.out.items, "@1/out") != null);
     try std.testing.expect(std.mem.indexOf(u8, r.out.items, "@1/prompt") != null);
     try std.testing.expect(std.mem.indexOf(u8, r.out.items, "@1/rc") != null);

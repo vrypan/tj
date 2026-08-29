@@ -4,8 +4,9 @@
 #
 #     source /path/to/tj.plugin.zsh
 #
-# Everything below is inert outside a tj journal writer, so loading it
-# unconditionally is safe.
+# Recording and reference expansion are inert outside a tj journal writer.
+# `tjcd` remains available so qualified references can be used from an
+# ordinary shell.
 #
 # Two jobs:
 #
@@ -14,11 +15,42 @@
 #   2. Give journal references a zsh dynamic named-directory namespace, so
 #      ordinary programs receive paths without exposing them in command lines.
 
+_tj_bin() { print -r -- "${TJ:-tj}" }
+
+# Change the calling zsh process to the directory in which an entry ran. This
+# must be a shell function: an external process cannot change its parent's cwd.
+tjcd() {
+  emulate -L zsh
+
+  if (( $# != 1 )); then
+    print -ru2 -- 'usage: tjcd @ref'
+    return 2
+  fi
+
+  local entry destination=''
+  entry=$(command "$(_tj_bin)" resolve "$1") || return
+  if [[ ! -f $entry/cwd ]]; then
+    print -ru2 -- 'tjcd: entry has no recorded cwd'
+    return 1
+  fi
+
+  # A NUL cannot occur in a filesystem path. Reading to NUL therefore keeps
+  # every byte through EOF, including whitespace and trailing newlines.
+  IFS= read -r -d '' destination < "$entry/cwd" 2>/dev/null || true
+  if [[ $destination != /* ]]; then
+    print -ru2 -- 'tjcd: recorded cwd is not an absolute path'
+    return 1
+  fi
+  if [[ ! -d $destination ]]; then
+    print -ru2 -- "tjcd: recorded directory no longer exists: $destination"
+    return 1
+  fi
+  builtin cd -- "$destination"
+}
+
 [[ -n $TJ_JOURNAL ]] || return 0
 
 autoload -Uz add-zsh-hook
-
-_tj_bin() { print -r -- "${TJ:-tj}" }
 
 # --- command boundaries -----------------------------------------------------
 
@@ -41,6 +73,7 @@ _tj_preexec() {
   _TJ_TYPED=
 
   _tj_emit "5107;tj;cmd;$(_tj_encode "$typed")"
+  _tj_emit "5107;tj;cwd;$(_tj_encode "$PWD")"
   # preexec runs before filename expansion. $3 is the full executable form
   # (including aliases), but still contains dynamic named directories, so
   # resolve only those known tokens for diagnostic metadata.
@@ -146,6 +179,22 @@ _tj_reference_head_is_name() {
   local body=${1#@} target
   target=${body##*.}
   [[ $target != [0-9]## && $target != - ]]
+}
+
+# `tjcd` consumes an entry reference as data rather than as a filesystem
+# argument. Keep its one literal target out of the dynamic-directory rewrite
+# so the terminal and zsh history retain `tjcd @42`.
+_tj_is_literal_tjcd() {
+  emulate -L zsh
+  setopt extendedglob
+
+  local line=${1##[[:space:]]#} target
+  line=${line%%[[:space:]]#}
+  [[ $line == tjcd[[:space:]]##* ]] || return 1
+  target=${line#tjcd}
+  target=${target##[[:space:]]#}
+  [[ -n $target && $target != *[[:space:]]* ]] || return 1
+  _tj_valid_reference_head "$target"
 }
 
 # Rewrites valid unquoted shorthand in $1 into canonical ~[...] notation,
@@ -296,7 +345,8 @@ _tj_expand_canonical_for_metadata() {
 }
 
 _tj_accept_line() {
-  if [[ $BUFFER == *@* ]] && _tj_canonicalize_shorthand "$BUFFER"; then
+  if ! _tj_is_literal_tjcd "$BUFFER" &&
+     [[ $BUFFER == *@* ]] && _tj_canonicalize_shorthand "$BUFFER"; then
     _TJ_TYPED=$BUFFER
     BUFFER=$_tj_expanded
     zle redisplay

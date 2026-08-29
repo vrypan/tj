@@ -47,6 +47,9 @@ pub const Event = union(enum) {
     /// integration resolved canonical TJ named-directory tokens for metadata.
     /// Only sent when such a token was resolved.
     command_expanded: []const u8,
+    /// `OSC 5107;tj;cwd;<base64>` - the absolute logical working directory at
+    /// the command boundary.
+    working_directory: []const u8,
     /// `OSC 133;C` - the command starts running now.
     command_run,
     /// `OSC 133;D[;rc]` - the command finished.
@@ -349,9 +352,22 @@ pub const Scanner = struct {
         }
         const rest = payload[tj_prefix.len..];
 
-        if (std.mem.startsWith(u8, rest, "cmd;") or std.mem.startsWith(u8, rest, "expanded;")) {
-            const is_expanded = rest[0] == 'e';
-            const encoded = rest[if (is_expanded) "expanded;".len else "cmd;".len..];
+        const EncodedKind = enum { command, expanded, cwd };
+        const encoded_kind: ?EncodedKind = if (std.mem.startsWith(u8, rest, "cmd;"))
+            .command
+        else if (std.mem.startsWith(u8, rest, "expanded;"))
+            .expanded
+        else if (std.mem.startsWith(u8, rest, "cwd;"))
+            .cwd
+        else
+            null;
+        if (encoded_kind) |kind| {
+            const prefix_len = switch (kind) {
+                .command => "cmd;".len,
+                .expanded => "expanded;".len,
+                .cwd => "cwd;".len,
+            };
+            const encoded = rest[prefix_len..];
             var decoded: [max_osc]u8 = undefined;
             const decoder = std.base64.standard.Decoder;
             const size = decoder.calcSizeForSlice(encoded) catch {
@@ -366,10 +382,10 @@ pub const Scanner = struct {
                 sink.event(.{ .protocol_error = payload });
                 return;
             };
-            if (is_expanded) {
-                sink.event(.{ .command_expanded = decoded[0..size] });
-            } else {
-                sink.event(.{ .command_line = decoded[0..size] });
+            switch (kind) {
+                .command => sink.event(.{ .command_line = decoded[0..size] }),
+                .expanded => sink.event(.{ .command_expanded = decoded[0..size] }),
+                .cwd => sink.event(.{ .working_directory = decoded[0..size] }),
             }
             return;
         }
@@ -437,7 +453,7 @@ const Recorder = struct {
 
     fn deinit(self: *Recorder) void {
         for (self.events.items) |recorded_event| switch (recorded_event) {
-            .command_line, .command_expanded, .protocol_error => |text| self.gpa.free(text),
+            .command_line, .command_expanded, .working_directory, .protocol_error => |text| self.gpa.free(text),
             .resource_begin => |r| {
                 self.gpa.free(r.path);
                 self.gpa.free(r.mime);
@@ -463,6 +479,7 @@ const Recorder = struct {
         const owned: Event = switch (ev) {
             .command_line => |text| .{ .command_line = self.gpa.dupe(u8, text) catch unreachable },
             .command_expanded => |text| .{ .command_expanded = self.gpa.dupe(u8, text) catch unreachable },
+            .working_directory => |text| .{ .working_directory = self.gpa.dupe(u8, text) catch unreachable },
             .resource_begin => |r| .{ .resource_begin = .{
                 .path = self.gpa.dupe(u8, r.path) catch unreachable,
                 .mime = self.gpa.dupe(u8, r.mime) catch unreachable,
@@ -509,6 +526,19 @@ test "tj sequences are stripped from the stream" {
     try std.testing.expectEqualStrings("ab", r.recorded.items);
     try std.testing.expectEqual(@as(usize, 1), r.events.items.len);
     try std.testing.expectEqualStrings("ls -l", r.events.items[0].command_line);
+}
+
+test "working directory sequences are stripped and survive split reads" {
+    const gpa = std.testing.allocator;
+    const input = "before\x1b]5107;tj;cwd;L3RtcC93b3JrIGRpcg==\x1b\\after";
+    for ([_]usize{ 1, 3, input.len }) |chunk| {
+        var r = run(gpa, input, chunk, false);
+        defer r.deinit();
+        try std.testing.expectEqualStrings("beforeafter", r.forwarded.items);
+        try std.testing.expectEqualStrings("beforeafter", r.recorded.items);
+        try std.testing.expectEqual(@as(usize, 1), r.events.items.len);
+        try std.testing.expectEqualStrings("/tmp/work dir", r.events.items[0].working_directory);
+    }
 }
 
 test "keep_osc forwards tj sequences but never records them" {

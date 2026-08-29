@@ -147,6 +147,12 @@ preceded the entry, including dynamic prompt-engine output. Use
 `tj cat '@42/prompt'` only when the prompt itself is relevant; it is absent in
 older journals and is not part of `out`.
 
+The same integration records the absolute logical command-start directory in
+`cwd`. Use `tjcd @42` to change the calling zsh process back to it. `tjcd`
+keeps the reference literal; qualified references such as `tjcd @8wpc.42`
+also work outside the corresponding writer. Do not emulate this with a
+subprocess `cd`, which cannot change its parent shell.
+
 Two things will look wrong and are not:
 
 - **Full-screen programs record almost nothing.** Editors, pagers and

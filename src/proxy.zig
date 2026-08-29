@@ -272,6 +272,10 @@ const Recorder = struct {
     expanded: [scanner.max_osc]u8 = undefined,
     expanded_len: usize = 0,
     has_expanded: bool = false,
+    /// Absolute logical working directory reported at the same boundary.
+    cwd: [scanner.max_osc]u8 = undefined,
+    cwd_len: usize = 0,
+    has_cwd: bool = false,
     /// Set when the terminal can no longer be written to; the pump then stops.
     broken: bool = false,
 
@@ -306,14 +310,23 @@ const Recorder = struct {
                 self.expanded_len = n;
                 self.has_expanded = true;
             },
+            .working_directory => |path| {
+                const n = @min(path.len, self.cwd.len);
+                @memcpy(self.cwd[0..n], path[0..n]);
+                self.cwd_len = n;
+                self.has_cwd = true;
+            },
             .command_run => {
                 self.store.begin(
                     self.command[0..self.command_len],
                     if (self.has_expanded) self.expanded[0..self.expanded_len] else null,
+                    if (self.has_cwd) self.cwd[0..self.cwd_len] else null,
                 );
                 self.command_len = 0;
                 self.expanded_len = 0;
                 self.has_expanded = false;
+                self.cwd_len = 0;
+                self.has_cwd = false;
             },
             .command_end => |code| self.store.finish(code),
             // Ends whatever is still open, then captures the prompt which
