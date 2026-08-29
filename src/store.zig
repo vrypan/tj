@@ -28,6 +28,7 @@ const sys = @import("sys.zig");
 const ulid = @import("ulid.zig");
 const altscreen = @import("altscreen.zig");
 const annotations = @import("annotations.zig");
+const mutation_lock = @import("mutation_lock.zig");
 
 /// The journal holds whatever appears on the terminal, which includes secrets.
 /// It gets the same treatment as shell history.
@@ -1080,9 +1081,9 @@ pub fn locate(
     const number: u32 = switch (target) {
         .number => |value| value,
         .name => |name| blk: {
-            var manifest = try annotations.load(gpa, io, root, journal);
-            defer manifest.deinit(gpa);
-            break :blk manifest.numberForName(name) orelse return error.NoSuchInteraction;
+            var metadata = try annotations.openRead(gpa, io, root, journal);
+            defer metadata.deinit(gpa);
+            break :blk try metadata.numberForName(name) orelse return error.NoSuchInteraction;
         },
     };
 
@@ -1471,14 +1472,18 @@ pub fn removeJournal(gpa: std.mem.Allocator, io: Io, root: Dir, journal: []const
     };
     var lock_open = true;
     defer if (lock_open) lock.close(io);
-    const mutation_lock = try annotations.acquireMutationLock(io, root, journal);
+    const mutation_guard = try mutation_lock.acquire(io, root, journal, .exclusive);
     var mutation_lock_open = true;
-    defer if (mutation_lock_open) mutation_lock.close(io);
+    defer if (mutation_lock_open) mutation_guard.close(io);
 
     if (!force) {
-        var manifest = try annotations.load(gpa, io, root, journal);
-        defer manifest.deinit(gpa);
-        if (manifest.hasPins()) return error.PinnedInteraction;
+        var metadata = try annotations.openRead(gpa, io, root, journal);
+        defer metadata.deinit(gpa);
+        var pins = try metadata.pins();
+        defer pins.deinit();
+        while (try pins.next()) |number| {
+            if (interactionExists(io, root, journal, number)) return error.PinnedInteraction;
+        }
     }
 
     var journal_dir = try root.openDir(io, journal, .{ .follow_symlinks = false });
@@ -1494,11 +1499,12 @@ pub fn removeJournal(gpa: std.mem.Allocator, io: Io, root: Dir, journal: []const
     try deleteOptionalEntry(io, trash, staged);
     try root.rename(journal, trash, staged, io);
     try deleteOptionalEntry(io, trash, staged);
-    mutation_lock.close(io);
+    mutation_guard.close(io);
     mutation_lock_open = false;
     lock.close(io);
     lock_open = false;
-    annotations.removeMutationLockFile(io, root, journal);
+    mutation_lock.removeFile(io, root, journal);
+    mutation_lock.removeMetadataFile(io, root, journal);
     removeLockFile(io, root, journal);
 }
 

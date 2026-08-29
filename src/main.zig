@@ -149,7 +149,11 @@ fn commandErrorMessage(which: cli.CommandName, err: anyerror) []const u8 {
         error.InvalidName => "tj: invalid entry name\n",
         error.InvalidTag => "tj: invalid tag\n",
         error.NameTaken => "tj: that entry name is already in use\n",
-        error.InvalidAnnotations => "tj: invalid annotations.json; refusing to overwrite it\n",
+        error.LegacyAnnotationsUnsupported => "tj: legacy annotations.json is unsupported; remove the old journal before using this version\n",
+        error.InvalidAnnotationDatabase => "tj: invalid or incompatible journal.sqlite3; refusing to overwrite it\n",
+        error.AnnotationBusy => "tj: journal metadata remained busy for 5 seconds\n",
+        error.AnnotationConstraint => "tj: journal metadata violates its schema\n",
+        error.AnnotationDatabaseFailure => "tj: cannot access journal metadata\n",
         error.UnsupportedRemoval => "tj: only an entry or its out may be removed\n",
         error.InvalidRange => "tj: invalid entry range; use ascending numeric references such as @2..@10\n",
         error.CurrentInteraction => if (which == .cat)
@@ -179,5 +183,7 @@ test {
     _ = @import("plain.zig");
     _ = @import("store.zig");
     _ = @import("search.zig");
+    _ = @import("sqlite.zig");
+    _ = @import("mutation_lock.zig");
     _ = commands;
 }

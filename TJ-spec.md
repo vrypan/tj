@@ -695,8 +695,8 @@ retention semantics. Whole-journal removal is refused while pins remain unless
 `tag` and `pin`. Endpoints are unqualified numeric references with `N <= M`;
 names, `@-`, resources, and qualified journals are invalid. Missing numbers
 inside the interval are skipped. Tagging, untagging, pinning, and unpinning
-load and save the annotation manifest once, so the selected existing
-entries in one range change atomically.
+use one database transaction, so the selected existing entries in one range
+change atomically.
 
 `tj tag` accepts one or more leading entry or range targets, followed by one
 or more tags. Literal references begin with `@`, which is not valid in a tag;
@@ -711,33 +711,36 @@ Syntactically qualified references and canonical paths belonging to another
 journal are rejected before mutation. To annotate another journal, a user
 continues it and runs the annotation command there.
 
-Annotations are held in the journal root:
+Journal-local mutable metadata is held in `journal.sqlite3`, separately from
+recording-time `meta.json`. TJ embeds SQLite; users need no system SQLite
+library or executable. Schema version 1 has three sparse tables: one unique
+name per entry, multiple normalized tags per entry, and pinned entry numbers.
+An entry without annotations has no database row. Indexed queries stream rows
+with a deliberately small page cache rather than materializing all annotations
+in Zig memory.
 
-```json
-{
-  "v": 1,
-  "interactions": {
-    "42": {
-      "name": "build-failure",
-      "tags": ["bug", "parser"],
-      "pinned": true
-    }
-  }
-}
-```
+Every existing database is checked for TJ's application id, schema version,
+and exact tables/index. A corrupt, incompatible, or malformed database fails
+closed. Transactions use persistent WAL mode, `synchronous=FULL`, and a
+five-second busy timeout. `journal.sqlite3-wal` and `journal.sqlite3-shm` are
+part of live database state while present, so an inactive journal must be
+copied as one directory. Concurrent WAL users are supported only on the same
+host, not across a network filesystem.
 
-The on-disk key remains `"interactions"` for compatibility with existing
-journals; its members are entries in the current terminology.
+The former `annotations.json` format is deliberately unsupported and is not
+migrated. Its presence makes annotation access fail rather than silently
+choosing or overwriting a format.
 
-Absent fields are omitted and an entry with no annotations has no map
-entry. The manifest is bounded to 4 MiB, validated strictly, serialized in
-numeric/tag order, and replaced by same-directory sync-and-rename. A malformed
-or unsupported manifest fails closed and is never overwritten.
-
-The lifetime writer lock does not serialize child commands. Therefore one
-blocking advisory lock at `.locks/<journal-ulid>.mutation` covers every
-annotation read-modify-write and entry/output removal. The manifest is
-reloaded after acquiring it. No per-entry or high-water lock exists.
+The lifetime writer lock does not serialize child commands. Shared advisory
+guards at `.locks/<journal-ulid>.mutation` allow annotation updates to overlap;
+SQLite serializes their short write transactions. Entry/output and whole-
+journal removal take the exclusive guard. Removal first renames entry
+directories into journal-local trash, then transactionally removes name, tag,
+and pin rows, then deletes the staged bytes. Recovery removes stale rows for a
+staged entry before clearing its trash. Readers ignore annotation rows whose
+numeric entry directory is absent. A separate `.metadata` guard serializes
+only connection setup and lazy WAL/schema initialization; it is released
+before the annotation transaction begins.
 
 ## Entry ranges for reading
 
@@ -1012,15 +1015,16 @@ structured output in the style of nushell or PowerShell.
 
 ## Storage
 
-A proof of concept does not require a database.
-
 ``` text
 ~/.tj/
 ├── .locks/
 │   ├── <journal>
-│   └── <journal>.mutation
+│   ├── <journal>.mutation
+│   └── <journal>.metadata
 └── <journal>/
-    ├── annotations.json
+    ├── journal.sqlite3
+    ├── journal.sqlite3-wal  (while present)
+    ├── journal.sqlite3-shm  (while present)
     └── 42/
         ├── cmd
         ├── cwd
@@ -1029,9 +1033,12 @@ A proof of concept does not require a database.
         └── files/
 ```
 
-Existing ULID directories require no migration. A newly created journal that
-records no entry or log may be removed as noise. A continued journal is
-never deleted by an empty writer run.
+Recorded resources remain ordinary files. The embedded journal database is
+created lazily on the first annotation write; it is versioned for future
+journal-local state but version 1 stores only names, tags, and pins. Existing
+legacy annotation manifests are intentionally not migrated. A newly created
+journal that records no entry or log may be removed as noise. A continued
+journal is never deleted by an empty writer run.
 
 This immediately enables shell completion.
 

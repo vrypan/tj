@@ -806,8 +806,9 @@ takes, since vhs cannot wait for a process to exit.
 
 ## Storage
 
-The journal is plain files under `~/.tj` (override with `$TJ_HOME` or
-`--home`), so nothing needs to understand tj to read it:
+The journal keeps recorded resources as plain files under `~/.tj` (override
+with `$TJ_HOME` or `--home`), so ordinary tools can still read commands and
+output directly:
 
 ```
 ~/.tj/<journal-ulid>/42/
@@ -819,16 +820,29 @@ The journal is plain files under `~/.tj` (override with `$TJ_HOME` or
 └── meta.json
 ```
 
-Journal-local user annotations are separate from recording metadata:
+Journal-local mutable metadata is separate from recording-time `meta.json`:
 
 ```text
-~/.tj/<journal-ulid>/annotations.json
+~/.tj/<journal-ulid>/journal.sqlite3
 ```
 
-The versioned file maps entry numbers to their optional name, sorted
-tags, and pin. It is replaced atomically under one short-lived journal mutation
-lock, so concurrent annotation child processes cannot lose one another's
-updates. Copying or deleting a journal carries its annotations with it.
+TJ embeds SQLite, so no system SQLite library or command is required. Schema
+version 1 stores sparse names, tags, and pins; unannotated entries consume no
+rows, and indexed queries stream results instead of loading a journal-wide
+manifest. Updates are transactions with a bounded five-second busy wait.
+Annotation writers take shared mutation guards, while entry, output, and
+whole-journal deletion take the exclusive guard.
+
+SQLite uses persistent WAL mode, so `journal.sqlite3-wal` and
+`journal.sqlite3-shm` may exist while the database is active. Copy an inactive
+journal directory as one unit; copying only the main database or copying
+during a write is not a supported snapshot. Deleting the journal carries the
+database and sidecars with it. This concurrency contract is for processes on
+the same host, not a shared network filesystem.
+
+This release deliberately does not migrate the former `annotations.json`
+format. If that legacy file exists, annotation access fails closed; delete the
+old journal as part of adopting this format break.
 
 Writer coordination uses private `~/.tj/.locks/<journal-ulid>` files. The
 file's held advisory lock—not its mere presence—indicates a live writer.

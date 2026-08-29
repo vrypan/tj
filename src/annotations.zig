@@ -1,17 +1,39 @@
-//! Journal-local user annotations.
+//! Journal-local mutable metadata backed by the embedded SQLite database.
 //!
-//! Recording metadata belongs to each interaction's `meta.json`. Names, tags,
-//! and pins are user-owned and live together in `annotations.json` so they
-//! travel with the journal without changing the recording format.
+//! Entry recording metadata remains in `meta.json`. Schema version 1 of
+//! `journal.sqlite3` stores only user-owned names, tags, and pins.
 
 const std = @import("std");
+const sqlite = @import("sqlite.zig");
+const mutation_lock = @import("mutation_lock.zig");
 const Io = std.Io;
 const Dir = Io.Dir;
 const File = Io.File;
 
 const file_permissions: File.Permissions = @enumFromInt(0o600);
 const dir_permissions: File.Permissions = @enumFromInt(0o700);
-const max_manifest_bytes = 4 * 1024 * 1024;
+const database_name = "journal.sqlite3";
+const legacy_name = "annotations.json";
+const application_id: i64 = 0x544A4442;
+const schema_version: i64 = 1;
+const names_schema = "CREATE TABLE names(" ++
+    "entry INTEGER PRIMARY KEY CHECK(entry BETWEEN 1 AND 4294967295)," ++
+    "name TEXT NOT NULL UNIQUE CHECK(length(name) BETWEEN 1 AND 63)) STRICT";
+const pins_schema = "CREATE TABLE pins(" ++
+    "entry INTEGER PRIMARY KEY CHECK(entry BETWEEN 1 AND 4294967295)) STRICT";
+const tags_schema = "CREATE TABLE tags(" ++
+    "entry INTEGER NOT NULL CHECK(entry BETWEEN 1 AND 4294967295)," ++
+    "tag TEXT NOT NULL CHECK(length(tag) BETWEEN 1 AND 63)," ++
+    "PRIMARY KEY(entry,tag)) STRICT, WITHOUT ROWID";
+const tags_index_schema = "CREATE INDEX tags_by_tag ON tags(tag,entry)";
+
+pub const Error = error{
+    AnnotationBusy,
+    AnnotationConstraint,
+    InvalidAnnotationDatabase,
+    LegacyAnnotationsUnsupported,
+    AnnotationDatabaseFailure,
+};
 
 pub const Entry = struct {
     number: u32,
@@ -19,157 +41,445 @@ pub const Entry = struct {
     tags: std.ArrayList([]u8) = .empty,
     pinned: bool = false,
 
-    fn deinit(self: *Entry, gpa: std.mem.Allocator) void {
+    pub fn deinit(self: *Entry, gpa: std.mem.Allocator) void {
         if (self.name) |name| gpa.free(name);
         for (self.tags.items) |tag| gpa.free(tag);
         self.tags.deinit(gpa);
     }
 };
 
-pub const Manifest = struct {
-    entries: std.ArrayList(Entry) = .empty,
+pub const Connection = struct {
+    database: ?sqlite.Database,
+    path: [:0]u8,
 
-    pub fn deinit(self: *Manifest, gpa: std.mem.Allocator) void {
-        for (self.entries.items) |*entry| entry.deinit(gpa);
-        self.entries.deinit(gpa);
+    pub fn deinit(self: *Connection, gpa: std.mem.Allocator) void {
+        if (self.database) |*database| database.close();
+        gpa.free(self.path);
+        self.* = undefined;
     }
 
-    pub fn find(self: *Manifest, number: u32) ?*Entry {
-        for (self.entries.items) |*entry| if (entry.number == number) return entry;
-        return null;
+    pub fn begin(self: *Connection) !Transaction {
+        const database = if (self.database) |*database_value| database_value else return error.AnnotationDatabaseFailure;
+        return .{ .inner = sqlite.Transaction.beginImmediate(database) catch |err| return mapSqlite(err) };
     }
 
-    pub fn findConst(self: *const Manifest, number: u32) ?*const Entry {
-        for (self.entries.items) |*entry| if (entry.number == number) return entry;
-        return null;
-    }
+    pub fn get(self: *Connection, gpa: std.mem.Allocator, number: u32) !?Entry {
+        var result: Entry = .{ .number = number };
+        errdefer result.deinit(gpa);
+        const database = if (self.database) |*value| value else return null;
 
-    pub fn hasPins(self: *const Manifest) bool {
-        for (self.entries.items) |entry| if (entry.pinned) return true;
-        return false;
-    }
-
-    pub fn numberForName(self: *const Manifest, name: []const u8) ?u32 {
-        for (self.entries.items) |entry| {
-            if (entry.name) |candidate| {
-                if (std.mem.eql(u8, candidate, name)) return entry.number;
-            }
+        var name = database.prepare("SELECT name FROM names WHERE entry=?") catch |err| return mapSqlite(err);
+        defer name.finalize();
+        name.bindInt(1, number) catch |err| return mapSqlite(err);
+        if ((name.step() catch |err| return mapSqlite(err)) == .row) {
+            const text = name.columnText(0) catch |err| return mapSqlite(err);
+            if (!validName(text)) return error.InvalidAnnotationDatabase;
+            result.name = try gpa.dupe(u8, text);
         }
-        return null;
-    }
 
-    fn ensure(self: *Manifest, gpa: std.mem.Allocator, number: u32) !*Entry {
-        if (self.find(number)) |entry| return entry;
-        try self.entries.append(gpa, .{ .number = number });
-        return &self.entries.items[self.entries.items.len - 1];
-    }
+        var pin = database.prepare("SELECT 1 FROM pins WHERE entry=?") catch |err| return mapSqlite(err);
+        defer pin.finalize();
+        pin.bindInt(1, number) catch |err| return mapSqlite(err);
+        result.pinned = (pin.step() catch |err| return mapSqlite(err)) == .row;
 
-    pub fn setName(self: *Manifest, gpa: std.mem.Allocator, number: u32, name: []const u8) !void {
-        if (!validName(name)) return error.InvalidName;
-        if (self.numberForName(name)) |owner| {
-            if (owner != number) return error.NameTaken;
+        var tag_statement = database.prepare("SELECT tag FROM tags WHERE entry=? ORDER BY tag") catch |err| return mapSqlite(err);
+        defer tag_statement.finalize();
+        tag_statement.bindInt(1, number) catch |err| return mapSqlite(err);
+        while ((tag_statement.step() catch |err| return mapSqlite(err)) == .row) {
+            const text = tag_statement.columnText(0) catch |err| return mapSqlite(err);
+            if (!validStoredTag(text)) return error.InvalidAnnotationDatabase;
+            const owned = try gpa.dupe(u8, text);
+            errdefer gpa.free(owned);
+            try result.tags.append(gpa, owned);
         }
-        const entry = try self.ensure(gpa, number);
-        const owned = try gpa.dupe(u8, name);
-        if (entry.name) |old| gpa.free(old);
-        entry.name = owned;
+
+        if (result.name == null and !result.pinned and result.tags.items.len == 0) {
+            result.deinit(gpa);
+            return null;
+        }
+        return result;
     }
 
-    pub fn removeName(self: *Manifest, gpa: std.mem.Allocator, name: []const u8) !void {
-        if (!validName(name)) return error.InvalidName;
-        for (self.entries.items, 0..) |*entry, i| {
-            const old = entry.name orelse continue;
-            if (!std.mem.eql(u8, old, name)) continue;
-            gpa.free(old);
-            entry.name = null;
-            self.removeEmpty(gpa, i);
-            return;
-        }
+    pub fn numberForName(self: *Connection, name: []const u8) !?u32 {
+        if (!validName(name)) return null;
+        const database = if (self.database) |*value| value else return null;
+        var statement = database.prepare("SELECT entry FROM names WHERE name=?") catch |err| return mapSqlite(err);
+        defer statement.finalize();
+        statement.bindText(1, name) catch |err| return mapSqlite(err);
+        if ((statement.step() catch |err| return mapSqlite(err)) == .done) return null;
+        return try checkedNumber(statement.columnInt(0));
     }
 
-    pub fn addTag(self: *Manifest, gpa: std.mem.Allocator, number: u32, text: []const u8) !void {
-        const tag = try normalizeTag(gpa, text);
-        errdefer gpa.free(tag);
-        const entry = try self.ensure(gpa, number);
-        for (entry.tags.items) |old| {
-            if (std.mem.eql(u8, old, tag)) {
-                gpa.free(tag);
-                return;
-            }
-        }
-        try entry.tags.append(gpa, tag);
-        std.mem.sort([]u8, entry.tags.items, {}, lessString);
-    }
-
-    pub fn removeTag(self: *Manifest, gpa: std.mem.Allocator, number: u32, text: []const u8) !void {
-        const tag = try normalizeTag(gpa, text);
-        defer gpa.free(tag);
-        for (self.entries.items, 0..) |*entry, entry_i| {
-            if (entry.number != number) continue;
-            for (entry.tags.items, 0..) |old, tag_i| {
-                if (!std.mem.eql(u8, old, tag)) continue;
-                gpa.free(old);
-                _ = entry.tags.orderedRemove(tag_i);
-                self.removeEmpty(gpa, entry_i);
-                return;
-            }
-            return;
-        }
-    }
-
-    pub fn setPinned(self: *Manifest, gpa: std.mem.Allocator, number: u32, pinned: bool) !void {
-        if (pinned) {
-            const entry = try self.ensure(gpa, number);
-            entry.pinned = true;
-            return;
-        }
-        for (self.entries.items, 0..) |*entry, i| {
-            if (entry.number != number) continue;
-            entry.pinned = false;
-            self.removeEmpty(gpa, i);
-            return;
-        }
-    }
-
-    pub fn removeInteraction(self: *Manifest, gpa: std.mem.Allocator, number: u32) void {
-        for (self.entries.items, 0..) |*entry, i| {
-            if (entry.number != number) continue;
-            entry.deinit(gpa);
-            _ = self.entries.orderedRemove(i);
-            return;
-        }
-    }
-
-    pub fn hasAllTags(self: *const Manifest, number: u32, wanted: []const []const u8) bool {
+    pub fn hasAllTags(self: *Connection, number: u32, wanted: []const []const u8) !bool {
         if (wanted.len == 0) return true;
-        const entry = self.findConst(number) orelse return false;
+        const database = if (self.database) |*value| value else return false;
+        var statement = database.prepare("SELECT 1 FROM tags WHERE entry=? AND tag=?") catch |err| return mapSqlite(err);
+        defer statement.finalize();
         for (wanted) |tag| {
-            var found = false;
-            for (entry.tags.items) |actual| {
-                if (std.mem.eql(u8, actual, tag)) {
-                    found = true;
-                    break;
-                }
-            }
-            if (!found) return false;
+            statement.reset() catch |err| return mapSqlite(err);
+            statement.bindInt(1, number) catch |err| return mapSqlite(err);
+            statement.bindText(2, tag) catch |err| return mapSqlite(err);
+            if ((statement.step() catch |err| return mapSqlite(err)) == .done) return false;
         }
         return true;
     }
 
-    fn removeEmpty(self: *Manifest, gpa: std.mem.Allocator, index: usize) void {
-        const entry = &self.entries.items[index];
-        if (entry.name != null or entry.tags.items.len != 0 or entry.pinned) return;
-        entry.deinit(gpa);
-        _ = self.entries.orderedRemove(index);
+    pub fn isPinned(self: *Connection, number: u32) !bool {
+        const database = if (self.database) |*value| value else return false;
+        var statement = database.prepare("SELECT 1 FROM pins WHERE entry=?") catch |err| return mapSqlite(err);
+        defer statement.finalize();
+        statement.bindInt(1, number) catch |err| return mapSqlite(err);
+        return (statement.step() catch |err| return mapSqlite(err)) == .row;
+    }
+
+    pub fn setName(self: *Connection, number: u32, name: []const u8) !void {
+        if (!validName(name)) return error.InvalidName;
+        const database = if (self.database) |*value| value else return error.AnnotationDatabaseFailure;
+        var statement = database.prepare(
+            "INSERT INTO names(entry,name) VALUES(?,?) " ++
+                "ON CONFLICT(entry) DO UPDATE SET name=excluded.name",
+        ) catch |err| return mapSqlite(err);
+        defer statement.finalize();
+        statement.bindInt(1, number) catch |err| return mapSqlite(err);
+        statement.bindText(2, name) catch |err| return mapSqlite(err);
+        _ = statement.step() catch |err| switch (err) {
+            error.Constraint => {
+                if (database.extendedCode() == sqlite.c.SQLITE_CONSTRAINT_UNIQUE) return error.NameTaken;
+                return error.AnnotationConstraint;
+            },
+            else => return mapSqlite(err),
+        };
+    }
+
+    pub fn removeName(self: *Connection, name: []const u8) !void {
+        if (!validName(name)) return error.InvalidName;
+        try self.executeText("DELETE FROM names WHERE name=?", name);
+    }
+
+    pub fn addTag(self: *Connection, number: u32, tag: []const u8) !void {
+        const database = if (self.database) |*value| value else return error.AnnotationDatabaseFailure;
+        var statement = database.prepare("INSERT OR IGNORE INTO tags(entry,tag) VALUES(?,?)") catch |err| return mapSqlite(err);
+        defer statement.finalize();
+        statement.bindInt(1, number) catch |err| return mapSqlite(err);
+        statement.bindText(2, tag) catch |err| return mapSqlite(err);
+        _ = statement.step() catch |err| return mapSqlite(err);
+    }
+
+    pub fn removeTag(self: *Connection, number: u32, tag: []const u8) !void {
+        const database = if (self.database) |*value| value else return error.AnnotationDatabaseFailure;
+        var statement = database.prepare("DELETE FROM tags WHERE entry=? AND tag=?") catch |err| return mapSqlite(err);
+        defer statement.finalize();
+        statement.bindInt(1, number) catch |err| return mapSqlite(err);
+        statement.bindText(2, tag) catch |err| return mapSqlite(err);
+        _ = statement.step() catch |err| return mapSqlite(err);
+    }
+
+    pub fn setPinned(self: *Connection, number: u32, pinned: bool) !void {
+        const database = if (self.database) |*value| value else return error.AnnotationDatabaseFailure;
+        var statement = database.prepare(if (pinned)
+            "INSERT OR IGNORE INTO pins(entry) VALUES(?)"
+        else
+            "DELETE FROM pins WHERE entry=?") catch |err| return mapSqlite(err);
+        defer statement.finalize();
+        statement.bindInt(1, number) catch |err| return mapSqlite(err);
+        _ = statement.step() catch |err| return mapSqlite(err);
+    }
+
+    pub fn removeEntry(self: *Connection, number: u32) !void {
+        const database = if (self.database) |*value| value else return;
+        var statement = database.prepare(
+            "DELETE FROM names WHERE entry=?;",
+        ) catch |err| return mapSqlite(err);
+        defer statement.finalize();
+        statement.bindInt(1, number) catch |err| return mapSqlite(err);
+        _ = statement.step() catch |err| return mapSqlite(err);
+        try deleteNumber(database, "DELETE FROM pins WHERE entry=?", number);
+        try deleteNumber(database, "DELETE FROM tags WHERE entry=?", number);
+    }
+
+    pub fn names(self: *Connection) !NameIterator {
+        const database = if (self.database) |*value| value else return .{};
+        return .{ .statement = database.prepare("SELECT entry,name FROM names ORDER BY entry") catch |err| return mapSqlite(err) };
+    }
+
+    pub fn tags(self: *Connection) !TagIterator {
+        const database = if (self.database) |*value| value else return .{};
+        return .{ .statement = database.prepare("SELECT entry,tag FROM tags ORDER BY entry,tag") catch |err| return mapSqlite(err) };
+    }
+
+    pub fn pins(self: *Connection) !PinIterator {
+        const database = if (self.database) |*value| value else return .{};
+        return .{ .statement = database.prepare("SELECT entry FROM pins ORDER BY entry") catch |err| return mapSqlite(err) };
+    }
+
+    fn executeText(self: *Connection, sql_text: [*:0]const u8, value: []const u8) !void {
+        const database = if (self.database) |*database_value| database_value else return error.AnnotationDatabaseFailure;
+        var statement = database.prepare(sql_text) catch |err| return mapSqlite(err);
+        defer statement.finalize();
+        statement.bindText(1, value) catch |err| return mapSqlite(err);
+        _ = statement.step() catch |err| return mapSqlite(err);
     }
 };
 
-fn lessString(_: void, a: []u8, b: []u8) bool {
-    return std.mem.order(u8, a, b) == .lt;
+pub const Transaction = struct {
+    inner: sqlite.Transaction,
+
+    pub fn commit(self: *Transaction) !void {
+        self.inner.commit() catch |err| return mapSqlite(err);
+    }
+
+    pub fn deinit(self: *Transaction) void {
+        self.inner.deinit();
+    }
+};
+
+pub const NameRow = struct { number: u32, name: []const u8 };
+pub const TagRow = struct { number: u32, tag: []const u8 };
+
+pub const NameIterator = struct {
+    statement: ?sqlite.Statement = null,
+
+    pub fn deinit(self: *NameIterator) void {
+        if (self.statement) |*statement| statement.finalize();
+    }
+
+    pub fn next(self: *NameIterator) !?NameRow {
+        const statement = if (self.statement) |*value| value else return null;
+        if ((statement.step() catch |err| return mapSqlite(err)) == .done) return null;
+        const name = statement.columnText(1) catch |err| return mapSqlite(err);
+        if (!validName(name)) return error.InvalidAnnotationDatabase;
+        return .{ .number = try checkedNumber(statement.columnInt(0)), .name = name };
+    }
+};
+
+pub const TagIterator = struct {
+    statement: ?sqlite.Statement = null,
+
+    pub fn deinit(self: *TagIterator) void {
+        if (self.statement) |*statement| statement.finalize();
+    }
+
+    pub fn next(self: *TagIterator) !?TagRow {
+        const statement = if (self.statement) |*value| value else return null;
+        if ((statement.step() catch |err| return mapSqlite(err)) == .done) return null;
+        const tag = statement.columnText(1) catch |err| return mapSqlite(err);
+        if (!validStoredTag(tag)) return error.InvalidAnnotationDatabase;
+        return .{ .number = try checkedNumber(statement.columnInt(0)), .tag = tag };
+    }
+};
+
+pub const PinIterator = struct {
+    statement: ?sqlite.Statement = null,
+
+    pub fn deinit(self: *PinIterator) void {
+        if (self.statement) |*statement| statement.finalize();
+    }
+
+    pub fn next(self: *PinIterator) !?u32 {
+        const statement = if (self.statement) |*value| value else return null;
+        if ((statement.step() catch |err| return mapSqlite(err)) == .done) return null;
+        return try checkedNumber(statement.columnInt(0));
+    }
+};
+
+pub fn openRead(gpa: std.mem.Allocator, io: Io, root: Dir, journal: []const u8) !Connection {
+    try rejectLegacy(io, root, journal);
+    const path = try databasePath(gpa, io, root, journal);
+    errdefer gpa.free(path);
+    var sub_buf: [96]u8 = undefined;
+    const sub = try std.fmt.bufPrint(&sub_buf, "{s}/{s}", .{ journal, database_name });
+    const stat = root.statFile(io, sub, .{ .follow_symlinks = false }) catch |err| switch (err) {
+        error.FileNotFound => return .{ .database = null, .path = path },
+        else => return err,
+    };
+    if (stat.kind != .file) return error.InvalidAnnotationDatabase;
+    var database = sqlite.Database.open(path.ptr, sqlite.c.SQLITE_OPEN_READONLY) catch |err| return mapSqlite(err);
+    errdefer database.close();
+    try configure(&database, false);
+    if (try isUninitialized(&database)) {
+        database.close();
+        return .{ .database = null, .path = path };
+    }
+    try verifySchema(&database);
+    return .{ .database = database, .path = path };
 }
 
-fn lessEntry(_: void, a: Entry, b: Entry) bool {
-    return a.number < b.number;
+pub fn openWrite(gpa: std.mem.Allocator, io: Io, root: Dir, journal: []const u8) !Connection {
+    try rejectLegacy(io, root, journal);
+    const initialization_guard = try mutation_lock.acquireMetadataInit(io, root, journal);
+    defer initialization_guard.close(io);
+    var journal_dir = try root.openDir(io, journal, .{ .follow_symlinks = false });
+    defer journal_dir.close(io);
+    var new_file = false;
+    const stat = journal_dir.statFile(io, database_name, .{ .follow_symlinks = false }) catch |err| switch (err) {
+        error.FileNotFound => blk: {
+            const file = journal_dir.createFile(io, database_name, .{
+                .exclusive = true,
+                .permissions = file_permissions,
+            }) catch |create_err| switch (create_err) {
+                error.PathAlreadyExists => null,
+                else => return create_err,
+            };
+            if (file) |created| {
+                created.close(io);
+                new_file = true;
+            }
+            break :blk try journal_dir.statFile(io, database_name, .{ .follow_symlinks = false });
+        },
+        else => return err,
+    };
+    if (stat.kind != .file) return error.InvalidAnnotationDatabase;
+    if (stat.size == 0) new_file = true;
+
+    const path = try databasePath(gpa, io, root, journal);
+    errdefer gpa.free(path);
+    var database = sqlite.Database.open(
+        path.ptr,
+        sqlite.c.SQLITE_OPEN_READWRITE,
+    ) catch |err| return mapSqlite(err);
+    errdefer database.close();
+    try configure(&database, true);
+    if (new_file or try isUninitialized(&database)) try initializeSchema(&database) else try verifySchema(&database);
+    return .{ .database = database, .path = path };
+}
+
+fn configure(database: *sqlite.Database, writable: bool) !void {
+    database.busyTimeout(5000) catch |err| return mapSqlite(err);
+    database.exec("PRAGMA cache_size=-512") catch |err| return mapSqlite(err);
+    database.exec("PRAGMA mmap_size=0") catch |err| return mapSqlite(err);
+    database.exec("PRAGMA trusted_schema=OFF") catch |err| return mapSqlite(err);
+    if (!writable) return;
+    var journal_mode = database.prepare("PRAGMA journal_mode=WAL") catch |err| return mapSqlite(err);
+    defer journal_mode.finalize();
+    if ((journal_mode.step() catch |err| return mapSqlite(err)) != .row) return error.InvalidAnnotationDatabase;
+    const mode = journal_mode.columnText(0) catch |err| return mapSqlite(err);
+    if (!std.mem.eql(u8, mode, "wal")) return error.InvalidAnnotationDatabase;
+    database.exec("PRAGMA synchronous=FULL") catch |err| return mapSqlite(err);
+}
+
+fn initializeSchema(database: *sqlite.Database) !void {
+    var transaction = sqlite.Transaction.beginImmediate(database) catch |err| return mapSqlite(err);
+    defer transaction.deinit();
+    database.exec(
+        names_schema ++ ";" ++ pins_schema ++ ";" ++ tags_schema ++ ";" ++ tags_index_schema ++ ";" ++
+            "PRAGMA application_id=0x544A4442;" ++
+            "PRAGMA user_version=1;",
+    ) catch |err| return mapSqlite(err);
+    transaction.commit() catch |err| return mapSqlite(err);
+    try verifySchema(database);
+}
+
+fn verifySchema(database: *sqlite.Database) !void {
+    if (try pragmaInt(database, "PRAGMA application_id") != application_id or
+        try pragmaInt(database, "PRAGMA user_version") != schema_version) return error.InvalidAnnotationDatabase;
+    if (try schemaObjectCount(database) != 4) return error.InvalidAnnotationDatabase;
+    var statement = database.prepare(
+        "SELECT count(*) FROM sqlite_schema WHERE " ++
+            "(type='table' AND name='names' AND sql='" ++ names_schema ++ "') OR " ++
+            "(type='table' AND name='pins' AND sql='" ++ pins_schema ++ "') OR " ++
+            "(type='table' AND name='tags' AND sql='" ++ tags_schema ++ "') OR " ++
+            "(type='index' AND name='tags_by_tag' AND sql='" ++ tags_index_schema ++ "')",
+    ) catch |err| return mapSqlite(err);
+    defer statement.finalize();
+    if ((statement.step() catch |err| return mapSqlite(err)) != .row or statement.columnInt(0) != 4) {
+        return error.InvalidAnnotationDatabase;
+    }
+}
+
+fn isUninitialized(database: *sqlite.Database) !bool {
+    return try pragmaInt(database, "PRAGMA application_id") == 0 and
+        try pragmaInt(database, "PRAGMA user_version") == 0 and
+        try schemaObjectCount(database) == 0;
+}
+
+fn schemaObjectCount(database: *sqlite.Database) !i64 {
+    var statement = database.prepare(
+        "SELECT count(*) FROM sqlite_schema WHERE name NOT LIKE 'sqlite_%'",
+    ) catch |err| return mapSqlite(err);
+    defer statement.finalize();
+    if ((statement.step() catch |err| return mapSqlite(err)) != .row) return error.InvalidAnnotationDatabase;
+    return statement.columnInt(0);
+}
+
+fn pragmaInt(database: *sqlite.Database, sql_text: [*:0]const u8) !i64 {
+    var statement = database.prepare(sql_text) catch |err| return mapSqlite(err);
+    defer statement.finalize();
+    if ((statement.step() catch |err| return mapSqlite(err)) != .row) return error.InvalidAnnotationDatabase;
+    return statement.columnInt(0);
+}
+
+fn databasePath(gpa: std.mem.Allocator, io: Io, root: Dir, journal: []const u8) ![:0]u8 {
+    var root_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const root_len = try root.realPath(io, &root_buf);
+    return std.fmt.allocPrintSentinel(gpa, "{s}/{s}/{s}", .{ root_buf[0..root_len], journal, database_name }, 0);
+}
+
+fn rejectLegacy(io: Io, root: Dir, journal: []const u8) !void {
+    var path_buf: [96]u8 = undefined;
+    const path = try std.fmt.bufPrint(&path_buf, "{s}/{s}", .{ journal, legacy_name });
+    _ = root.statFile(io, path, .{ .follow_symlinks = false }) catch |err| switch (err) {
+        error.FileNotFound => return,
+        else => return err,
+    };
+    return error.LegacyAnnotationsUnsupported;
+}
+
+/// Completes the database half of entry removals whose directory rename was
+/// durable but whose annotation transaction may not have committed.
+pub fn recoverStagedRemovals(
+    gpa: std.mem.Allocator,
+    io: Io,
+    root: Dir,
+    journal: []const u8,
+) !void {
+    var path_buf: [96]u8 = undefined;
+    const path = try std.fmt.bufPrint(&path_buf, "{s}/.trash", .{journal});
+    var trash = root.openDir(io, path, .{ .iterate = true, .follow_symlinks = false }) catch |err| switch (err) {
+        error.FileNotFound => return,
+        else => return err,
+    };
+    defer trash.close(io);
+
+    var numbers: std.ArrayList(u32) = .empty;
+    defer numbers.deinit(gpa);
+    var iterator = trash.iterate();
+    while (try iterator.next(io)) |entry| {
+        const suffix = ".interaction";
+        if (!std.mem.endsWith(u8, entry.name, suffix)) continue;
+        const number_text = entry.name[0 .. entry.name.len - suffix.len];
+        const number = std.fmt.parseInt(u32, number_text, 10) catch continue;
+        if (number == 0) continue;
+        try numbers.append(gpa, number);
+    }
+    if (numbers.items.len == 0) return;
+
+    var metadata = try openWrite(gpa, io, root, journal);
+    defer metadata.deinit(gpa);
+    var transaction = try metadata.begin();
+    defer transaction.deinit();
+    for (numbers.items) |number| try metadata.removeEntry(number);
+    try transaction.commit();
+}
+
+fn deleteNumber(database: *sqlite.Database, sql_text: [*:0]const u8, number: u32) !void {
+    var statement = database.prepare(sql_text) catch |err| return mapSqlite(err);
+    defer statement.finalize();
+    statement.bindInt(1, number) catch |err| return mapSqlite(err);
+    _ = statement.step() catch |err| return mapSqlite(err);
+}
+
+fn checkedNumber(value: i64) !u32 {
+    if (value <= 0 or value > std.math.maxInt(u32)) return error.InvalidAnnotationDatabase;
+    return @intCast(value);
+}
+
+fn mapSqlite(err: sqlite.Error) Error {
+    return switch (err) {
+        error.Busy => error.AnnotationBusy,
+        error.Constraint => error.AnnotationConstraint,
+        error.InvalidDatabase => error.InvalidAnnotationDatabase,
+        error.DatabaseFailure => error.AnnotationDatabaseFailure,
+    };
 }
 
 pub fn validName(name: []const u8) bool {
@@ -192,151 +502,18 @@ pub fn normalizeTag(gpa: std.mem.Allocator, text: []const u8) ![]u8 {
         if (!std.ascii.isAscii(char)) return error.InvalidTag;
         tag[i] = std.ascii.toLower(char);
     }
-    if (!std.ascii.isAlphanumeric(tag[0]) or !std.ascii.isAlphanumeric(tag[tag.len - 1])) return error.InvalidTag;
-    for (tag) |char| {
-        if (!(std.ascii.isAlphanumeric(char) or char == '.' or char == '_' or char == '-')) return error.InvalidTag;
-    }
+    if (!validStoredTag(tag)) return error.InvalidTag;
     return tag;
 }
 
-pub fn acquireMutationLock(io: Io, root: Dir, journal: []const u8) !File {
-    _ = root.createDir(io, ".locks", dir_permissions) catch |err| switch (err) {
-        error.PathAlreadyExists => {},
-        else => return err,
-    };
-    var locks = try root.openDir(io, ".locks", .{});
-    defer locks.close(io);
-    var name_buf: [64]u8 = undefined;
-    const name = try std.fmt.bufPrint(&name_buf, "{s}.mutation", .{journal});
-    return locks.createFile(io, name, .{
-        .read = true,
-        .truncate = false,
-        .lock = .exclusive,
-        .permissions = file_permissions,
-    });
-}
-
-pub fn removeMutationLockFile(io: Io, root: Dir, journal: []const u8) void {
-    var path_buf: [80]u8 = undefined;
-    const path = std.fmt.bufPrint(&path_buf, ".locks/{s}.mutation", .{journal}) catch return;
-    root.deleteFile(io, path) catch {};
-}
-
-pub fn load(gpa: std.mem.Allocator, io: Io, root: Dir, journal: []const u8) !Manifest {
-    var path_buf: [96]u8 = undefined;
-    const path = try std.fmt.bufPrint(&path_buf, "{s}/annotations.json", .{journal});
-    const text = root.readFileAlloc(io, path, gpa, .limited(max_manifest_bytes)) catch |err| switch (err) {
-        error.FileNotFound => return .{},
-        else => return err,
-    };
-    defer gpa.free(text);
-
-    const parsed = std.json.parseFromSlice(std.json.Value, gpa, text, .{}) catch return error.InvalidAnnotations;
-    defer parsed.deinit();
-    if (parsed.value != .object) return error.InvalidAnnotations;
-    const top = parsed.value.object;
-    if (top.count() != 2) return error.InvalidAnnotations;
-    const version = top.get("v") orelse return error.InvalidAnnotations;
-    if (version != .integer or version.integer != 1) return error.InvalidAnnotations;
-    const interactions_value = top.get("interactions") orelse return error.InvalidAnnotations;
-    if (interactions_value != .object) return error.InvalidAnnotations;
-
-    var result: Manifest = .{};
-    errdefer result.deinit(gpa);
-    var it = interactions_value.object.iterator();
-    while (it.next()) |item| {
-        const number = std.fmt.parseInt(u32, item.key_ptr.*, 10) catch return error.InvalidAnnotations;
-        if (number == 0 or item.value_ptr.* != .object) return error.InvalidAnnotations;
-        const object = item.value_ptr.object;
-        var fields = object.iterator();
-        while (fields.next()) |field| {
-            if (!std.mem.eql(u8, field.key_ptr.*, "name") and
-                !std.mem.eql(u8, field.key_ptr.*, "tags") and
-                !std.mem.eql(u8, field.key_ptr.*, "pinned")) return error.InvalidAnnotations;
-        }
-        var entry: Entry = .{ .number = number };
-        errdefer entry.deinit(gpa);
-
-        if (object.get("name")) |value| {
-            if (value != .string or !validName(value.string)) return error.InvalidAnnotations;
-            if (result.numberForName(value.string) != null) return error.InvalidAnnotations;
-            entry.name = try gpa.dupe(u8, value.string);
-        }
-        if (object.get("tags")) |value| {
-            if (value != .array) return error.InvalidAnnotations;
-            for (value.array.items) |tag_value| {
-                if (tag_value != .string) return error.InvalidAnnotations;
-                const tag = try normalizeTag(gpa, tag_value.string);
-                errdefer gpa.free(tag);
-                if (!std.mem.eql(u8, tag, tag_value.string)) return error.InvalidAnnotations;
-                for (entry.tags.items) |old| if (std.mem.eql(u8, old, tag)) return error.InvalidAnnotations;
-                try entry.tags.append(gpa, tag);
-            }
-            std.mem.sort([]u8, entry.tags.items, {}, lessString);
-        }
-        if (object.get("pinned")) |value| {
-            if (value != .bool) return error.InvalidAnnotations;
-            entry.pinned = value.bool;
-        }
-        if (entry.name == null and entry.tags.items.len == 0 and !entry.pinned) return error.InvalidAnnotations;
-        try result.entries.append(gpa, entry);
+fn validStoredTag(tag: []const u8) bool {
+    if (tag.len == 0 or tag.len > 63) return false;
+    if (!std.ascii.isAlphanumeric(tag[0]) or !std.ascii.isAlphanumeric(tag[tag.len - 1])) return false;
+    for (tag) |char| {
+        if (!std.ascii.isAscii(char) or std.ascii.toLower(char) != char) return false;
+        if (!(std.ascii.isAlphanumeric(char) or char == '.' or char == '_' or char == '-')) return false;
     }
-    std.mem.sort(Entry, result.entries.items, {}, lessEntry);
-    return result;
-}
-
-pub fn save(gpa: std.mem.Allocator, io: Io, root: Dir, journal: []const u8, manifest: *Manifest) !void {
-    std.mem.sort(Entry, manifest.entries.items, {}, lessEntry);
-    var json: std.ArrayList(u8) = .empty;
-    defer json.deinit(gpa);
-    var allocating = Io.Writer.Allocating.fromArrayList(gpa, &json);
-    defer json = allocating.toArrayList();
-    const out = &allocating.writer;
-
-    try out.writeAll("{\"v\":1,\"interactions\":{");
-    for (manifest.entries.items, 0..) |entry, i| {
-        if (i != 0) try out.writeAll(",");
-        try out.print("\"{d}\":{{", .{entry.number});
-        var field = false;
-        if (entry.name) |name| {
-            try out.writeAll("\"name\":");
-            try std.json.Stringify.encodeJsonString(name, .{}, out);
-            field = true;
-        }
-        if (entry.tags.items.len != 0) {
-            if (field) try out.writeAll(",");
-            try out.writeAll("\"tags\":[");
-            for (entry.tags.items, 0..) |tag, tag_i| {
-                if (tag_i != 0) try out.writeAll(",");
-                try std.json.Stringify.encodeJsonString(tag, .{}, out);
-            }
-            try out.writeAll("]");
-            field = true;
-        }
-        if (entry.pinned) {
-            if (field) try out.writeAll(",");
-            try out.writeAll("\"pinned\":true");
-        }
-        try out.writeAll("}");
-    }
-    try out.writeAll("}}\n");
-    if (out.buffered().len > max_manifest_bytes) return error.InvalidAnnotations;
-
-    var journal_dir = try root.openDir(io, journal, .{});
-    defer journal_dir.close(io);
-    journal_dir.deleteFile(io, ".annotations.tmp") catch {};
-    const temp = try journal_dir.createFile(io, ".annotations.tmp", .{
-        .truncate = true,
-        .permissions = file_permissions,
-    });
-    var renamed = false;
-    defer if (!renamed) journal_dir.deleteFile(io, ".annotations.tmp") catch {};
-    errdefer temp.close(io);
-    try temp.writePositionalAll(io, out.buffered(), 0);
-    try temp.sync(io);
-    temp.close(io);
-    try journal_dir.rename(".annotations.tmp", journal_dir, "annotations.json", io);
-    renamed = true;
+    return true;
 }
 
 test "annotation grammar is conservative and tags normalize" {
@@ -351,22 +528,7 @@ test "annotation grammar is conservative and tags normalize" {
     try std.testing.expectError(error.InvalidTag, normalizeTag(std.testing.allocator, "bad tag"));
 }
 
-test "names are unique and tag and pin operations are idempotent" {
-    const gpa = std.testing.allocator;
-    var manifest: Manifest = .{};
-    defer manifest.deinit(gpa);
-    try manifest.setName(gpa, 1, "first");
-    try std.testing.expectError(error.NameTaken, manifest.setName(gpa, 2, "first"));
-    try manifest.setName(gpa, 1, "renamed");
-    try manifest.addTag(gpa, 1, "BUG");
-    try manifest.addTag(gpa, 1, "bug");
-    try manifest.setPinned(gpa, 1, true);
-    try manifest.setPinned(gpa, 1, true);
-    try std.testing.expectEqual(@as(usize, 1), manifest.find(1).?.tags.items.len);
-    try std.testing.expect(manifest.find(1).?.pinned);
-}
-
-test "annotation manifests round trip atomically" {
+test "sqlite annotations are sparse unique and idempotent" {
     const io = std.testing.io;
     const gpa = std.testing.allocator;
     var tmp = std.testing.tmpDir(.{ .iterate = true });
@@ -375,22 +537,48 @@ test "annotation manifests round trip atomically" {
     var root = try tmp.dir.openDir(io, ".", .{ .iterate = true });
     defer root.close(io);
 
-    var manifest: Manifest = .{};
-    defer manifest.deinit(gpa);
-    try manifest.setName(gpa, 42, "build-failure");
-    try manifest.addTag(gpa, 42, "Parser");
-    try manifest.setPinned(gpa, 42, true);
-    try save(gpa, io, root, "journal", &manifest);
+    var connection = try openWrite(gpa, io, root, "journal");
+    defer connection.deinit(gpa);
+    var transaction = try connection.begin();
+    defer transaction.deinit();
+    try connection.setName(1, "build-failure");
+    try std.testing.expectError(error.NameTaken, connection.setName(2, "build-failure"));
+    try connection.setName(1, "renamed-entry");
+    try connection.addTag(1, "parser");
+    try connection.addTag(1, "parser");
+    try connection.addTag(1, "bug");
+    try connection.removeTag(1, "missing");
+    try connection.setPinned(1, true);
+    try connection.setPinned(1, true);
+    try transaction.commit();
 
-    var loaded = try load(gpa, io, root, "journal");
-    defer loaded.deinit(gpa);
-    const entry = loaded.findConst(42).?;
-    try std.testing.expectEqualStrings("build-failure", entry.name.?);
-    try std.testing.expectEqualStrings("parser", entry.tags.items[0]);
-    try std.testing.expect(entry.pinned);
+    const entry = (try connection.get(gpa, 1)).?;
+    var owned = entry;
+    defer owned.deinit(gpa);
+    try std.testing.expectEqualStrings("renamed-entry", owned.name.?);
+    try std.testing.expectEqual(@as(usize, 2), owned.tags.items.len);
+    try std.testing.expectEqualStrings("bug", owned.tags.items[0]);
+    try std.testing.expect(try connection.hasAllTags(1, &.{ "bug", "parser" }));
+    try std.testing.expect(owned.pinned);
+
+    {
+        var rollback = try connection.begin();
+        defer rollback.deinit();
+        try connection.setName(2, "rolled-back");
+        try connection.setPinned(2, true);
+    }
+    try std.testing.expect((try connection.get(gpa, 2)) == null);
+
+    var cleanup = try connection.begin();
+    defer cleanup.deinit();
+    try connection.removeName("renamed-entry");
+    try connection.removeTag(1, "bug");
+    try connection.setPinned(1, false);
+    try cleanup.commit();
+    try std.testing.expect((try connection.numberForName("renamed-entry")) == null);
 }
 
-test "malformed and newer annotation manifests fail closed" {
+test "annotation database policy and schema fail closed" {
     const io = std.testing.io;
     const gpa = std.testing.allocator;
     var tmp = std.testing.tmpDir(.{ .iterate = true });
@@ -399,21 +587,89 @@ test "malformed and newer annotation manifests fail closed" {
     var root = try tmp.dir.openDir(io, ".", .{ .iterate = true });
     defer root.close(io);
 
+    var connection = try openWrite(gpa, io, root, "journal");
+    const database = if (connection.database) |*value| value else unreachable;
+    try std.testing.expectEqual(@as(i64, application_id), try pragmaInt(database, "PRAGMA application_id"));
+    try std.testing.expectEqual(@as(i64, schema_version), try pragmaInt(database, "PRAGMA user_version"));
+    try std.testing.expectEqual(@as(i64, -512), try pragmaInt(database, "PRAGMA cache_size"));
+    try std.testing.expectEqual(@as(i64, 0), try pragmaInt(database, "PRAGMA mmap_size"));
+    const stat = try root.statFile(io, "journal/journal.sqlite3", .{ .follow_symlinks = false });
+    if (@import("builtin").os.tag != .windows) {
+        try std.testing.expectEqual(@as(u16, 0o600), @as(u16, @intCast(@intFromEnum(stat.permissions) & 0o777)));
+        for ([_][]const u8{ "journal/journal.sqlite3-wal", "journal/journal.sqlite3-shm" }) |path| {
+            const sidecar = try root.statFile(io, path, .{ .follow_symlinks = false });
+            try std.testing.expectEqual(@as(u16, 0o600), @as(u16, @intCast(@intFromEnum(sidecar.permissions) & 0o777)));
+        }
+    }
+    database.exec("PRAGMA user_version=2") catch |err| return mapSqlite(err);
+    connection.deinit(gpa);
+    try std.testing.expectError(error.InvalidAnnotationDatabase, openRead(gpa, io, root, "journal"));
+}
+
+test "corrupt annotation databases are not replaced" {
+    const io = std.testing.io;
+    const gpa = std.testing.allocator;
+    var tmp = std.testing.tmpDir(.{ .iterate = true });
+    defer tmp.cleanup();
+    try tmp.dir.createDir(io, "journal", dir_permissions);
+    var root = try tmp.dir.openDir(io, ".", .{ .iterate = true });
+    defer root.close(io);
+    const corrupt = "definitely not sqlite";
     try root.writeFile(io, .{
-        .sub_path = "journal/annotations.json",
-        .data = "{not json}\n",
+        .sub_path = "journal/journal.sqlite3",
+        .data = corrupt,
         .flags = .{ .permissions = file_permissions },
     });
-    try std.testing.expectError(error.InvalidAnnotations, load(gpa, io, root, "journal"));
+    try std.testing.expectError(error.InvalidAnnotationDatabase, openRead(gpa, io, root, "journal"));
+    const after = try root.readFileAlloc(io, "journal/journal.sqlite3", gpa, .limited(128));
+    defer gpa.free(after);
+    try std.testing.expectEqualStrings(corrupt, after);
+}
 
+test "staged entry recovery removes its sparse rows transactionally" {
+    const io = std.testing.io;
+    const gpa = std.testing.allocator;
+    var tmp = std.testing.tmpDir(.{ .iterate = true });
+    defer tmp.cleanup();
+    try tmp.dir.createDir(io, "journal", dir_permissions);
+    try tmp.dir.createDirPath(io, "journal/.trash/2.interaction");
+    var root = try tmp.dir.openDir(io, ".", .{ .iterate = true });
+    defer root.close(io);
+
+    {
+        var metadata = try openWrite(gpa, io, root, "journal");
+        defer metadata.deinit(gpa);
+        var transaction = try metadata.begin();
+        defer transaction.deinit();
+        try metadata.setName(2, "stale-name");
+        try metadata.addTag(2, "stale-tag");
+        try metadata.setPinned(2, true);
+        try transaction.commit();
+    }
+    try recoverStagedRemovals(gpa, io, root, "journal");
+    var metadata = try openRead(gpa, io, root, "journal");
+    defer metadata.deinit(gpa);
+    try std.testing.expect((try metadata.get(gpa, 2)) == null);
+    var staged = try root.openDir(io, "journal/.trash/2.interaction", .{});
+    staged.close(io);
+}
+
+test "annotation reads do not create a database and legacy json fails" {
+    const io = std.testing.io;
+    const gpa = std.testing.allocator;
+    var tmp = std.testing.tmpDir(.{ .iterate = true });
+    defer tmp.cleanup();
+    try tmp.dir.createDir(io, "journal", dir_permissions);
+    var root = try tmp.dir.openDir(io, ".", .{ .iterate = true });
+    defer root.close(io);
+
+    var empty = try openRead(gpa, io, root, "journal");
+    empty.deinit(gpa);
+    try std.testing.expectError(error.FileNotFound, root.openFile(io, "journal/journal.sqlite3", .{}));
     try root.writeFile(io, .{
         .sub_path = "journal/annotations.json",
-        .data = "{\"v\":2,\"interactions\":{}}\n",
+        .data = "{}\n",
         .flags = .{ .permissions = file_permissions },
     });
-    try std.testing.expectError(error.InvalidAnnotations, load(gpa, io, root, "journal"));
-
-    const unchanged = try root.readFileAlloc(io, "journal/annotations.json", gpa, .limited(256));
-    defer gpa.free(unchanged);
-    try std.testing.expectEqualStrings("{\"v\":2,\"interactions\":{}}\n", unchanged);
+    try std.testing.expectError(error.LegacyAnnotationsUnsupported, openRead(gpa, io, root, "journal"));
 }

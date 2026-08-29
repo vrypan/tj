@@ -1572,7 +1572,7 @@ test "entry mutations reject qualified journals while reads still work" {
     var check_root = try journal.tmp.dir.openDir(io, journal_dir, .{});
     defer check_root.close(io);
     var annotations_path_buf: [64]u8 = undefined;
-    const annotations_path = try std.fmt.bufPrint(&annotations_path_buf, "{s}/annotations.json", .{foreign});
+    const annotations_path = try std.fmt.bufPrint(&annotations_path_buf, "{s}/journal.sqlite3", .{foreign});
     try std.testing.expectError(error.FileNotFound, check_root.openFile(io, annotations_path, .{}));
     var interaction_path_buf: [64]u8 = undefined;
     const interaction_path = try std.fmt.bufPrint(&interaction_path_buf, "{s}/1", .{foreign});
@@ -1744,10 +1744,12 @@ test "entry ranges remove existing entries across holes and reject the running b
     defer gpa.free(range_cmd);
     try std.testing.expectEqualStrings("command \"$TJ\" rm @2..@5", range_cmd);
 
-    const annotation_text = try dir.readFileAlloc(io, "annotations.json", gpa, .limited(4096));
-    defer gpa.free(annotation_text);
-    try std.testing.expect(std.mem.indexOf(u8, annotation_text, "range-name") == null);
-    try std.testing.expect(std.mem.indexOf(u8, annotation_text, "range-tag") == null);
+    var remaining_names = try run(gpa, &.{ "--home", home, "name" }, 24, 100);
+    defer remaining_names.out.deinit(gpa);
+    try std.testing.expect(std.mem.indexOf(u8, remaining_names.out.items, "range-name") == null);
+    var remaining_tags = try run(gpa, &.{ "--home", home, "tag" }, 24, 100);
+    defer remaining_tags.out.deinit(gpa);
+    try std.testing.expect(std.mem.indexOf(u8, remaining_tags.out.items, "range-tag") == null);
     var remaining_pins = try run(gpa, &.{ "--home", home, "pin" }, 24, 100);
     defer remaining_pins.out.deinit(gpa);
     try std.testing.expect(std.mem.indexOf(u8, remaining_pins.out.items, "@4") != null);
@@ -1827,7 +1829,9 @@ test "concurrent annotation commands preserve every update" {
     for (children) |child| {
         var transcript: std.ArrayList(u8) = .empty;
         defer transcript.deinit(gpa);
-        try std.testing.expectEqual(@as(u8, 0), try child.finish(gpa, &transcript, timeout_ms));
+        const status = try child.finish(gpa, &transcript, timeout_ms);
+        if (status != 0) std.debug.print("concurrent annotation child failed ({d}): {s}\n", .{ status, transcript.items });
+        try std.testing.expectEqual(@as(u8, 0), status);
     }
 
     var listed = try run(gpa, &.{ "--home", home, "tag", "@1" }, 24, 120);
@@ -2416,6 +2420,36 @@ const Scratch = struct {
     }
 };
 
+test "legacy and corrupt journal metadata fail with explicit diagnostics" {
+    const gpa = std.testing.allocator;
+    const io = std.testing.io;
+    var scratch = try Scratch.open();
+    defer scratch.close();
+
+    const legacy = ulid.encode(37, .{2} ** 10);
+    const corrupt = ulid.encode(38, .{3} ** 10);
+    try scratch.makeJournal(legacy, &.{"1"});
+    try scratch.makeJournal(corrupt, &.{"1"});
+    var legacy_dir = try scratch.tmp.dir.openDir(io, &legacy, .{});
+    defer legacy_dir.close(io);
+    try legacy_dir.writeFile(io, .{ .sub_path = "annotations.json", .data = "{}\n" });
+    var corrupt_dir = try scratch.tmp.dir.openDir(io, &corrupt, .{});
+    defer corrupt_dir.close(io);
+    try corrupt_dir.writeFile(io, .{ .sub_path = "journal.sqlite3", .data = "not sqlite" });
+
+    for ([_]struct { id: ulid.Ulid, diagnostic: []const u8 }{
+        .{ .id = legacy, .diagnostic = "legacy annotations.json is unsupported" },
+        .{ .id = corrupt, .diagnostic = "invalid or incompatible journal.sqlite3" },
+    }) |case| {
+        const result = try runNonTtyInJournal(gpa, &.{ "--home", scratch.path(), "name" }, &case.id, "2");
+        defer gpa.free(result.stdout);
+        defer gpa.free(result.stderr);
+        try std.testing.expectEqual(@as(u8, 1), result.term.exited);
+        try std.testing.expectEqualStrings("", result.stdout);
+        try std.testing.expect(std.mem.indexOf(u8, result.stderr, case.diagnostic) != null);
+    }
+}
+
 test "usage sums logical journal bytes and charts every entry in number order" {
     const gpa = std.testing.allocator;
     const io = std.testing.io;
@@ -2427,7 +2461,9 @@ test "usage sums logical journal bytes and charts every entry in number order" {
     var journal = try scratch.tmp.dir.openDir(io, &id, .{});
     defer journal.close(io);
 
-    try journal.writeFile(io, .{ .sub_path = "annotations.json", .data = &([_]u8{'a'} ** 100) });
+    try journal.writeFile(io, .{ .sub_path = "journal.sqlite3", .data = &([_]u8{'a'} ** 100) });
+    try journal.writeFile(io, .{ .sub_path = "journal.sqlite3-wal", .data = &([_]u8{'w'} ** 11) });
+    try journal.writeFile(io, .{ .sub_path = "journal.sqlite3-shm", .data = &([_]u8{'s'} ** 13) });
     try journal.writeFile(io, .{ .sub_path = "log", .data = &([_]u8{'l'} ** 105) });
 
     var one = try journal.openDir(io, "1", .{});
@@ -2479,7 +2515,7 @@ test "usage sums logical journal bytes and charts every entry in number order" {
     defer gpa.free(exact_chart.stdout);
     defer gpa.free(exact_chart.stderr);
     try std.testing.expectEqual(@as(u8, 0), exact_chart.term.exited);
-    try std.testing.expect(std.mem.startsWith(u8, exact_chart.stdout, "Total 3277\n\nEntry Size Chart\n"));
+    try std.testing.expect(std.mem.startsWith(u8, exact_chart.stdout, "Total 3301\n\nEntry Size Chart\n"));
     try std.testing.expect(std.mem.indexOf(u8, exact_chart.stdout, " @1 1024 ") != null);
     try std.testing.expect(std.mem.indexOf(u8, exact_chart.stdout, " @3 2048 ") != null);
     try std.testing.expect(std.mem.indexOf(u8, exact_chart.stdout, "@10    0\n") != null);
@@ -3074,11 +3110,20 @@ test "terminal native grep omits its results while redirected output stays plain
     // Grep rows share history's entry annotation and failure markers.
     var journal_dir_handle = try journal.journalDir();
     defer journal_dir_handle.close(std.testing.io);
-    try journal_dir_handle.writeFile(std.testing.io, .{
-        .sub_path = "annotations.json",
-        .data = "{\"v\":1,\"interactions\":{\"1\":{\"name\":\"grep-hit\",\"tags\":[\"bug\",\"parser\"],\"pinned\":true}}}\n",
-    });
     try journal_dir_handle.writeFile(std.testing.io, .{ .sub_path = "1/rc", .data = "7\n" });
+    try journal.enter(gpa);
+    defer leaveJournal();
+    const home = try journal.homeArg(gpa);
+    defer gpa.free(home);
+    for ([_][]const []const u8{
+        &.{ "--home", home, "name", "@1", "grep-hit" },
+        &.{ "--home", home, "tag", "@1", "bug", "parser" },
+        &.{ "--home", home, "pin", "@1" },
+    }) |annotation_args| {
+        var result = try run(gpa, annotation_args, 24, 100);
+        defer result.out.deinit(gpa);
+        try std.testing.expectEqual(@as(u8, 0), result.code);
+    }
 
     from = transcript.items.len;
     try child.write("env -u NO_COLOR TERM=xterm-256color GREP_COLORS='mt=4;32' \"$TJ\" grep --color auto --out NOOUT_GREP_PAYLOAD_012\n");

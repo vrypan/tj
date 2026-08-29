@@ -12,6 +12,21 @@ pub fn build(b: *std.Build) void {
         .link_libc = true,
     });
     exe_mod.addImport("zecli", zecli.module("cli"));
+    exe_mod.addIncludePath(b.path("vendor/sqlite"));
+    exe_mod.addIncludePath(b.path("src"));
+    exe_mod.addCSourceFile(.{
+        .file = b.path("vendor/sqlite/sqlite3.c"),
+        .flags = &.{
+            "-std=c99",
+            "-DSQLITE_THREADSAFE=1",
+            "-DSQLITE_OMIT_LOAD_EXTENSION",
+            "-DSQLITE_DQS=0",
+        },
+    });
+    exe_mod.addCSourceFile(.{
+        .file = b.path("src/sqlite_shim.c"),
+        .flags = &.{"-std=c99"},
+    });
 
     const exe = b.addExecutable(.{ .name = "tj", .root_module = exe_mod });
     b.installArtifact(exe);

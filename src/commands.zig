@@ -11,6 +11,7 @@ const sys = @import("sys.zig");
 const reference = @import("reference.zig");
 const plain = @import("plain.zig");
 const annotations = @import("annotations.zig");
+const mutation_lock = @import("mutation_lock.zig");
 const search = @import("search.zig");
 const noout = @import("noout.zig");
 const replay_engine = @import("replay.zig");
@@ -30,7 +31,11 @@ pub const Error = error{
     InvalidName,
     InvalidTag,
     NameTaken,
-    InvalidAnnotations,
+    AnnotationBusy,
+    AnnotationConstraint,
+    InvalidAnnotationDatabase,
+    LegacyAnnotationsUnsupported,
+    AnnotationDatabaseFailure,
     UnsupportedRemoval,
     InvalidRange,
     CurrentInteraction,
@@ -673,16 +678,15 @@ fn grepJournal(
         for (interactions) |info| info.deinit(gpa);
         gpa.free(interactions);
     }
-    var manifest = annotations.load(gpa, io, root, journal) catch |err| switch (err) {
-        error.InvalidAnnotations => return error.InvalidAnnotations,
-        else => return err,
-    };
-    defer manifest.deinit(gpa);
+    var metadata = try annotations.openRead(gpa, io, root, journal);
+    defer metadata.deinit(gpa);
 
     for (interactions) |info| {
         if (active) |item| {
             if (item.number == info.number and std.mem.eql(u8, item.journal, journal)) continue;
         }
+        var annotation = try metadata.get(gpa, info.number);
+        defer if (annotation) |*entry| entry.deinit(gpa);
         for ([_]struct { enabled: bool, name: []const u8 }{
             .{ .enabled = request.commands, .name = "cmd" },
             .{ .enabled = request.output, .name = "out" },
@@ -702,7 +706,7 @@ fn grepJournal(
                 .resource = resource.name,
                 .qualified = request.all,
                 .matcher = matcher,
-                .annotation = manifest.findConst(info.number),
+                .annotation = if (annotation) |*entry| entry else null,
                 .exit_code = info.exit_code,
             };
             const found = try search.scanFile(io, file, matcher, .{
@@ -782,11 +786,9 @@ fn listJournals(gpa: std.mem.Allocator, io: Io, home: ?[]const u8, out: *Io.Writ
 
 const HistoryJournal = struct {
     name: []u8,
-    manifest: annotations.Manifest,
     interactions: []store.InteractionInfo,
 
     fn deinit(self: *HistoryJournal, gpa: std.mem.Allocator) void {
-        self.manifest.deinit(gpa);
         for (self.interactions) |info| info.deinit(gpa);
         gpa.free(self.interactions);
         gpa.free(self.name);
@@ -819,11 +821,6 @@ fn loadHistoryJournal(
 
     const owned_name = try gpa.dupe(u8, name);
     errdefer gpa.free(owned_name);
-    var manifest = annotations.load(gpa, io, root, name) catch |err| switch (err) {
-        error.InvalidAnnotations => return error.InvalidAnnotations,
-        else => return err,
-    };
-    errdefer manifest.deinit(gpa);
     const interactions = store.listInteractions(gpa, io, root, name) catch |err| switch (err) {
         error.FileNotFound => return error.NoSuchJournal,
         else => return err,
@@ -834,7 +831,6 @@ fn loadHistoryJournal(
     }
     try journals.append(gpa, .{
         .name = owned_name,
-        .manifest = manifest,
         .interactions = interactions,
     });
     return journals.items.len - 1;
@@ -981,10 +977,22 @@ fn listInteractions(
 
     var number_width: usize = 1;
     var size_width: usize = 1;
+    var sizing_metadata: ?annotations.Connection = null;
+    defer if (sizing_metadata) |*metadata| metadata.deinit(gpa);
+    var sizing_journal: ?usize = null;
     for (selected.items) |selection| {
         const journal = &journals.items[selection.journal_index];
         const info = journal.interactions[selection.interaction_index];
-        if (!historyEntryVisible(&journal.manifest, info.number, filters.items, pinned_only)) continue;
+        if (sizing_journal != selection.journal_index) {
+            if (sizing_metadata) |*metadata| metadata.deinit(gpa);
+            sizing_metadata = null;
+            sizing_metadata = try annotations.openRead(gpa, io, root, journal.name);
+            sizing_journal = selection.journal_index;
+        }
+        const metadata = if (sizing_metadata) |*value| value else unreachable;
+        var annotation = try metadata.get(gpa, info.number);
+        defer if (annotation) |*entry| entry.deinit(gpa);
+        if (!historyEntryVisible(if (annotation) |*entry| entry else null, filters.items, pinned_only)) continue;
         number_width = @max(number_width, historyReferenceWidth(journal, selection));
         var size_buf: [24]u8 = undefined;
         size_width = @max(size_width, formatEntrySize(info, &size_buf).len);
@@ -1006,11 +1014,23 @@ fn listInteractions(
     defer noout_region.finish();
     const now_ms = Io.Clock.now(.real, io).toMilliseconds();
 
+    var render_metadata: ?annotations.Connection = null;
+    defer if (render_metadata) |*metadata| metadata.deinit(gpa);
+    var render_journal: ?usize = null;
     for (selected.items) |selection| {
         const journal = &journals.items[selection.journal_index];
         const info = journal.interactions[selection.interaction_index];
-        const annotation = journal.manifest.findConst(info.number);
-        if (!historyEntryVisible(&journal.manifest, info.number, filters.items, pinned_only)) continue;
+        if (render_journal != selection.journal_index) {
+            if (render_metadata) |*metadata| metadata.deinit(gpa);
+            render_metadata = null;
+            render_metadata = try annotations.openRead(gpa, io, root, journal.name);
+            render_journal = selection.journal_index;
+        }
+        const metadata = if (render_metadata) |*value| value else unreachable;
+        var annotation_owned = try metadata.get(gpa, info.number);
+        defer if (annotation_owned) |*entry| entry.deinit(gpa);
+        const annotation: ?*const annotations.Entry = if (annotation_owned) |*entry| entry else null;
+        if (!historyEntryVisible(annotation, filters.items, pinned_only)) continue;
 
         var payload: std.ArrayList(u8) = .empty;
         defer payload.deinit(gpa);
@@ -1251,14 +1271,24 @@ fn formatLsDate(started_ms: ?i64, now_ms: i64, buf: *[12]u8) []const u8 {
 }
 
 fn historyEntryVisible(
-    manifest: *const annotations.Manifest,
-    number: u32,
+    annotation: ?*const annotations.Entry,
     tags: []const []const u8,
     pinned_only: bool,
 ) bool {
-    const annotation = manifest.findConst(number);
     if (pinned_only and (annotation == null or !annotation.?.pinned)) return false;
-    return manifest.hasAllTags(number, tags);
+    if (tags.len == 0) return true;
+    const entry = annotation orelse return false;
+    for (tags) |wanted| {
+        var found = false;
+        for (entry.tags.items) |actual| {
+            if (std.mem.eql(u8, wanted, actual)) {
+                found = true;
+                break;
+            }
+        }
+        if (!found) return false;
+    }
+    return true;
 }
 
 fn decimalWidth(number: u32) usize {
@@ -1545,13 +1575,14 @@ fn completeInteractions(
         try out.print("@{s}{s}\n", .{ qualifier, text });
     }
 
-    var manifest = annotations.load(gpa, io, root, journal) catch return;
-    defer manifest.deinit(gpa);
-    for (manifest.entries.items) |entry| {
-        const name = entry.name orelse continue;
+    var metadata = annotations.openRead(gpa, io, root, journal) catch return;
+    defer metadata.deinit(gpa);
+    var names = metadata.names() catch return;
+    defer names.deinit();
+    while (names.next() catch return) |entry| {
         if (!store.interactionExists(io, root, journal, entry.number)) continue;
-        if (!std.mem.startsWith(u8, name, prefix)) continue;
-        try out.print("@{s}{s}\n", .{ qualifier, name });
+        if (!std.mem.startsWith(u8, entry.name, prefix)) continue;
+        try out.print("@{s}{s}\n", .{ qualifier, entry.name });
     }
 }
 
@@ -1713,33 +1744,19 @@ fn openCurrentMutation(
     gpa: std.mem.Allocator,
     io: Io,
     home: ?[]const u8,
+    mode: mutation_lock.Mode,
 ) !struct { root: store.Dir, journal: []const u8, lock: Io.File } {
     const journal = try currentJournal();
     var root = try store.openRoot(io, home);
     errdefer root.close(io);
-    const lock = try annotations.acquireMutationLock(io, root, journal);
+    const lock = try mutation_lock.acquire(io, root, journal, mode);
     errdefer lock.close(io);
-    try store.recoverPendingOutputRemovals(gpa, io, root, journal);
-    store.cleanupJournalTrash(io, root, journal);
-    return .{ .root = root, .journal = journal, .lock = lock };
-}
-
-fn pruneMissingAnnotations(
-    gpa: std.mem.Allocator,
-    io: Io,
-    root: store.Dir,
-    journal: []const u8,
-    manifest: *annotations.Manifest,
-) void {
-    var i: usize = 0;
-    while (i < manifest.entries.items.len) {
-        const number = manifest.entries.items[i].number;
-        if (store.interactionExists(io, root, journal, number)) {
-            i += 1;
-        } else {
-            manifest.removeInteraction(gpa, number);
-        }
+    if (mode == .exclusive) {
+        try store.recoverPendingOutputRemovals(gpa, io, root, journal);
+        try annotations.recoverStagedRemovals(gpa, io, root, journal);
+        store.cleanupJournalTrash(io, root, journal);
     }
+    return .{ .root = root, .journal = journal, .lock = lock };
 }
 
 const NameRequest = union(enum) {
@@ -1775,12 +1792,13 @@ fn nameCommand(
             const current = try currentJournal();
             var root = try store.openRoot(io, home);
             defer root.close(io);
-            var manifest = try annotations.load(gpa, io, root, current);
-            defer manifest.deinit(gpa);
-            for (manifest.entries.items) |entry| {
-                const name = entry.name orelse continue;
+            var metadata = try annotations.openRead(gpa, io, root, current);
+            defer metadata.deinit(gpa);
+            var names = try metadata.names();
+            defer names.deinit();
+            while (try names.next()) |entry| {
                 if (!store.interactionExists(io, root, current, entry.number)) continue;
-                try out.print("{s}  @{d}\n", .{ name, entry.number });
+                try out.print("{s}  @{d}\n", .{ entry.name, entry.number });
             }
             return;
         },
@@ -1790,23 +1808,25 @@ fn nameCommand(
             const target = try locateCommandTarget(gpa, io, root, ref);
             defer target.deinit(gpa);
             try requireInteraction(target);
-            var manifest = try annotations.load(gpa, io, root, target.journal);
-            defer manifest.deinit(gpa);
-            const entry = manifest.findConst(target.number) orelse return;
+            var metadata = try annotations.openRead(gpa, io, root, target.journal);
+            defer metadata.deinit(gpa);
+            var entry = try metadata.get(gpa, target.number) orelse return;
+            defer entry.deinit(gpa);
             const name = entry.name orelse return;
             try out.print("{s}  ", .{name});
             try printCanonical(out, sys.env("TJ_JOURNAL"), target.journal, target.number);
             return out.writeAll("\n");
         },
         .remove => |name| {
-            var mutation = try openCurrentMutation(gpa, io, home);
+            var mutation = try openCurrentMutation(gpa, io, home, .shared);
             defer mutation.lock.close(io);
             defer mutation.root.close(io);
-            var manifest = try annotations.load(gpa, io, mutation.root, mutation.journal);
-            defer manifest.deinit(gpa);
-            pruneMissingAnnotations(gpa, io, mutation.root, mutation.journal, &manifest);
-            try manifest.removeName(gpa, name);
-            return annotations.save(gpa, io, mutation.root, mutation.journal, &manifest);
+            var metadata = try annotations.openWrite(gpa, io, mutation.root, mutation.journal);
+            defer metadata.deinit(gpa);
+            var transaction = try metadata.begin();
+            defer transaction.deinit();
+            try metadata.removeName(name);
+            return transaction.commit();
         },
         .set => |request| {
             var root = try store.openRoot(io, home);
@@ -1814,15 +1834,21 @@ fn nameCommand(
             const target = try requireMutationTarget(gpa, io, root, request.ref);
             defer target.deinit(gpa);
             try requireInteraction(target);
-            var mutation = try openCurrentMutation(gpa, io, home);
+            var mutation = try openCurrentMutation(gpa, io, home, .shared);
             defer mutation.lock.close(io);
             defer mutation.root.close(io);
             if (!store.interactionExists(io, mutation.root, mutation.journal, target.number)) return error.NoSuchInteraction;
-            var manifest = try annotations.load(gpa, io, mutation.root, mutation.journal);
-            defer manifest.deinit(gpa);
-            pruneMissingAnnotations(gpa, io, mutation.root, mutation.journal, &manifest);
-            try manifest.setName(gpa, target.number, request.name);
-            try annotations.save(gpa, io, mutation.root, mutation.journal, &manifest);
+            var metadata = try annotations.openWrite(gpa, io, mutation.root, mutation.journal);
+            defer metadata.deinit(gpa);
+            var transaction = try metadata.begin();
+            defer transaction.deinit();
+            if (try metadata.numberForName(request.name)) |owner| {
+                if (!store.interactionExists(io, mutation.root, mutation.journal, owner)) {
+                    try metadata.removeName(request.name);
+                }
+            }
+            try metadata.setName(target.number, request.name);
+            try transaction.commit();
         },
     }
 }
@@ -1884,14 +1910,21 @@ fn tagCommand(
             const current = try currentJournal();
             var root = try store.openRoot(io, home);
             defer root.close(io);
-            var manifest = try annotations.load(gpa, io, root, current);
-            defer manifest.deinit(gpa);
-            for (manifest.entries.items) |entry| {
-                if (entry.tags.items.len == 0 or !store.interactionExists(io, root, current, entry.number)) continue;
-                try out.print("@{d}", .{entry.number});
-                for (entry.tags.items) |tag| try out.print("  {s}", .{tag});
-                try out.writeAll("\n");
+            var metadata = try annotations.openRead(gpa, io, root, current);
+            defer metadata.deinit(gpa);
+            var rows = try metadata.tags();
+            defer rows.deinit();
+            var printed: ?u32 = null;
+            while (try rows.next()) |row| {
+                if (!store.interactionExists(io, root, current, row.number)) continue;
+                if (printed != row.number) {
+                    if (printed != null) try out.writeAll("\n");
+                    try out.print("@{d}", .{row.number});
+                    printed = row.number;
+                }
+                try out.print("  {s}", .{row.tag});
             }
+            if (printed != null) try out.writeAll("\n");
         },
         .query => |targets| {
             for (targets) |target| try queryTags(gpa, io, home, target, out);
@@ -1920,9 +1953,10 @@ fn queryTags(
     const target = try locateCommandTarget(gpa, io, root, ref);
     defer target.deinit(gpa);
     try requireInteraction(target);
-    var manifest = try annotations.load(gpa, io, root, target.journal);
-    defer manifest.deinit(gpa);
-    const entry = manifest.findConst(target.number) orelse return;
+    var metadata = try annotations.openRead(gpa, io, root, target.journal);
+    defer metadata.deinit(gpa);
+    var entry = (try metadata.get(gpa, target.number)) orelse return;
+    defer entry.deinit(gpa);
     if (entry.tags.items.len == 0) return;
     try printCanonical(out, sys.env("TJ_JOURNAL"), target.journal, target.number);
     for (entry.tags.items) |tag| try out.print("  {s}", .{tag});
@@ -1948,21 +1982,24 @@ fn updateTags(
     defer target.deinit(gpa);
     try requireInteraction(target);
 
-    var mutation = try openCurrentMutation(gpa, io, home);
+    var mutation = try openCurrentMutation(gpa, io, home, .shared);
     defer mutation.lock.close(io);
     defer mutation.root.close(io);
     if (!store.interactionExists(io, mutation.root, mutation.journal, target.number)) return error.NoSuchInteraction;
-    var manifest = try annotations.load(gpa, io, mutation.root, mutation.journal);
-    defer manifest.deinit(gpa);
-    pruneMissingAnnotations(gpa, io, mutation.root, mutation.journal, &manifest);
-    for (tags) |tag| {
+    const normalized = try normalizeTags(gpa, tags);
+    defer freeTags(gpa, normalized);
+    var metadata = try annotations.openWrite(gpa, io, mutation.root, mutation.journal);
+    defer metadata.deinit(gpa);
+    var transaction = try metadata.begin();
+    defer transaction.deinit();
+    for (normalized) |tag| {
         if (removing) {
-            try manifest.removeTag(gpa, target.number, tag);
+            try metadata.removeTag(target.number, tag);
         } else {
-            try manifest.addTag(gpa, target.number, tag);
+            try metadata.addTag(target.number, tag);
         }
     }
-    try annotations.save(gpa, io, mutation.root, mutation.journal, &manifest);
+    try transaction.commit();
 }
 
 fn queryTagsRange(
@@ -1979,11 +2016,12 @@ fn queryTagsRange(
     defer gpa.free(numbers);
     if (!rangeSelectsAny(numbers, range)) return error.NoSuchInteraction;
 
-    var manifest = try annotations.load(gpa, io, root, current);
-    defer manifest.deinit(gpa);
+    var metadata = try annotations.openRead(gpa, io, root, current);
+    defer metadata.deinit(gpa);
     for (numbers) |number| {
         if (!range.contains(number)) continue;
-        const entry = manifest.findConst(number) orelse continue;
+        var entry = (try metadata.get(gpa, number)) orelse continue;
+        defer entry.deinit(gpa);
         if (entry.tags.items.len == 0) continue;
         try out.print("@{d}", .{number});
         for (entry.tags.items) |tag| try out.print("  {s}", .{tag});
@@ -1999,27 +2037,47 @@ fn updateTagsRange(
     tags: []const []const u8,
     removing: bool,
 ) !void {
-    var mutation = try openCurrentMutation(gpa, io, home);
+    var mutation = try openCurrentMutation(gpa, io, home, .shared);
     defer mutation.lock.close(io);
     defer mutation.root.close(io);
     const numbers = try store.listNumbers(gpa, io, mutation.root, mutation.journal);
     defer gpa.free(numbers);
     if (!rangeSelectsAny(numbers, range)) return error.NoSuchInteraction;
 
-    var manifest = try annotations.load(gpa, io, mutation.root, mutation.journal);
-    defer manifest.deinit(gpa);
-    pruneMissingAnnotations(gpa, io, mutation.root, mutation.journal, &manifest);
+    const normalized = try normalizeTags(gpa, tags);
+    defer freeTags(gpa, normalized);
+    var metadata = try annotations.openWrite(gpa, io, mutation.root, mutation.journal);
+    defer metadata.deinit(gpa);
+    var transaction = try metadata.begin();
+    defer transaction.deinit();
     for (numbers) |number| {
         if (!range.contains(number)) continue;
-        for (tags) |tag| {
+        for (normalized) |tag| {
             if (removing) {
-                try manifest.removeTag(gpa, number, tag);
+                try metadata.removeTag(number, tag);
             } else {
-                try manifest.addTag(gpa, number, tag);
+                try metadata.addTag(number, tag);
             }
         }
     }
-    try annotations.save(gpa, io, mutation.root, mutation.journal, &manifest);
+    try transaction.commit();
+}
+
+fn normalizeTags(gpa: std.mem.Allocator, tags: []const []const u8) ![][]u8 {
+    const normalized = try gpa.alloc([]u8, tags.len);
+    errdefer gpa.free(normalized);
+    var completed: usize = 0;
+    errdefer for (normalized[0..completed]) |tag| gpa.free(tag);
+    for (tags, 0..) |tag, index| {
+        normalized[index] = try annotations.normalizeTag(gpa, tag);
+        completed += 1;
+    }
+    return normalized;
+}
+
+fn freeTags(gpa: std.mem.Allocator, tags: [][]u8) void {
+    for (tags) |tag| gpa.free(tag);
+    gpa.free(tags);
 }
 
 const PinRequest = union(enum) {
@@ -2053,12 +2111,12 @@ fn pinCommand(
             const current = try currentJournal();
             var root = try store.openRoot(io, home);
             defer root.close(io);
-            var manifest = try annotations.load(gpa, io, root, current);
-            defer manifest.deinit(gpa);
-            for (manifest.entries.items) |entry| {
-                if (entry.pinned and store.interactionExists(io, root, current, entry.number)) {
-                    try out.print("@{d}\n", .{entry.number});
-                }
+            var metadata = try annotations.openRead(gpa, io, root, current);
+            defer metadata.deinit(gpa);
+            var pins = try metadata.pins();
+            defer pins.deinit();
+            while (try pins.next()) |number| {
+                if (store.interactionExists(io, root, current, number)) try out.print("@{d}\n", .{number});
             }
         },
         .set => |ref| try updatePin(gpa, io, home, ref, true),
@@ -2078,15 +2136,16 @@ fn updatePin(gpa: std.mem.Allocator, io: Io, home: ?[]const u8, ref: []const u8,
     defer target.deinit(gpa);
     try requireInteraction(target);
 
-    var mutation = try openCurrentMutation(gpa, io, home);
+    var mutation = try openCurrentMutation(gpa, io, home, .shared);
     defer mutation.lock.close(io);
     defer mutation.root.close(io);
     if (!store.interactionExists(io, mutation.root, mutation.journal, target.number)) return error.NoSuchInteraction;
-    var manifest = try annotations.load(gpa, io, mutation.root, mutation.journal);
-    defer manifest.deinit(gpa);
-    pruneMissingAnnotations(gpa, io, mutation.root, mutation.journal, &manifest);
-    try manifest.setPinned(gpa, target.number, pinned);
-    try annotations.save(gpa, io, mutation.root, mutation.journal, &manifest);
+    var metadata = try annotations.openWrite(gpa, io, mutation.root, mutation.journal);
+    defer metadata.deinit(gpa);
+    var transaction = try metadata.begin();
+    defer transaction.deinit();
+    try metadata.setPinned(target.number, pinned);
+    try transaction.commit();
 }
 
 fn updatePinRange(
@@ -2096,20 +2155,21 @@ fn updatePinRange(
     range: InteractionRange,
     pinned: bool,
 ) !void {
-    var mutation = try openCurrentMutation(gpa, io, home);
+    var mutation = try openCurrentMutation(gpa, io, home, .shared);
     defer mutation.lock.close(io);
     defer mutation.root.close(io);
     const numbers = try store.listNumbers(gpa, io, mutation.root, mutation.journal);
     defer gpa.free(numbers);
     if (!rangeSelectsAny(numbers, range)) return error.NoSuchInteraction;
 
-    var manifest = try annotations.load(gpa, io, mutation.root, mutation.journal);
-    defer manifest.deinit(gpa);
-    pruneMissingAnnotations(gpa, io, mutation.root, mutation.journal, &manifest);
+    var metadata = try annotations.openWrite(gpa, io, mutation.root, mutation.journal);
+    defer metadata.deinit(gpa);
+    var transaction = try metadata.begin();
+    defer transaction.deinit();
     for (numbers) |number| {
-        if (range.contains(number)) try manifest.setPinned(gpa, number, pinned);
+        if (range.contains(number)) try metadata.setPinned(number, pinned);
     }
-    try annotations.save(gpa, io, mutation.root, mutation.journal, &manifest);
+    try transaction.commit();
 }
 
 const RemoveRequest = struct {
@@ -2234,9 +2294,13 @@ fn removeJournal(
         gpa.free(interactions);
     }
     if (!force) {
-        var manifest = try annotations.load(gpa, io, root, journal);
-        defer manifest.deinit(gpa);
-        if (manifest.hasPins()) return error.PinnedInteraction;
+        var metadata = try annotations.openRead(gpa, io, root, journal);
+        defer metadata.deinit(gpa);
+        var pins = try metadata.pins();
+        defer pins.deinit();
+        while (try pins.next()) |number| {
+            if (store.interactionExists(io, root, journal, number)) return error.PinnedInteraction;
+        }
         if (!sys.isTty(0)) return error.ConfirmationRequired;
         try out.print("Remove journal {s} with {d} {s}? [y/N] ", .{
             journal,
@@ -2276,7 +2340,7 @@ fn removeInteraction(
     const output_only = std.mem.eql(u8, target.subpath, "out");
     if (target.subpath.len != 0 and !output_only) return error.UnsupportedRemoval;
 
-    var mutation = try openCurrentMutation(gpa, io, home);
+    var mutation = try openCurrentMutation(gpa, io, home, .exclusive);
     defer mutation.lock.close(io);
     defer mutation.root.close(io);
     if (!std.mem.eql(u8, target.journal, mutation.journal)) return error.CrossJournalMutation;
@@ -2285,10 +2349,9 @@ fn removeInteraction(
         return error.NoSuchInteraction;
     if (target.number >= highest) return error.CurrentInteraction;
 
-    var manifest = try annotations.load(gpa, io, mutation.root, mutation.journal);
-    defer manifest.deinit(gpa);
-    pruneMissingAnnotations(gpa, io, mutation.root, mutation.journal, &manifest);
-    if (!force and interactionPinned(&manifest, target.number)) {
+    var read_metadata = try annotations.openRead(gpa, io, mutation.root, mutation.journal);
+    defer read_metadata.deinit(gpa);
+    if (!force and try read_metadata.isPinned(target.number)) {
         note("tj: skipped pinned entry @{d}; use --force to remove it\n", .{target.number});
         return;
     }
@@ -2302,8 +2365,12 @@ fn removeInteraction(
 
     const staged = try store.stageInteractionRemoval(gpa, io, mutation.root, mutation.journal, target.number);
     defer gpa.free(staged);
-    manifest.removeInteraction(gpa, target.number);
-    try annotations.save(gpa, io, mutation.root, mutation.journal, &manifest);
+    var metadata = try annotations.openWrite(gpa, io, mutation.root, mutation.journal);
+    defer metadata.deinit(gpa);
+    var transaction = try metadata.begin();
+    defer transaction.deinit();
+    try metadata.removeEntry(target.number);
+    try transaction.commit();
     try store.finishStagedRemoval(io, mutation.root, staged);
 }
 
@@ -2348,11 +2415,6 @@ fn rangeSelectsAny(numbers: []const u32, range: InteractionRange) bool {
     return false;
 }
 
-fn interactionPinned(manifest: *const annotations.Manifest, number: u32) bool {
-    const entry = manifest.findConst(number) orelse return false;
-    return entry.pinned;
-}
-
 fn removeInteractionRange(
     gpa: std.mem.Allocator,
     io: Io,
@@ -2360,7 +2422,7 @@ fn removeInteractionRange(
     range: InteractionRange,
     force: bool,
 ) !void {
-    var mutation = try openCurrentMutation(gpa, io, home);
+    var mutation = try openCurrentMutation(gpa, io, home, .exclusive);
     defer mutation.lock.close(io);
     defer mutation.root.close(io);
 
@@ -2380,9 +2442,8 @@ fn removeInteractionRange(
     }
     if (selected == 0) return error.NoSuchInteraction;
 
-    var manifest = try annotations.load(gpa, io, mutation.root, mutation.journal);
-    defer manifest.deinit(gpa);
-    pruneMissingAnnotations(gpa, io, mutation.root, mutation.journal, &manifest);
+    var read_metadata = try annotations.openRead(gpa, io, mutation.root, mutation.journal);
+    defer read_metadata.deinit(gpa);
 
     var staged_paths: std.ArrayList([]u8) = .empty;
     defer {
@@ -2394,17 +2455,25 @@ fn removeInteractionRange(
     var skipped_pinned: usize = 0;
     for (numbers) |number| {
         if (number < range.first or number > range.last) continue;
-        if (!force and interactionPinned(&manifest, number)) {
+        if (!force and try read_metadata.isPinned(number)) {
             skipped_pinned += 1;
             continue;
         }
         const staged = try store.stageInteractionRemoval(gpa, io, mutation.root, mutation.journal, number);
         staged_paths.appendAssumeCapacity(staged);
-        manifest.removeInteraction(gpa, number);
     }
 
     if (staged_paths.items.len != 0) {
-        try annotations.save(gpa, io, mutation.root, mutation.journal, &manifest);
+        var metadata = try annotations.openWrite(gpa, io, mutation.root, mutation.journal);
+        defer metadata.deinit(gpa);
+        var transaction = try metadata.begin();
+        defer transaction.deinit();
+        for (numbers) |number| {
+            if (number < range.first or number > range.last) continue;
+            if (!force and try metadata.isPinned(number)) continue;
+            try metadata.removeEntry(number);
+        }
+        try transaction.commit();
     }
     for (staged_paths.items) |path| try store.finishStagedRemoval(io, mutation.root, path);
     if (skipped_pinned != 0) {
