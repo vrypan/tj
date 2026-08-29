@@ -184,27 +184,32 @@ fn validSgr(text: []const u8) bool {
     return true;
 }
 
+const NooutRegion = struct {
+    out: *Io.Writer,
+    enabled: bool,
+    started: bool = false,
+
+    fn begin(self: *NooutRegion) !void {
+        if (self.enabled and !self.started) {
+            try self.out.writeAll(noout.begin_marker);
+            self.started = true;
+        }
+    }
+
+    fn finish(self: *NooutRegion) void {
+        if (self.started) self.out.writeAll(noout.end_marker) catch {};
+        self.started = false;
+    }
+};
+
 const GrepOutput = struct {
     io: Io,
     out: *Io.Writer,
-    noout_enabled: bool,
+    noout_region: NooutRegion,
     match_sgr: []const u8,
     terminal_columns: ?usize,
     layout_color: bool,
     reference_width: usize,
-    noout_started: bool = false,
-
-    fn begin(self: *GrepOutput) !void {
-        if (self.noout_enabled and !self.noout_started) {
-            try self.out.writeAll(noout.begin_marker);
-            self.noout_started = true;
-        }
-    }
-
-    fn finish(self: *GrepOutput) void {
-        if (self.noout_started) self.out.writeAll(noout.end_marker) catch {};
-        self.noout_started = false;
-    }
 };
 
 /// Adds hard terminal-width boundaries while forwarding source bytes and ANSI
@@ -389,7 +394,7 @@ const GrepLineSink = struct {
 
     fn emit(context: *anyopaque, file: Io.File, start: u64, end: u64) !void {
         const self: *GrepLineSink = @ptrCast(@alignCast(context));
-        try self.output.begin();
+        try self.output.noout_region.begin();
 
         var reference_buf: [64]u8 = undefined;
         const reference_text = if (self.qualified) blk: {
@@ -538,13 +543,16 @@ fn grepCommand(
     var output: GrepOutput = .{
         .io = io,
         .out = out,
-        .noout_enabled = current != null and current.?.len != 0 and sys.isTty(1),
+        .noout_region = .{
+            .out = out,
+            .enabled = current != null and current.?.len != 0 and sys.isTty(1),
+        },
         .match_sgr = if (colorEnabled(request.color)) selectedMatchSgr(sys.env("GREP_COLORS")) else "",
         .terminal_columns = terminal_columns,
         .layout_color = historyColorEnabled(),
         .reference_width = 1,
     };
-    defer output.finish();
+    defer output.noout_region.finish();
     const active = activeInteraction();
     var total: u64 = 0;
 
@@ -751,6 +759,12 @@ fn listInteractions(
     else
         null;
     const color_enabled = historyColorEnabled();
+    const current = sys.env("TJ_JOURNAL");
+    var noout_region: NooutRegion = .{
+        .out = out,
+        .enabled = current != null and current.?.len != 0 and sys.isTty(1),
+    };
+    defer noout_region.finish();
 
     for (interactions) |info| {
         const annotation = manifest.findConst(info.number);
@@ -790,6 +804,7 @@ fn listInteractions(
 
         var lines = try wrapHistoryText(gpa, payload.items, payload_width, prefix_width);
         defer lines.deinit(gpa);
+        try noout_region.begin();
 
         for (lines.items, 0..) |line, line_i| {
             if (line_i == 0) {

@@ -613,6 +613,10 @@ prefix, and word-wraps the command and suffix in the remaining columns.
 Oversized words are hard-wrapped. Continuation lines align with the command.
 Non-terminal output remains one physical line per entry with no ANSI sequences.
 
+When stdout is a terminal and a current journal exists, history lazily encloses
+the listing in one OSC 5107 noout region. No markers are emitted when filters
+select no entries. Redirected or piped history is plain marker-free output.
+
 A pin is an idempotent boolean annotation. It appears as `*` beside the
 entry number in history. Pins protect entries and their output
 from entry-level removal unless `--force` is present. They have no

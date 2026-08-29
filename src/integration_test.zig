@@ -7,6 +7,7 @@
 const std = @import("std");
 const posix = std.posix;
 const harness = @import("harness.zig");
+const noout = @import("noout.zig");
 const plain = @import("plain.zig");
 const ulid = @import("ulid.zig");
 
@@ -1066,13 +1067,23 @@ test "history wraps to terminal width and pipes remain one entry per line" {
     var wrapped = try run(gpa, &.{ "--home", home, "hist" }, 24, 48);
     defer wrapped.out.deinit(gpa);
     try std.testing.expectEqual(@as(u8, 0), wrapped.code);
+    const begin_at = std.mem.indexOf(u8, wrapped.out.items, noout.begin_marker) orelse return error.TestUnexpectedResult;
+    const content_start = begin_at + noout.begin_marker.len;
+    const end_at = std.mem.indexOfPos(u8, wrapped.out.items, content_start, noout.end_marker) orelse
+        return error.TestUnexpectedResult;
+    const visible = wrapped.out.items[content_start..end_at];
     // Removing the fixed status column gives the command seven more cells.
-    try std.testing.expect(std.mem.indexOf(u8, wrapped.out.items, "\r\n     eight") != null);
-    var physical_lines = std.mem.splitScalar(u8, wrapped.out.items, '\n');
+    try std.testing.expect(std.mem.indexOf(u8, visible, "\r\n     eight") != null);
+    var physical_lines = std.mem.splitScalar(u8, visible, '\n');
     while (physical_lines.next()) |raw_line| {
         const line = std.mem.trimEnd(u8, raw_line, "\r");
         if (line.len != 0) try std.testing.expect(line.len <= 48);
     }
+
+    var empty = try run(gpa, &.{ "--home", home, "hist", "--tag", "not-present" }, 24, 48);
+    defer empty.out.deinit(gpa);
+    try std.testing.expectEqual(@as(u8, 0), empty.code);
+    try std.testing.expect(std.mem.indexOf(u8, empty.out.items, noout.begin_marker) == null);
 
     const id = try journal.journalName(gpa);
     defer gpa.free(id);
@@ -1083,6 +1094,47 @@ test "history wraps to terminal width and pipes remain one entry per line" {
     try std.testing.expect(std.mem.indexOf(u8, piped.stdout, command) != null);
     try std.testing.expect(std.mem.indexOfScalar(u8, piped.stdout, 0x1b) == null);
     try std.testing.expectEqual(@as(usize, 2), std.mem.countScalar(u8, piped.stdout, '\n'));
+    try std.testing.expect(std.mem.indexOf(u8, piped.stdout, noout.begin_marker) == null);
+}
+
+test "terminal history omits its listing while piped history remains recordable" {
+    if (!haveZsh()) return error.SkipZigTest;
+    const gpa = std.testing.allocator;
+    var journal = try Journal.open(gpa);
+    defer journal.close();
+
+    const child = try spawnJournalZsh(gpa, &journal);
+    var transcript: std.ArrayList(u8) = .empty;
+    defer transcript.deinit(gpa);
+    try setupJournalZsh(gpa, child, &transcript);
+
+    var from = transcript.items.len;
+    try child.write("printf 'HIST_NOOUT_PAYLOAD_012\\n'\n");
+    try std.testing.expect(try child.readUntilFrom(gpa, &transcript, from, test_prompt, timeout_ms));
+
+    from = transcript.items.len;
+    try child.write("command \"$TJ\" hist\n");
+    try std.testing.expect(try child.readUntilFrom(gpa, &transcript, from, "HIST_NOOUT_PAYLOAD_012", timeout_ms));
+    try std.testing.expect(try child.readUntilFrom(gpa, &transcript, from, test_prompt, timeout_ms));
+
+    from = transcript.items.len;
+    try child.write("command \"$TJ\" hist | cat\n");
+    try std.testing.expect(try child.readUntilFrom(gpa, &transcript, from, "HIST_NOOUT_PAYLOAD_012", timeout_ms));
+    try std.testing.expect(try child.readUntilFrom(gpa, &transcript, from, test_prompt, timeout_ms));
+    try child.write("exit 0\n");
+    try std.testing.expectEqual(@as(u8, 0), try child.finish(gpa, &transcript, timeout_ms));
+
+    const direct_out = try journal.read(gpa, "2/out");
+    defer gpa.free(direct_out);
+    try std.testing.expect(std.mem.indexOf(u8, direct_out, "<tj:noout>") != null);
+    try std.testing.expect(std.mem.indexOf(u8, direct_out, "HIST_NOOUT_PAYLOAD_012") == null);
+    try std.testing.expect(std.mem.indexOf(u8, direct_out, "5107;tj") == null);
+
+    const piped_out = try journal.read(gpa, "3/out");
+    defer gpa.free(piped_out);
+    try std.testing.expect(std.mem.indexOf(u8, piped_out, "HIST_NOOUT_PAYLOAD_012") != null);
+    try std.testing.expect(std.mem.indexOf(u8, piped_out, "<tj:noout>") == null);
+    try std.testing.expect(std.mem.indexOf(u8, piped_out, "5107;tj") == null);
 }
 
 test "tag pin and cat ranges are inclusive and skip numbering holes" {

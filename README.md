@@ -263,6 +263,11 @@ space-separated tags follow the command as dimmed metadata on capable terminals.
 A nonzero exit status follows them as `[rc=N]`, in red when color is supported.
 Successful and unfinished entries show no status.
 
+When history is written directly to a terminal inside a journal writer, TJ
+wraps the listing in a noout region. The listing remains visible, while the
+current entry records only `<tj:noout>` instead of copying the index into the
+journal. Piped and redirected history remains ordinary marker-free output.
+
 Qualified references are read-only. You can read and complete
 `@pgsd.build-failure/out`, but names, tags, pins, and entry/output
 deletion may modify only `$TJ_JOURNAL`. Continue that journal first if it needs
