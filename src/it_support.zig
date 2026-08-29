@@ -1,0 +1,440 @@
+//! Fixtures shared by the integration suites: the pty harness wrappers, an
+//! isolated journal home, and the recording helpers each suite builds on.
+
+const std = @import("std");
+const posix = std.posix;
+const harness = @import("harness.zig");
+const noout = @import("noout.zig");
+const plain = @import("plain.zig");
+const ulid = @import("ulid.zig");
+
+const options = @import("build_options");
+pub const tj = options.tj_exe;
+
+pub const timeout_ms = 5000;
+
+pub const test_prompt = "TJ_TEST_PROMPT> ";
+
+pub const journal_dir = "journal home *$'quoted";
+
+/// Tests start real writer processes, each attached to a journal. Point every
+/// child at a scratch one: a test run must not leave anything in the journal
+/// the developer is actually using.
+pub var journal_isolated = false;
+
+pub fn isolateJournal() void {
+    // Once only. Tests that set TJ_JOURNAL themselves, to make `@N` resolve
+    // against a journal they built, must not have it taken away again.
+    if (journal_isolated) return;
+    journal_isolated = true;
+
+    sys.setEnv("TJ_HOME", ".zig-cache/tj-test-home");
+    // Inherited from the developer's environment otherwise, which would make
+    // `@N` resolve against whatever journal they happen to be writing.
+    sys.setEnv("TJ_JOURNAL", "");
+    sys.setEnv("TJ_NEXT", "");
+}
+
+/// Tests share one process, so a test that selected a journal leaves
+/// TJ_JOURNAL set for whatever runs next. Replay refuses to run inside a
+/// journal writer, so its tests have to say they are outside one.
+pub fn leaveJournal() void {
+    isolateJournal();
+    sys.setEnv("TJ_JOURNAL", "");
+}
+
+pub fn spawnTj(gpa: std.mem.Allocator, args: []const []const u8, rows: u16, cols: u16) !harness.PtyChild {
+    isolateJournal();
+    return harness.spawn(gpa, args, rows, cols);
+}
+
+pub fn run(gpa: std.mem.Allocator, args: []const []const u8, rows: u16, cols: u16) !struct {
+    out: std.ArrayList(u8),
+    code: u8,
+} {
+    var argv: std.ArrayList([]const u8) = .empty;
+    defer argv.deinit(gpa);
+    try argv.append(gpa, tj);
+    try argv.appendSlice(gpa, args);
+
+    const child = try spawnTj(gpa, argv.items, rows, cols);
+    var out: std.ArrayList(u8) = .empty;
+    const code = try child.finish(gpa, &out, timeout_ms);
+    return .{ .out = out, .code = code };
+}
+
+pub fn runNonTty(gpa: std.mem.Allocator, args: []const []const u8) !std.process.RunResult {
+    var argv: std.ArrayList([]const u8) = .empty;
+    defer argv.deinit(gpa);
+    try argv.append(gpa, tj);
+    try argv.appendSlice(gpa, args);
+    return std.process.run(gpa, std.testing.io, .{
+        .argv = argv.items,
+        .stdout_limit = .limited(1 << 20),
+        .stderr_limit = .limited(1 << 20),
+    });
+}
+
+pub fn runWithClosedStdout(gpa: std.mem.Allocator, args: []const []const u8) !struct {
+    term: std.process.Child.Term,
+    stderr: []u8,
+} {
+    isolateJournal();
+    const io = std.testing.io;
+
+    var argv: std.ArrayList([]const u8) = .empty;
+    defer argv.deinit(gpa);
+    try argv.append(gpa, tj);
+    try argv.appendSlice(gpa, args);
+
+    var child = try std.process.spawn(io, .{
+        .argv = argv.items,
+        .stdin = .ignore,
+        .stdout = .pipe,
+        .stderr = .pipe,
+    });
+    defer child.kill(io);
+
+    // Model a downstream command such as `head` exiting before tj flushes.
+    child.stdout.?.close(io);
+    child.stdout = null;
+
+    const stderr_file = child.stderr.?;
+    var stderr_reader: Io.File.Reader = .initStreaming(stderr_file, io, &.{});
+    const stderr = try stderr_reader.interface.allocRemaining(gpa, .limited(1 << 20));
+    stderr_file.close(io);
+    child.stderr = null;
+
+    return .{
+        .term = try child.wait(io),
+        .stderr = stderr,
+    };
+}
+
+pub fn runNonTtyInJournal(
+    gpa: std.mem.Allocator,
+    args: []const []const u8,
+    journal: []const u8,
+    next: []const u8,
+) !std.process.RunResult {
+    var argv: std.ArrayList([]const u8) = .empty;
+    defer argv.deinit(gpa);
+    try argv.append(gpa, tj);
+    try argv.appendSlice(gpa, args);
+    var environ = try std.process.Environ.createMap(std.testing.environ, gpa);
+    defer environ.deinit();
+    try environ.put("TJ_JOURNAL", journal);
+    try environ.put("TJ_NEXT", next);
+    // The native command must not depend on the optional ripgrep companion.
+    try environ.put("PATH", "");
+    try environ.put("GREP_COLORS", "mt=01;31");
+    return std.process.run(gpa, std.testing.io, .{
+        .argv = argv.items,
+        .environ_map = &environ,
+        .stdout_limit = .limited(1 << 20),
+        .stderr_limit = .limited(1 << 20),
+    });
+}
+
+/// Drains a large PTY transcript without retaining bytes that precede its
+/// final marker. This keeps the large-file regression honest about memory.
+pub fn finishKeepingTail(
+    gpa: std.mem.Allocator,
+    child: harness.PtyChild,
+    keep: usize,
+    timeout: i32,
+) !struct { tail: std.ArrayList(u8), total: u64, code: u8 } {
+    var tail: std.ArrayList(u8) = .empty;
+    errdefer tail.deinit(gpa);
+    var total: u64 = 0;
+    var remaining = timeout;
+    var buf: [64 * 1024]u8 = undefined;
+
+    while (remaining > 0) {
+        var fds = [_]posix.pollfd{.{ .fd = child.master, .events = posix.POLL.IN, .revents = 0 }};
+        const step: i32 = 100;
+        const ready = posix.poll(&fds, step) catch break;
+        if (ready == 0) {
+            remaining -= step;
+            continue;
+        }
+        const n = sys.read(child.master, &buf) catch 0;
+        if (n == 0) break;
+        total += @intCast(n);
+
+        const bytes = buf[0..n];
+        if (bytes.len >= keep) {
+            tail.clearRetainingCapacity();
+            try tail.appendSlice(gpa, bytes[bytes.len - keep ..]);
+        } else {
+            if (tail.items.len + bytes.len > keep) {
+                const drop = tail.items.len + bytes.len - keep;
+                const retained = tail.items.len - drop;
+                std.mem.copyForwards(u8, tail.items[0..retained], tail.items[drop..]);
+                tail.items.len = retained;
+            }
+            try tail.appendSlice(gpa, bytes);
+        }
+    }
+
+    sys.close(child.master);
+    return .{ .tail = tail, .total = total, .code = sys.waitFor(child.pid).code };
+}
+
+pub const Io = std.Io;
+
+pub const Dir = std.Io.Dir;
+
+pub const sys = @import("sys.zig");
+
+/// A zsh child process under tj, with the plugin loaded.
+pub const Journal = struct {
+    tmp: std.testing.TmpDir,
+    // A length, not a slice: the struct is returned by value, and a slice into
+    // its own buffer would point at the caller's dead stack frame.
+    path_len: usize,
+    path_buf: [std.fs.max_path_bytes]u8,
+
+    pub fn path(self: *const Journal) []const u8 {
+        return self.path_buf[0..self.path_len];
+    }
+
+    pub fn open(_: std.mem.Allocator) !Journal {
+        var self: Journal = .{
+            .tmp = std.testing.tmpDir(.{}),
+            .path_len = 0,
+            .path_buf = undefined,
+        };
+        const io = std.testing.io;
+
+        const len = try self.tmp.dir.realPath(io, &self.path_buf);
+
+        try self.tmp.dir.createDirPath(io, journal_dir);
+
+        self.path_len = len;
+        return self;
+    }
+
+    /// Writes a fixture next to the journal and returns its absolute path.
+    pub fn fixture(self: *const Journal, gpa: std.mem.Allocator, name: []const u8, bytes: []const u8) ![]const u8 {
+        try self.tmp.dir.writeFile(std.testing.io, .{ .sub_path = name, .data = bytes });
+        return std.fmt.allocPrint(gpa, "{s}/{s}", .{ self.path(), name });
+    }
+
+    pub fn homeArg(self: *const Journal, gpa: std.mem.Allocator) ![]const u8 {
+        return std.fmt.allocPrint(gpa, "{s}/{s}", .{ self.path(), journal_dir });
+    }
+
+    pub fn close(self: *Journal) void {
+        self.tmp.cleanup();
+    }
+
+    /// The id of the single journal this writer created.
+    pub fn journalName(self: *Journal, gpa: std.mem.Allocator) ![]u8 {
+        const io = std.testing.io;
+        var root = try self.tmp.dir.openDir(io, journal_dir, .{ .iterate = true });
+        defer root.close(io);
+        var it = root.iterate();
+        while (try it.next(io)) |entry| {
+            if (entry.kind == .directory and ulid.isValid(entry.name)) return gpa.dupe(u8, entry.name);
+        }
+        return error.NoJournal;
+    }
+
+    /// Makes `@N` and `@-` resolve against this journal.
+    pub fn enter(self: *Journal, gpa: std.mem.Allocator) !void {
+        const name = try self.journalName(gpa);
+        defer gpa.free(name);
+        var buf: [64]u8 = undefined;
+        @memcpy(buf[0..name.len], name);
+        buf[name.len] = 0;
+        sys.setEnv("TJ_JOURNAL", buf[0..name.len :0]);
+    }
+
+    /// The single journal directory this writer created.
+    pub fn journalDir(self: *Journal) !Dir {
+        const io = std.testing.io;
+        var root = try self.tmp.dir.openDir(io, journal_dir, .{ .iterate = true });
+        defer root.close(io);
+        var it = root.iterate();
+        while (try it.next(io)) |entry| {
+            if (entry.kind == .directory and ulid.isValid(entry.name)) return root.openDir(io, entry.name, .{});
+        }
+        return error.NoJournal;
+    }
+
+    pub fn read(self: *Journal, gpa: std.mem.Allocator, sub_path: []const u8) ![]u8 {
+        var child = try self.journalDir();
+        defer child.close(std.testing.io);
+        return child.readFileAlloc(std.testing.io, sub_path, gpa, .limited(1 << 20));
+    }
+};
+
+/// Starts zsh with every startup file disabled. The fixture loads exactly the
+/// plugin it needs through the PTY, so system zsh configuration cannot change
+/// the prompt or install competing hooks.
+pub fn spawnJournalZsh(gpa: std.mem.Allocator, journal: *const Journal) !harness.PtyChild {
+    const home = try journal.homeArg(gpa);
+    defer gpa.free(home);
+    return spawnTj(gpa, &.{ tj, "--home", home, "new", "--", "/bin/zsh", "-f", "-i" }, 24, 80);
+}
+
+pub fn spawnContinuedJournalZsh(
+    gpa: std.mem.Allocator,
+    journal: *const Journal,
+    selector: []const u8,
+) !harness.PtyChild {
+    const home = try journal.homeArg(gpa);
+    defer gpa.free(home);
+    return spawnTj(gpa, &.{ tj, "--home", home, "continue", selector, "--", "/bin/zsh", "-f", "-i" }, 24, 80);
+}
+
+pub fn appendShellQuoted(gpa: std.mem.Allocator, out: *std.ArrayList(u8), text: []const u8) !void {
+    try out.append(gpa, '\'');
+    for (text) |byte| {
+        if (byte == '\'') {
+            try out.appendSlice(gpa, "'\\''");
+        } else {
+            try out.append(gpa, byte);
+        }
+    }
+    try out.append(gpa, '\'');
+}
+
+pub fn setupJournalZshWithPrefix(
+    gpa: std.mem.Allocator,
+    child: harness.PtyChild,
+    out: *std.ArrayList(u8),
+    prefix: []const u8,
+) !void {
+    var command: std.ArrayList(u8) = .empty;
+    defer command.deinit(gpa);
+    // `source -- file` is not portable across the zsh versions used by the
+    // native CI runners. The POSIX dot builtin accepts the quoted pathname.
+    if (prefix.len > 0) {
+        try command.appendSlice(gpa, prefix);
+        try command.appendSlice(gpa, "; ");
+    }
+    try command.appendSlice(gpa, ". ");
+    try appendShellQuoted(gpa, &command, options.plugin);
+    // Keep the literal marker out of the echoed setup command, so waiting for
+    // it can only match the real prompt after the plugin finished loading.
+    try command.appendSlice(gpa, " || exit; PS1='TJ_TEST_'PROMPT'> '\n");
+    try child.write(command.items);
+    if (!try child.readUntil(gpa, out, test_prompt, timeout_ms)) return error.ShellNotReady;
+}
+
+pub fn setupJournalZsh(gpa: std.mem.Allocator, child: harness.PtyChild, out: *std.ArrayList(u8)) !void {
+    return setupJournalZshWithPrefix(gpa, child, out, "");
+}
+
+/// Cancels an editable ZLE line and proves that the shell accepted a new
+/// command afterward. Waiting for the ordinary prompt is insufficient here:
+/// completion redraws that same prompt before the cancellation is processed.
+pub fn cancelZleLine(gpa: std.mem.Allocator, child: harness.PtyChild, out: *std.ArrayList(u8)) !void {
+    const from = out.items.len;
+    // Clear the line with a plain ZLE binding rather than Ctrl-C. While the
+    // completion system is running the shell's terminal still raises SIGINT,
+    // and the interrupt discards bytes zsh has already read - including the
+    // first character of the command typed right behind it.
+    try child.write("\x15");
+    // Split the marker in the typed command so terminal echo cannot satisfy
+    // the wait; only the executed print produces the contiguous text.
+    try child.write("print -r -- TJ_ZLE_CANCEL_\"\"READY\n");
+    if (!try child.readUntilFrom(gpa, out, from, "TJ_ZLE_CANCEL_READY", timeout_ms)) {
+        std.debug.print("ZLE cancellation did not execute its readiness command; transcript follows:\n{s}\n", .{out.items[from..]});
+        return error.ZleCancellationDidNotFinish;
+    }
+    if (!try child.readUntilFrom(gpa, out, from, test_prompt, timeout_ms)) {
+        std.debug.print("ZLE cancellation did not return a prompt; transcript follows:\n{s}\n", .{out.items[from..]});
+        return error.ZleCancellationPromptMissing;
+    }
+}
+
+pub fn haveZsh() bool {
+    const io = std.testing.io;
+    const file = Dir.cwd().openFile(io, "/bin/zsh", .{}) catch return false;
+    file.close(io);
+    return true;
+}
+
+/// Runs `script` line by line in an interactive zsh under tj, then exits.
+pub fn recordJournal(gpa: std.mem.Allocator, journal: *Journal, script: []const []const u8) !void {
+    const child = try spawnJournalZsh(gpa, journal);
+    var out: std.ArrayList(u8) = .empty;
+    defer out.deinit(gpa);
+
+    try setupJournalZsh(gpa, child, &out);
+    for (script) |line| {
+        const from = out.items.len;
+        try child.write(line);
+        try child.write("\n");
+        if (!try child.readUntilFrom(gpa, &out, from, test_prompt, timeout_ms)) return error.CommandDidNotFinish;
+    }
+    try child.write("exit 0\n");
+    try std.testing.expectEqual(@as(u8, 0), try child.finish(gpa, &out, timeout_ms));
+    const recorded = journal.journalName(gpa) catch |err| {
+        std.debug.print("journal was not retained; transcript follows:\n{s}\n", .{out.items});
+        return err;
+    };
+    gpa.free(recorded);
+}
+
+/// A journal directory with no shell integration pointed at it, for testing
+/// what a new journal writer leaves behind.
+pub const Scratch = struct {
+    tmp: std.testing.TmpDir,
+    path_len: usize,
+    path_buf: [std.fs.max_path_bytes]u8,
+
+    pub fn open() !Scratch {
+        var self: Scratch = .{
+            .tmp = std.testing.tmpDir(.{ .iterate = true }),
+            .path_len = 0,
+            .path_buf = undefined,
+        };
+        self.path_len = try self.tmp.dir.realPath(std.testing.io, &self.path_buf);
+        return self;
+    }
+
+    pub fn path(self: *const Scratch) []const u8 {
+        return self.path_buf[0..self.path_len];
+    }
+
+    pub fn close(self: *Scratch) void {
+        self.tmp.cleanup();
+    }
+
+    pub fn makeJournal(self: *Scratch, id: ulid.Ulid, entries: []const []const u8) !void {
+        const io = std.testing.io;
+        try self.tmp.dir.createDir(io, &id, @enumFromInt(0o700));
+        var dir = try self.tmp.dir.openDir(io, &id, .{});
+        defer dir.close(io);
+        for (entries) |entry| try dir.createDir(io, entry, @enumFromInt(0o700));
+    }
+
+    /// How many journal directories the root holds.
+    pub fn journals(self: *Scratch) !usize {
+        var count: usize = 0;
+        var it = self.tmp.dir.iterate();
+        while (try it.next(std.testing.io)) |entry| {
+            if (entry.kind == .directory and ulid.isValid(entry.name)) count += 1;
+        }
+        return count;
+    }
+};
+
+/// Emits the OSC 5107 sequences a cooperating program would, from a plain sh
+/// script, so the test does not depend on any program that happens to.
+pub fn publisher(gpa: std.mem.Allocator, body: []const u8) ![]u8 {
+    return std.fmt.allocPrint(gpa, "printf '{s}'", .{body});
+}
+
+pub fn expectSafeStoredReport(bytes: []const u8) !void {
+    try std.testing.expect(std.mem.indexOfScalar(u8, bytes, 0x1b) == null);
+    try std.testing.expect(std.mem.indexOfScalar(u8, bytes, '\r') == null);
+    try std.testing.expect(std.mem.indexOfScalar(u8, bytes, 0x01) == null);
+    try std.testing.expect(std.mem.indexOfScalar(u8, bytes, 0x7f) == null);
+    try std.testing.expect(std.mem.indexOfScalar(u8, bytes, 0x9b) == null);
+    try std.testing.expect(std.mem.indexOf(u8, bytes, "PWNED") == null);
+}
