@@ -573,8 +573,9 @@ tj name --remove build-failure
 tj name
 
 tj tag @42 bug parser
-tj tag --remove @42 parser
-tj tag @42
+tj tag @42 @47 @50..@55 bug parser
+tj tag --remove @42 @47 parser
+tj tag @42 @47
 tj tag @40..@45 bug
 tj tag
 
@@ -628,8 +629,14 @@ retention semantics. Whole-journal removal is refused while pins remain unless
 names, `@-`, resources, and qualified journals are invalid. Missing numbers
 inside the interval are skipped. Tagging, untagging, pinning, and unpinning
 load and save the annotation manifest once, so the selected existing
-entries change atomically. `tj tag @N..@M` queries tagged entries in
-numeric order.
+entries in one range change atomically.
+
+`tj tag` accepts one or more leading entry or range targets, followed by one
+or more tags. Literal references begin with `@`, which is not valid in a tag;
+zsh-expanded targets are paths beneath the journal root and remain equally
+distinct. With no trailing tags, every target is queried. Multiple targets
+are processed from left to right, while each range is processed atomically;
+range query results appear in numeric order.
 
 Targeted name and tag queries may read qualified references. Every annotation
 write is restricted to the journal whose full id is in `TJ_JOURNAL`.
@@ -684,12 +691,15 @@ preventing its output from feeding back into the file it is reading.
 tj rm @42
 tj rm @42/out
 tj rm @2..@10
+tj rm @12 @15/out @20..@25
 tj rm --force @42
 tj journal rm <id-or-suffix> [--force]
 ```
 
 Entry and output removal require a current journal and may target only
-that journal. The target number must be lower than the highest numeric
+that journal. One invocation accepts one or more targets, processed from left
+to right; entry, output, and range targets may be mixed, and `--force` applies
+to the complete list. Each target number must be lower than the highest numeric
 entry present while the mutation lock is held. In normal use the
 removal command itself has already become that newer entry, which both
 refuses the running command and preserves monotonic numbering without a

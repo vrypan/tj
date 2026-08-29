@@ -1384,22 +1384,42 @@ fn nameCommand(
 
 const TagRequest = union(enum) {
     list,
-    query: []const u8,
-    add: struct { ref: []const u8, tags: []const []const u8 },
-    remove: struct { ref: []const u8, tags: []const []const u8 },
+    query: []const []const u8,
+    add: struct { targets: []const []const u8, tags: []const []const u8 },
+    remove: struct { targets: []const []const u8, tags: []const []const u8 },
 };
 
-fn tagRequest(parsed: *const zecli.Parsed) !TagRequest {
+fn tagRequest(parsed: *const zecli.Parsed, target_count: usize) !TagRequest {
     const args = parsed.positionals.items;
-    if (parsed.present("remove")) {
-        if (args.len < 2) return error.MissingArgument;
-        return .{ .remove = .{ .ref = args[0], .tags = args[1..] } };
+    if (args.len == 0) {
+        if (parsed.present("remove")) return error.MissingArgument;
+        return .list;
     }
-    return switch (args.len) {
-        0 => .list,
-        1 => .{ .query = args[0] },
-        else => .{ .add = .{ .ref = args[0], .tags = args[1..] } },
-    };
+    if (target_count == 0 or target_count > args.len) return error.BadArguments;
+    const targets = args[0..target_count];
+    const tags = args[target_count..];
+    if (parsed.present("remove")) {
+        if (tags.len == 0) return error.MissingArgument;
+        return .{ .remove = .{ .targets = targets, .tags = tags } };
+    }
+    if (tags.len == 0) return .{ .query = targets };
+    return .{ .add = .{ .targets = targets, .tags = tags } };
+}
+
+fn tagTargetCount(io: Io, root: store.Dir, args: []const []const u8) !usize {
+    var root_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const root_len = try root.realPath(io, &root_buf);
+    const root_path = root_buf[0..root_len];
+
+    var count: usize = 0;
+    for (args) |arg| {
+        const shorthand = arg.len != 0 and arg[0] == '@';
+        const expanded = std.mem.startsWith(u8, arg, root_path) and
+            arg.len > root_path.len and arg[root_path.len] == '/';
+        if (!shorthand and !expanded) break;
+        count += 1;
+    }
+    return count;
 }
 
 fn tagCommand(
@@ -1409,7 +1429,12 @@ fn tagCommand(
     parsed: *const zecli.Parsed,
     out: *Io.Writer,
 ) !void {
-    switch (try tagRequest(parsed)) {
+    const target_count = if (parsed.positionals.items.len == 0) 0 else blk: {
+        var root = try store.openRoot(io, home);
+        defer root.close(io);
+        break :blk try tagTargetCount(io, root, parsed.positionals.items);
+    };
+    switch (try tagRequest(parsed, target_count)) {
         .list => {
             const current = try currentJournal();
             var root = try store.openRoot(io, home);
@@ -1423,26 +1448,40 @@ fn tagCommand(
                 try out.writeAll("\n");
             }
         },
-        .query => |ref| {
-            if (try parseInteractionRange(ref)) |range| {
-                return queryTagsRange(gpa, io, home, range, out);
-            }
-            var root = try store.openRoot(io, home);
-            defer root.close(io);
-            const target = try locateCommandTarget(gpa, io, root, ref);
-            defer target.deinit(gpa);
-            try requireInteraction(target);
-            var manifest = try annotations.load(gpa, io, root, target.journal);
-            defer manifest.deinit(gpa);
-            const entry = manifest.findConst(target.number) orelse return;
-            if (entry.tags.items.len == 0) return;
-            try printCanonical(out, sys.env("TJ_JOURNAL"), target.journal, target.number);
-            for (entry.tags.items) |tag| try out.print("  {s}", .{tag});
-            try out.writeAll("\n");
+        .query => |targets| {
+            for (targets) |target| try queryTags(gpa, io, home, target, out);
         },
-        .add => |request| try updateTags(gpa, io, home, request.ref, request.tags, false),
-        .remove => |request| try updateTags(gpa, io, home, request.ref, request.tags, true),
+        .add => |request| {
+            for (request.targets) |target| try updateTags(gpa, io, home, target, request.tags, false);
+        },
+        .remove => |request| {
+            for (request.targets) |target| try updateTags(gpa, io, home, target, request.tags, true);
+        },
     }
+}
+
+fn queryTags(
+    gpa: std.mem.Allocator,
+    io: Io,
+    home: ?[]const u8,
+    ref: []const u8,
+    out: *Io.Writer,
+) !void {
+    if (try parseInteractionRange(ref)) |range| {
+        return queryTagsRange(gpa, io, home, range, out);
+    }
+    var root = try store.openRoot(io, home);
+    defer root.close(io);
+    const target = try locateCommandTarget(gpa, io, root, ref);
+    defer target.deinit(gpa);
+    try requireInteraction(target);
+    var manifest = try annotations.load(gpa, io, root, target.journal);
+    defer manifest.deinit(gpa);
+    const entry = manifest.findConst(target.number) orelse return;
+    if (entry.tags.items.len == 0) return;
+    try printCanonical(out, sys.env("TJ_JOURNAL"), target.journal, target.number);
+    for (entry.tags.items) |tag| try out.print("  {s}", .{tag});
+    try out.writeAll("\n");
 }
 
 fn updateTags(
@@ -1629,13 +1668,13 @@ fn updatePinRange(
 }
 
 const RemoveRequest = struct {
-    target: []const u8,
+    targets: []const []const u8,
     force: bool,
 };
 
 fn removeRequest(parsed: *const zecli.Parsed) !RemoveRequest {
-    if (parsed.positionals.items.len != 1) return error.BadArguments;
-    return .{ .target = parsed.positionals.items[0], .force = parsed.present("force") };
+    if (parsed.positionals.items.len == 0) return error.BadArguments;
+    return .{ .targets = parsed.positionals.items, .force = parsed.present("force") };
 }
 
 const JournalRequest = union(enum) {
@@ -1671,10 +1710,12 @@ test "annotation and removal requests select one semantic mode" {
         try std.testing.expectEqualStrings("build-failure", request.name);
     }
     {
-        var parsed = try parseTestCommand(.tag, &.{ "--remove", "@2", "bug", "parser" });
+        var parsed = try parseTestCommand(.tag, &.{ "--remove", "@2", "@4..@6", "bug", "parser" });
         defer parsed.deinit(gpa);
-        const request = (try tagRequest(&parsed)).remove;
-        try std.testing.expectEqualStrings("@2", request.ref);
+        const request = (try tagRequest(&parsed, 2)).remove;
+        try std.testing.expectEqual(@as(usize, 2), request.targets.len);
+        try std.testing.expectEqualStrings("@2", request.targets[0]);
+        try std.testing.expectEqualStrings("@4..@6", request.targets[1]);
         try std.testing.expectEqual(@as(usize, 2), request.tags.len);
     }
     {
@@ -1690,10 +1731,13 @@ test "annotation and removal requests select one semantic mode" {
         try std.testing.expect(request.force);
     }
     {
-        var parsed = try parseTestCommand(.rm, &.{ "--force", "@2" });
+        var parsed = try parseTestCommand(.rm, &.{ "--force", "@2", "@4/out", "@6..@8" });
         defer parsed.deinit(gpa);
         const request = try removeRequest(&parsed);
-        try std.testing.expectEqualStrings("@2", request.target);
+        try std.testing.expectEqual(@as(usize, 3), request.targets.len);
+        try std.testing.expectEqualStrings("@2", request.targets[0]);
+        try std.testing.expectEqualStrings("@4/out", request.targets[1]);
+        try std.testing.expectEqualStrings("@6..@8", request.targets[2]);
         try std.testing.expect(request.force);
     }
 }
@@ -1720,7 +1764,9 @@ fn removeCommand(
 ) !void {
     _ = out;
     const request = try removeRequest(parsed);
-    return removeInteraction(gpa, io, home, request.target, request.force);
+    for (request.targets) |target| {
+        try removeInteraction(gpa, io, home, target, request.force);
+    }
 }
 
 fn removeJournal(

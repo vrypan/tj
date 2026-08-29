@@ -1212,6 +1212,56 @@ test "tag pin and cat ranges are inclusive and skip numbering holes" {
     try std.testing.expect(std.mem.indexOf(u8, recursive.stderr, "currently running entry") != null);
 }
 
+test "tag accepts leading target lists before multiple tags" {
+    if (!haveZsh()) return error.SkipZigTest;
+    const gpa = std.testing.allocator;
+    var journal = try Journal.open(gpa);
+    defer journal.close();
+    try recordJournal(gpa, &journal, &.{
+        "echo one",
+        "echo two",
+        "echo three",
+        "echo four",
+    });
+    try journal.enter(gpa);
+    const home = try journal.homeArg(gpa);
+    defer gpa.free(home);
+    const id = try journal.journalName(gpa);
+    defer gpa.free(id);
+
+    // Real zsh expands the first two shorthand references into journal paths;
+    // the range remains @ syntax. Both forms must stay in the leading target
+    // sequence, with BUG and parser recognized as tags.
+    const child = try spawnContinuedJournalZsh(gpa, &journal, id);
+    var transcript: std.ArrayList(u8) = .empty;
+    defer transcript.deinit(gpa);
+    try setupJournalZsh(gpa, child, &transcript);
+    const from = transcript.items.len;
+    try child.write("command \"$TJ\" tag @1 @2 @3..@4 BUG parser\n");
+    try std.testing.expect(try child.readUntilFrom(gpa, &transcript, from, test_prompt, timeout_ms));
+    try child.write("exit 0\n");
+    try std.testing.expectEqual(@as(u8, 0), try child.finish(gpa, &transcript, timeout_ms));
+
+    var queried = try run(gpa, &.{ "--home", home, "tag", "@1", "@2", "@3..@4" }, 24, 120);
+    defer queried.out.deinit(gpa);
+    try std.testing.expectEqual(@as(u8, 0), queried.code);
+    for (1..5) |number| {
+        var expected_buf: [64]u8 = undefined;
+        const expected = try std.fmt.bufPrint(&expected_buf, "@{d}  bug  parser", .{number});
+        try std.testing.expect(std.mem.indexOf(u8, queried.out.items, expected) != null);
+    }
+
+    var removed = try run(gpa, &.{ "--home", home, "tag", "--remove", "@1", "@3..@4", "parser" }, 24, 120);
+    defer removed.out.deinit(gpa);
+    try std.testing.expectEqual(@as(u8, 0), removed.code);
+    var after = try run(gpa, &.{ "--home", home, "tag", "@1", "@2", "@3", "@4" }, 24, 120);
+    defer after.out.deinit(gpa);
+    try std.testing.expect(std.mem.indexOf(u8, after.out.items, "@1  bug\r\n") != null);
+    try std.testing.expect(std.mem.indexOf(u8, after.out.items, "@2  bug  parser") != null);
+    try std.testing.expect(std.mem.indexOf(u8, after.out.items, "@3  bug\r\n") != null);
+    try std.testing.expect(std.mem.indexOf(u8, after.out.items, "@4  bug\r\n") != null);
+}
+
 test "entry mutations reject qualified journals while reads still work" {
     if (!haveZsh()) return error.SkipZigTest;
     const gpa = std.testing.allocator;
@@ -1445,6 +1495,57 @@ test "entry ranges remove existing entries across holes and reject the running b
     defer forced.out.deinit(gpa);
     try std.testing.expectEqual(@as(u8, 0), forced.code);
     try std.testing.expectError(error.FileNotFound, dir.openDir(io, "4", .{}));
+}
+
+test "rm accepts mixed target lists and applies force to every target" {
+    if (!haveZsh()) return error.SkipZigTest;
+    const gpa = std.testing.allocator;
+    const io = std.testing.io;
+    var journal = try Journal.open(gpa);
+    defer journal.close();
+    try recordJournal(gpa, &journal, &.{
+        "echo one",
+        "echo two",
+        "echo three",
+        "echo four",
+        "echo five",
+        "echo six",
+    });
+    try journal.enter(gpa);
+    const home = try journal.homeArg(gpa);
+    defer gpa.free(home);
+
+    var pinned = try run(gpa, &.{ "--home", home, "pin", "@3" }, 24, 100);
+    defer pinned.out.deinit(gpa);
+    try std.testing.expectEqual(@as(u8, 0), pinned.code);
+
+    var mixed = try run(gpa, &.{
+        "--home", home, "rm", "@1", "@2/out", "@3", "@4..@5",
+    }, 24, 120);
+    defer mixed.out.deinit(gpa);
+    try std.testing.expectEqual(@as(u8, 0), mixed.code);
+    try std.testing.expect(std.mem.indexOf(u8, mixed.out.items, "skipped pinned entry @3") != null);
+
+    var dir = try journal.journalDir();
+    defer dir.close(io);
+    try std.testing.expectError(error.FileNotFound, dir.openDir(io, "1", .{}));
+    try std.testing.expectError(error.FileNotFound, dir.openFile(io, "2/out", .{}));
+    var two_cmd = try dir.openFile(io, "2/cmd", .{});
+    two_cmd.close(io);
+    var removed_marker = try dir.openFile(io, "2/out.removed", .{});
+    removed_marker.close(io);
+    var three = try dir.openDir(io, "3", .{});
+    three.close(io);
+    try std.testing.expectError(error.FileNotFound, dir.openDir(io, "4", .{}));
+    try std.testing.expectError(error.FileNotFound, dir.openDir(io, "5", .{}));
+    var six = try dir.openDir(io, "6", .{});
+    six.close(io);
+
+    var forced = try run(gpa, &.{ "--home", home, "rm", "--force", "@3", "@6" }, 24, 100);
+    defer forced.out.deinit(gpa);
+    try std.testing.expectEqual(@as(u8, 0), forced.code);
+    try std.testing.expectError(error.FileNotFound, dir.openDir(io, "3", .{}));
+    try std.testing.expectError(error.FileNotFound, dir.openDir(io, "6", .{}));
 }
 
 test "concurrent annotation commands preserve every update" {

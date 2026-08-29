@@ -181,12 +181,13 @@ const commands = [_]zecli.CommandSpec{
     .{
         .name = "tag",
         .description = "Tag, query, remove, or list entry tags",
-        .usage = "tj tag [--remove] [REF [TAG...]]",
+        .usage = "tj tag [--remove] [TARGET... [TAG...]]",
         .flags = &remove_flag,
         .arguments = &.{
-            .{ .name = "REF", .description = "Entry reference or numeric range" },
-            .{ .name = "TAG", .description = "Journal-local entry tag", .repeatable = true },
+            .{ .name = "TARGET", .description = "First entry reference or numeric range" },
+            .{ .name = "TARGET_OR_TAG", .description = "Additional targets, then journal-local tags", .repeatable = true },
         },
+        .extra_help = "Targets must precede tags. With no tags, the selected targets are queried.\n",
     },
     .{
         .name = "pin",
@@ -198,9 +199,9 @@ const commands = [_]zecli.CommandSpec{
     .{
         .name = "rm",
         .description = "Remove recorded entry data",
-        .usage = "tj rm [--force] <TARGET>",
+        .usage = "tj rm [--force] <TARGET>...",
         .flags = &force_flag,
-        .arguments = &.{.{ .name = "TARGET", .description = "Entry, out resource, or numeric range", .required = true }},
+        .arguments = &.{.{ .name = "TARGET", .description = "Entry, out resource, or numeric range", .required = true, .repeatable = true }},
         .extra_help = "Pinned targets are skipped unless --force is present. Use `tj journal rm ID` to remove a whole journal.\n",
     },
     .{

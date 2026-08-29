@@ -231,8 +231,9 @@ tj name --remove build-failure
 tj name                         # list names in this journal
 
 tj tag @42 bug parser           # add normalized tags
-tj tag --remove @42 parser
-tj tag @42                      # query tags
+tj tag @42 @47 @50..@55 bug     # tag several targets
+tj tag --remove @42 @47 parser
+tj tag @42 @47                  # query tags for several targets
 tj tag @40..@45 bug             # tag every existing entry in the range
 tj tag                          # list tagged entries
 
@@ -253,7 +254,10 @@ unless `--force` is present.
 Tag and pin ranges use two unqualified numeric references in the current
 journal. They are inclusive and skip numbering holes. A tag range with no tag
 arguments queries tagged entries in the interval; adding or removing
-tags and pinning or unpinning updates every existing entry atomically.
+tags and pinning or unpinning updates every existing entry in that range
+atomically. `tj tag` accepts a leading list of entry or range targets followed
+by one or more tags. With no trailing tags, it queries every target instead.
+Targets in a list are processed from left to right.
 
 `tj hist --tag bug --tag parser` shows entries having every requested
 tag. `tj hist --pinned` (or `--pin`) shows only pinned entries; it combines
@@ -279,6 +283,7 @@ changing; the mutation command is then recorded there like any other command.
 tj rm @42                    # the entire entry
 tj rm @42/out                # output and resources derived from it
 tj rm @2..@10                # every existing entry in this inclusive range
+tj rm @12 @15/out @20..@25   # mix multiple targets in one invocation
 tj rm --force @42            # override a pin
 tj journal rm pgsd           # prompt before removing an inactive journal
 tj journal rm pgsd --force   # override pins and skip confirmation
@@ -286,7 +291,9 @@ tj journal rm pgsd --force   # override pins and skip confirmation
 
 Entry and output removal are current-journal-only, do not prompt, and
 refuse the currently running entry. A pinned target is skipped unless
-`--force` is present. Removing an entry also removes its annotations and
+`--force` is present. One invocation may mix any number of entry, output, and
+range targets; they are processed from left to right, and `--force` applies to
+all of them. Removing an entry also removes its annotations and
 resources. Removing only `out` preserves `cmd`, `rc`, the entry
 annotations, and other recording metadata, but removes every published
 resource derived from that output. Individual published resources cannot be

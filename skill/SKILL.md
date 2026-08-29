@@ -158,6 +158,8 @@ still be an ordinary `@handle`.
 
 Names, tags, and pins are user annotations. Tags can be used to narrow the
 index with repeatable AND filters such as `tj hist --tag bug --tag parser`.
+To annotate several entries at once, put every target before the tags, for
+example `tj tag @2 @4 @6..@8 bug parser`; omit tags to query those targets.
 Use `tj hist --pinned` (or `--pin`) to show only pinned entries; pin and tag
 filters combine with AND semantics.
 Direct terminal history is deliberately omitted from the entry recording with
@@ -167,6 +169,8 @@ Pins imply no retention policy, but protect an entry and its output from
 `tj rm`. Removal ranges skip pinned entries; use `tj rm --force REF` only
 when overriding that protection is deliberate. Whole-journal removal likewise
 requires `--force` while any pins remain.
+`tj rm` accepts multiple entry, output, and range targets in one invocation;
+targets are processed from left to right and one `--force` applies to all.
 
 Do not add, remove, or change annotations unless the user asks. Annotation
 writes and entry/output deletion are current-journal-only; qualified

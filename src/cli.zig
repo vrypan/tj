@@ -313,7 +313,7 @@ test "noout requires its explicit child boundary but permits command help" {
 
 test "mutation preflights preserve mode position and destructive target safety" {
     try preflightCommandArgs(.name, &.{ "--remove", "old-name" });
-    try preflightCommandArgs(.rm, &.{ "--force", "@2" });
+    try preflightCommandArgs(.rm, &.{ "--force", "@2", "@4/out", "@6..@8" });
     try std.testing.expectError(
         error.InvalidCommandArguments,
         preflightCommandArgs(.tag, &.{ "@1", "--remove", "bug" }),
