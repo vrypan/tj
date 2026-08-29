@@ -160,14 +160,16 @@ test "build-time completions expose only the static cli grammar" {
     defer gpa.free(bash);
     try std.testing.expect(std.mem.indexOf(u8, bash, "complete -F _tj tj") != null);
     try std.testing.expect(std.mem.indexOf(u8, bash, "_tj__cmd_hist()") != null);
+    try std.testing.expect(std.mem.indexOf(u8, bash, "_tj__cmd_ls()") == null);
     try std.testing.expect(std.mem.indexOf(u8, bash, "--tag") != null);
     try std.testing.expect(std.mem.indexOf(u8, bash, "never\\nauto\\nalways") != null);
 
     const zsh = try Dir.cwd().readFileAlloc(io, options.zsh_completion, gpa, .limited(1 << 20));
     defer gpa.free(zsh);
     try std.testing.expect(std.mem.startsWith(u8, zsh, "#compdef tj\n"));
-    try std.testing.expect(std.mem.indexOf(u8, zsh, "'hist:List entries in a journal'") != null);
+    try std.testing.expect(std.mem.indexOf(u8, zsh, "'hist:List entries with annotations, size, and date'") != null);
     try std.testing.expect(std.mem.indexOf(u8, zsh, "_tj__cmd_hist()") != null);
+    try std.testing.expect(std.mem.indexOf(u8, zsh, "_tj__cmd_ls()") == null);
     try std.testing.expect(std.mem.indexOf(u8, zsh, "--tag=[") != null);
     try std.testing.expect(std.mem.indexOf(u8, zsh, "--pinned") != null);
     try std.testing.expect(std.mem.indexOf(u8, zsh, "--pin") != null);
@@ -178,7 +180,8 @@ test "build-time completions expose only the static cli grammar" {
     const fish = try Dir.cwd().readFileAlloc(io, options.fish_completion, gpa, .limited(1 << 20));
     defer gpa.free(fish);
     try std.testing.expect(std.mem.startsWith(u8, fish, "# fish completion for tj\n"));
-    try std.testing.expect(std.mem.indexOf(u8, fish, "-a 'hist' -d 'List entries in a journal'") != null);
+    try std.testing.expect(std.mem.indexOf(u8, fish, "-a 'hist' -d 'List entries with annotations, size, and date'") != null);
+    try std.testing.expect(std.mem.indexOf(u8, fish, "-a 'ls'") == null);
     try std.testing.expect(std.mem.indexOf(u8, fish, "__tj_using_command hist history") != null);
     try std.testing.expect(std.mem.indexOf(u8, fish, "__tj_vals_cmd_grep_f_color") != null);
     try std.testing.expect(std.mem.indexOf(u8, fish, "__tj_vals_cmd_journal_a_ACTION") != null);
@@ -1022,14 +1025,15 @@ test "names tags pins and tagged history use journal-local annotations" {
     try std.testing.expect(std.mem.indexOf(u8, filtered.out.items, "first-entry") != null);
     try std.testing.expect(std.mem.indexOf(u8, filtered.out.items, "second-entry") == null);
     try std.testing.expect(std.mem.indexOf(u8, filtered.out.items, "@build-failure") != null);
-    try std.testing.expect(std.mem.indexOf(u8, filtered.out.items, "* 1  echo first-entry") != null);
-    try std.testing.expect(std.mem.indexOf(u8, filtered.out.items, "[bug parser]") != null);
-    try std.testing.expect(std.mem.indexOf(u8, filtered.out.items, "[rc=") == null);
+    try std.testing.expect(std.mem.indexOf(u8, filtered.out.items, "*@#") != null);
+    try std.testing.expect(std.mem.indexOf(u8, filtered.out.items, "#bug #parser") != null);
+    try std.testing.expect(std.mem.indexOf(u8, filtered.out.items, "!1") == null);
 
     var history = try run(gpa, &.{ "--home", home, "hist" }, 24, 120);
     defer history.out.deinit(gpa);
     try std.testing.expect(std.mem.indexOf(u8, history.out.items, "false # second-entry") != null);
-    try std.testing.expect(std.mem.indexOf(u8, history.out.items, "[rc=1]") != null);
+    try std.testing.expect(std.mem.indexOf(u8, history.out.items, "#bug") != null);
+    try std.testing.expect(std.mem.indexOf(u8, history.out.items, "!1") != null);
 
     var pinned_hist = try run(gpa, &.{ "--home", home, "hist", "--pinned" }, 24, 120);
     defer pinned_hist.out.deinit(gpa);
@@ -1072,8 +1076,7 @@ test "history wraps to terminal width and pipes remain one entry per line" {
     const end_at = std.mem.indexOfPos(u8, wrapped.out.items, content_start, noout.end_marker) orelse
         return error.TestUnexpectedResult;
     const visible = wrapped.out.items[content_start..end_at];
-    // Removing the fixed status column gives the command seven more cells.
-    try std.testing.expect(std.mem.indexOf(u8, visible, "\r\n     eight") != null);
+    try std.testing.expect(std.mem.indexOf(u8, visible, "\r\n") != null);
     var physical_lines = std.mem.splitScalar(u8, visible, '\n');
     while (physical_lines.next()) |raw_line| {
         const line = std.mem.trimEnd(u8, raw_line, "\r");
@@ -1135,6 +1138,88 @@ test "terminal history omits its listing while piped history remains recordable"
     try std.testing.expect(std.mem.indexOf(u8, piped_out, "HIST_NOOUT_PAYLOAD_012") != null);
     try std.testing.expect(std.mem.indexOf(u8, piped_out, "<tj:noout>") == null);
     try std.testing.expect(std.mem.indexOf(u8, piped_out, "5107;tj") == null);
+}
+
+test "history shows positional annotation flags size UTC date and wrapped commands" {
+    if (!haveZsh()) return error.SkipZigTest;
+    const gpa = std.testing.allocator;
+    const io = std.testing.io;
+    var journal = try Journal.open(gpa);
+    defer journal.close();
+    try recordJournal(gpa, &journal, &.{
+        "printf 1234567890 # alpha beta gamma delta epsilon",
+        "false",
+    });
+    try journal.enter(gpa);
+    const home = try journal.homeArg(gpa);
+    defer gpa.free(home);
+
+    for ([_][]const []const u8{
+        &.{ "name", "@1", "display-name" },
+        &.{ "tag", "@1", "bug" },
+        &.{ "pin", "@1" },
+        &.{ "tag", "@2", "failure" },
+    }) |command_args| {
+        var argv: std.ArrayList([]const u8) = .empty;
+        defer argv.deinit(gpa);
+        try argv.appendSlice(gpa, &.{ "--home", home });
+        try argv.appendSlice(gpa, command_args);
+        var result = try run(gpa, argv.items, 24, 100);
+        defer result.out.deinit(gpa);
+        try std.testing.expectEqual(@as(u8, 0), result.code);
+    }
+
+    var dir = try journal.journalDir();
+    defer dir.close(io);
+    try dir.writeFile(io, .{ .sub_path = "1/out", .data = "1234567890" });
+    try dir.writeFile(io, .{ .sub_path = "2/out", .data = "" });
+    try dir.writeFile(io, .{
+        .sub_path = "1/meta.json",
+        .data = "{\"v\":1,\"started\":\"2001-08-29T10:14:00.000Z\",\"ended\":\"2001-08-29T10:15:00.000Z\"}\n",
+    });
+    try dir.writeFile(io, .{
+        .sub_path = "2/meta.json",
+        .data = "{\"v\":1,\"started\":\"2002-03-14T09:00:00.000Z\",\"ended\":\"2002-03-14T09:01:00.000Z\"}\n",
+    });
+
+    const id = try journal.journalName(gpa);
+    defer gpa.free(id);
+    const plain_result = try runNonTtyInJournal(gpa, &.{ "--home", home, "hist" }, id, "4");
+    defer gpa.free(plain_result.stdout);
+    defer gpa.free(plain_result.stderr);
+    try std.testing.expectEqual(@as(u8, 0), plain_result.term.exited);
+    try std.testing.expect(std.mem.indexOf(u8, plain_result.stdout, "*@#  1 10b Aug 29  2001 printf 1234567890 # alpha beta gamma delta epsilon @display-name #bug\n") != null);
+    try std.testing.expect(std.mem.indexOf(u8, plain_result.stdout, "  #! 2  0b Mar 14  2002 false #failure !1\n") != null);
+    try std.testing.expect(std.mem.indexOf(u8, plain_result.stdout, noout.begin_marker) == null);
+    try std.testing.expect(std.mem.indexOfScalar(u8, plain_result.stdout, 0x1b) == null);
+
+    const terminal_child = try spawnTj(gpa, &.{
+        "/usr/bin/env", "-u", "NO_COLOR", "TERM=xterm-256color", tj, "--home", home, "hist",
+    }, 24, 48);
+    var terminal: std.ArrayList(u8) = .empty;
+    defer terminal.deinit(gpa);
+    try std.testing.expectEqual(@as(u8, 0), try terminal_child.finish(gpa, &terminal, timeout_ms));
+    const begin_at = std.mem.indexOf(u8, terminal.items, noout.begin_marker) orelse return error.TestUnexpectedResult;
+    const content_start = begin_at + noout.begin_marker.len;
+    const end_at = std.mem.indexOfPos(u8, terminal.items, content_start, noout.end_marker) orelse
+        return error.TestUnexpectedResult;
+    const visible = terminal.items[content_start..end_at];
+    try std.testing.expect(std.mem.indexOf(u8, visible, "*@#  \x1b[33m1\x1b[0m") != null);
+    try std.testing.expect(std.mem.indexOf(u8, visible, "  #\x1b[31m!\x1b[0m \x1b[33m2\x1b[0m") != null);
+    try std.testing.expect(std.mem.indexOf(u8, visible, "\x1b[33m1\x1b[0m \x1b[32m10b\x1b[0m \x1b[34mAug 29  2001\x1b[0m") != null);
+    try std.testing.expect(std.mem.indexOf(u8, visible, "\x1b[32m@display-name\x1b[0m") != null);
+    try std.testing.expect(std.mem.indexOf(u8, visible, "\x1b[32m#bug\x1b[0m") != null);
+    try std.testing.expect(std.mem.indexOf(u8, visible, "\x1b[31m!1\x1b[0m") != null);
+    const first_wrap = std.mem.indexOf(u8, visible, "\r\n") orelse return error.TestUnexpectedResult;
+    const continuation = first_wrap + 2;
+    try std.testing.expect(visible.len >= continuation + 23);
+    for (visible[continuation .. continuation + 23]) |byte| try std.testing.expectEqual(@as(u8, ' '), byte);
+
+    const pinned = try runNonTtyInJournal(gpa, &.{ "--home", home, "hist", "--pinned" }, id, "4");
+    defer gpa.free(pinned.stdout);
+    defer gpa.free(pinned.stderr);
+    try std.testing.expect(std.mem.indexOf(u8, pinned.stdout, "display-name") != null);
+    try std.testing.expect(std.mem.indexOf(u8, pinned.stdout, "false") == null);
 }
 
 test "tag pin and cat ranges are inclusive and skip numbering holes" {
@@ -2719,7 +2804,7 @@ test "terminal native grep omits its results while redirected output stays plain
     try child.write("\n");
     try std.testing.expect(try child.readUntilFrom(gpa, &transcript, from, test_prompt, timeout_ms));
 
-    // Grep rows share history's entry annotations and failure presentation.
+    // Grep rows share history's entry annotation and failure markers.
     var journal_dir_handle = try journal.journalDir();
     defer journal_dir_handle.close(std.testing.io);
     try journal_dir_handle.writeFile(std.testing.io, .{
@@ -2732,8 +2817,8 @@ test "terminal native grep omits its results while redirected output stays plain
     try child.write("env -u NO_COLOR TERM=xterm-256color GREP_COLORS='mt=4;32' \"$TJ\" grep --color auto --out NOOUT_GREP_PAYLOAD_012\n");
     try std.testing.expect(try child.readUntilFrom(gpa, &transcript, from, "* 1  \x1b[2m[out]\x1b[0m", timeout_ms));
     try std.testing.expect(try child.readUntilFrom(gpa, &transcript, from, "\x1b[4;32mNOOUT_GREP_PAYLOAD_012\x1b[m", timeout_ms));
-    try std.testing.expect(try child.readUntilFrom(gpa, &transcript, from, "\x1b[2m@grep-hit [bug parser]\x1b[0m", timeout_ms));
-    try std.testing.expect(try child.readUntilFrom(gpa, &transcript, from, "\x1b[31m[rc=7]\x1b[0m", timeout_ms));
+    try std.testing.expect(try child.readUntilFrom(gpa, &transcript, from, "\x1b[32m@grep-hit #bug #parser\x1b[0m", timeout_ms));
+    try std.testing.expect(try child.readUntilFrom(gpa, &transcript, from, "\x1b[31m!7\x1b[0m", timeout_ms));
     try std.testing.expect(try child.readUntilFrom(gpa, &transcript, from, test_prompt, timeout_ms));
 
     from = transcript.items.len;
@@ -2768,7 +2853,7 @@ test "terminal native grep omits its results while redirected output stays plain
     const redirected = try journal.tmp.dir.readFileAlloc(std.testing.io, "redirected-grep", gpa, .limited(4096));
     defer gpa.free(redirected);
     try std.testing.expectEqualStrings(
-        "* 1  [out] NOOUT_GREP_PAYLOAD_012 padded result @grep-hit [bug parser] [rc=7]\n",
+        "* 1  [out] NOOUT_GREP_PAYLOAD_012 padded result @grep-hit #bug #parser !7\n",
         redirected,
     );
     const redirected_out = try journal.read(gpa, "4/out");

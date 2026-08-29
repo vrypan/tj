@@ -32,17 +32,26 @@ tj hist
 ```
 
 ```
-     1  git status
-*    2  go test ./... @build-failure [bug parser] [rc=1]
-     3  vi parser.go
+     1  23b Aug 29 10:10 git status
+*@#! 2 1.2k Aug 29 10:11 go test ./... @build-failure #bug #parser !1
+     3   0b Aug 29 10:12 vi parser.go
 ```
 
-Columns: pin, number, and the command followed by optional name, tags, and a
-nonzero exit status. Long commands wrap under the command column on a terminal.
-Names and tags are dimmed and failures are red when color is enabled.
+Columns: positional annotation flags, number, output size, UTC date, and the
+command followed by optional `@name`, `#tag`, and nonzero `!N` status. Long
+commands wrap under the command column on a terminal.
 The whole index is a few hundred tokens even for a long journal. The output
 of a single entry can be 50K. **Read the index first and fetch
 deliberately.**
+
+The four flag cells are positional: `*` pinned, `@` named, `#` tagged, and `!`
+failed, with spaces for absent properties. It then shows number, human-readable `out` size,
+UTC start date, and the same command/name/tags/status payload as history.
+Sizes use powers of 1024 with compact `b`, `k`, `M`, and `G` suffixes.
+Columns have single-space separators; terminal output keeps flags in the
+default foreground for `*@#`, renders a present `!` red, size plus `@name` and
+`#tag` metadata in green, dates in blue, numbers in yellow, and `!N` failures in red. Piped output
+stays plain.
 
 When the user gives a distinctive literal rather than an entry number,
 search narrowly instead of opening many outputs:
@@ -53,7 +62,7 @@ tj grep --cmd 'docker compose'
 ```
 
 Results use history-like rows: pin, entry reference, `[cmd]` or `[out]`, the
-matching line, optional name and tags, and `[rc=N]` for failures. Redirected
+matching line, optional `@name` and `#tag` markers, and `!N` for failures. Redirected
 results keep the same fields without terminal wrapping or presentation color.
 Displayed matching lines collapse horizontal whitespace; use `tj cat` for the
 original indentation or layout.
@@ -109,7 +118,7 @@ Do not do this blindly. If the question stands on its own, answer it. Fetch
 
 ## Reading exit status correctly
 
-- `tj hist` shows only nonzero statuses, as `[rc=N]`. No status means either
+- `tj hist` shows only nonzero statuses, as `!N`. No status means either
   success or an unfinished entry; inspect the entry's `rc` resource when that
   distinction matters.
 - `rc` is the shell's status for the **whole line**. On a pipeline that is

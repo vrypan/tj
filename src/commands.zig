@@ -448,23 +448,21 @@ const GrepLineSink = struct {
         try writer.writeByte(' ');
 
         if (has_name or has_tags) {
-            if (self.output.layout_color) try writer.writeAll("\x1b[2m");
+            if (self.output.layout_color) try writer.writeAll("\x1b[32m");
             if (has_name) try writer.print("@{s}", .{self.annotation.?.name.?});
             if (has_tags) {
-                if (has_name) try writer.writeByte(' ');
-                try writer.writeByte('[');
                 for (self.annotation.?.tags.items, 0..) |tag, i| {
-                    if (i != 0) try writer.writeByte(' ');
+                    if (has_name or i != 0) try writer.writeByte(' ');
+                    try writer.writeByte('#');
                     try writer.writeAll(tag);
                 }
-                try writer.writeByte(']');
             }
             if (self.output.layout_color) try writer.writeAll("\x1b[0m");
         }
         if (has_failure) {
             if (has_name or has_tags) try writer.writeByte(' ');
             if (self.output.layout_color) try writer.writeAll("\x1b[31m");
-            try writer.print("[rc={d}]", .{self.exit_code.?});
+            try writer.print("!{d}", .{self.exit_code.?});
             if (self.output.layout_color) try writer.writeAll("\x1b[0m");
         }
     }
@@ -733,7 +731,6 @@ fn listInteractions(
         else => return err,
     };
     defer manifest.deinit(gpa);
-
     const interactions = store.listInteractions(gpa, io, root, journal) catch |err| switch (err) {
         error.FileNotFound => return error.NoSuchJournal,
         else => return err,
@@ -744,18 +741,19 @@ fn listInteractions(
     }
 
     var number_width: usize = 1;
+    var size_width: usize = 1;
     for (interactions) |info| {
         if (!historyEntryVisible(&manifest, info.number, filters.items, pinned_only)) continue;
         number_width = @max(number_width, decimalWidth(info.number));
+        var size_buf: [24]u8 = undefined;
+        size_width = @max(size_width, formatEntrySize(info, &size_buf).len);
     }
 
+    const date_width = 12;
+    const prefix_width = 4 + 1 + number_width + 1 + size_width + 1 + date_width + 1;
     const columns = historyTerminalColumns();
-    const prefix_width = 1 + 1 + number_width + 2;
     const payload_width: ?usize = if (columns) |value|
-        if (value > prefix_width)
-            value - prefix_width
-        else
-            1
+        if (value > prefix_width) value - prefix_width else 1
     else
         null;
     const color_enabled = historyColorEnabled();
@@ -765,6 +763,7 @@ fn listInteractions(
         .enabled = current != null and current.?.len != 0 and sys.isTty(1),
     };
     defer noout_region.finish();
+    const now_ms = Io.Clock.now(.real, io).toMilliseconds();
 
     for (interactions) |info| {
         const annotation = manifest.findConst(info.number);
@@ -774,31 +773,29 @@ fn listInteractions(
         defer payload.deinit(gpa);
         try payload.appendSlice(gpa, firstLine(info.command));
 
-        var dim_start: ?usize = null;
+        var metadata_start: ?usize = null;
         var rc_start: ?usize = null;
         const has_name = annotation != null and annotation.?.name != null;
         const has_tags = annotation != null and annotation.?.tags.items.len != 0;
         const has_failure = info.exit_code != null and info.exit_code.? != 0;
         if (has_name or has_tags or has_failure) {
             if (payload.items.len != 0) try payload.append(gpa, ' ');
-            if (has_name or has_tags) dim_start = payload.items.len;
+            if (has_name or has_tags) metadata_start = payload.items.len;
             if (has_name) {
                 try payload.append(gpa, '@');
                 try payload.appendSlice(gpa, annotation.?.name.?);
             }
             if (has_tags) {
-                if (has_name) try payload.append(gpa, ' ');
-                try payload.append(gpa, '[');
                 for (annotation.?.tags.items, 0..) |tag, tag_i| {
-                    if (tag_i != 0) try payload.append(gpa, ' ');
+                    if (has_name or tag_i != 0) try payload.append(gpa, ' ');
+                    try payload.append(gpa, '#');
                     try payload.appendSlice(gpa, tag);
                 }
-                try payload.append(gpa, ']');
             }
             if (has_failure) {
                 if (has_name or has_tags) try payload.append(gpa, ' ');
                 rc_start = payload.items.len;
-                try payload.print(gpa, "[rc={d}]", .{info.exit_code.?});
+                try payload.print(gpa, "!{d}", .{info.exit_code.?});
             }
         }
 
@@ -806,20 +803,112 @@ fn listInteractions(
         defer lines.deinit(gpa);
         try noout_region.begin();
 
+        var size_buf: [24]u8 = undefined;
+        const size_text = formatEntrySize(info, &size_buf);
+        var date_buf: [date_width]u8 = undefined;
+        const timing = store.readTiming(gpa, io, root, journal, info.number);
+        const date_text = formatLsDate(if (timing) |value| value.started else null, now_ms, &date_buf);
+
         for (lines.items, 0..) |line, line_i| {
             if (line_i == 0) {
                 try out.writeByte(if (annotation != null and annotation.?.pinned) '*' else ' ');
+                try out.writeByte(if (has_name) '@' else ' ');
+                try out.writeByte(if (has_tags) '#' else ' ');
+                if (has_failure and color_enabled) try out.writeAll("\x1b[31m");
+                try out.writeByte(if (has_failure) '!' else ' ');
+                if (has_failure and color_enabled) try out.writeAll("\x1b[0m");
                 try out.writeByte(' ');
                 try out.splatByteAll(' ', number_width - decimalWidth(info.number));
-                try out.print("{d}  ", .{info.number});
+                if (color_enabled) try out.writeAll("\x1b[33m");
+                try out.print("{d}", .{info.number});
+                if (color_enabled) try out.writeAll("\x1b[0m");
+                try out.writeByte(' ');
+                try out.splatByteAll(' ', size_width - size_text.len);
+                if (color_enabled) try out.writeAll("\x1b[32m");
+                try out.writeAll(size_text);
+                if (color_enabled) try out.writeAll("\x1b[0m");
+                try out.writeByte(' ');
+                if (color_enabled) try out.writeAll("\x1b[34m");
+                try out.writeAll(date_text);
+                if (color_enabled) try out.writeAll("\x1b[0m");
+                try out.writeByte(' ');
             } else {
                 try out.splatByteAll(' ', prefix_width);
             }
-
-            try writeHistoryLine(out, payload.items, line, dim_start, rc_start, color_enabled);
+            try writeHistoryLine(out, payload.items, line, metadata_start, rc_start, color_enabled);
             try out.writeByte('\n');
         }
     }
+}
+
+fn formatEntrySize(info: store.InteractionInfo, buf: *[24]u8) []const u8 {
+    if (!info.out_present) return "-";
+    return formatHumanSize(info.out_bytes, buf);
+}
+
+fn formatHumanSize(bytes: u64, buf: *[24]u8) []const u8 {
+    if (bytes < 1024) return std.fmt.bufPrint(buf, "{d}b", .{bytes}) catch "?";
+
+    const suffixes = "kMGTPE";
+    var unit: u64 = 1024;
+    var suffix: usize = 0;
+    while (suffix + 1 < suffixes.len and bytes >= unit * 1024) {
+        unit *= 1024;
+        suffix += 1;
+    }
+    var whole = bytes / unit;
+    if (whole < 10) {
+        const tenth = ((bytes % unit) * 10 + unit / 2) / unit;
+        if (tenth < 10) {
+            return std.fmt.bufPrint(buf, "{d}.{d}{c}", .{ whole, tenth, suffixes[suffix] }) catch "?";
+        }
+        whole += 1;
+    }
+    return std.fmt.bufPrint(buf, "{d}{c}", .{ whole, suffixes[suffix] }) catch "?";
+}
+
+/// `ls -l`-style UTC date: current-year entries show HH:MM, older entries the
+/// year. UTC keeps output deterministic and matches the timestamps in meta.
+fn formatLsDate(started_ms: ?i64, now_ms: i64, buf: *[12]u8) []const u8 {
+    buf.* = "--- -- --:--".*;
+    const millis = started_ms orelse return buf;
+    if (millis < 0) return buf;
+
+    const seconds = @divFloor(millis, 1000);
+    const epoch: std.time.epoch.EpochSeconds = .{ .secs = @intCast(seconds) };
+    const day = epoch.getEpochDay();
+    const year_day = day.calculateYearDay();
+    const month_day = year_day.calculateMonthDay();
+    const time = epoch.getDaySeconds();
+    const months = [_][]const u8{ "Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec" };
+    const month_index: usize = @intCast(month_day.month.numeric() - 1);
+    @memcpy(buf[0..3], months[month_index]);
+    const month_date: u32 = month_day.day_index + 1;
+    buf[4] = if (month_date >= 10) '0' + @as(u8, @intCast(month_date / 10)) else ' ';
+    buf[5] = '0' + @as(u8, @intCast(month_date % 10));
+
+    const now_year = if (now_ms >= 0) blk: {
+        const now_seconds = @divFloor(now_ms, 1000);
+        const now_epoch: std.time.epoch.EpochSeconds = .{ .secs = @intCast(now_seconds) };
+        break :blk now_epoch.getEpochDay().calculateYearDay().year;
+    } else year_day.year;
+    if (year_day.year == now_year) {
+        const hour = time.getHoursIntoDay();
+        const minute = time.getMinutesIntoHour();
+        buf[7] = '0' + @as(u8, @intCast(hour / 10));
+        buf[8] = '0' + @as(u8, @intCast(hour % 10));
+        buf[9] = ':';
+        buf[10] = '0' + @as(u8, @intCast(minute / 10));
+        buf[11] = '0' + @as(u8, @intCast(minute % 10));
+    } else {
+        const year: u32 = @intCast(year_day.year);
+        buf[7] = ' ';
+        buf[8] = '0' + @as(u8, @intCast((year / 1000) % 10));
+        buf[9] = '0' + @as(u8, @intCast((year / 100) % 10));
+        buf[10] = '0' + @as(u8, @intCast((year / 10) % 10));
+        buf[11] = '0' + @as(u8, @intCast(year % 10));
+    }
+    return buf;
 }
 
 fn historyEntryVisible(
@@ -931,14 +1020,14 @@ fn writeHistoryLine(
     out: *Io.Writer,
     text: []const u8,
     line: HistoryLine,
-    dim_start: ?usize,
+    metadata_start: ?usize,
     rc_start: ?usize,
     color_enabled: bool,
 ) !void {
     if (!color_enabled) return out.writeAll(text[line.start..line.end]);
 
     var position = line.start;
-    if (dim_start) |start| {
+    if (metadata_start) |start| {
         const styled_start = @max(line.start, start);
         const styled_end = @min(line.end, rc_start orelse line.end);
         if (position < @min(styled_start, line.end)) {
@@ -946,7 +1035,7 @@ fn writeHistoryLine(
             position = @min(styled_start, line.end);
         }
         if (styled_start < styled_end) {
-            try out.writeAll("\x1b[2m");
+            try out.writeAll("\x1b[32m");
             try out.writeAll(text[styled_start..styled_end]);
             try out.writeAll("\x1b[0m");
             position = styled_end;
@@ -984,19 +1073,36 @@ test "history wrapping prefers words and hard-wraps oversized words" {
     try std.testing.expectEqualStrings("gh", "abcdefgh"[hard.items[2].start..hard.items[2].end]);
 }
 
-test "history dims annotations and renders failures in red" {
+test "history renders annotations green and failures red" {
     const gpa = std.testing.allocator;
-    const text = "false @build [bug] [rc=1]";
+    const text = "false @build #bug !1";
     var bytes: std.ArrayList(u8) = .empty;
     defer bytes.deinit(gpa);
     var writer = Io.Writer.Allocating.fromArrayList(gpa, &bytes);
     defer bytes = writer.toArrayList();
 
-    try writeHistoryLine(&writer.writer, text, .{ .start = 0, .end = text.len }, 6, 19, true);
+    try writeHistoryLine(&writer.writer, text, .{ .start = 0, .end = text.len }, 6, 18, true);
     try std.testing.expectEqualStrings(
-        "false \x1b[2m@build [bug] \x1b[0m\x1b[31m[rc=1]\x1b[0m",
+        "false \x1b[32m@build #bug \x1b[0m\x1b[31m!1\x1b[0m",
         writer.writer.buffered(),
     );
+}
+
+test "long listing formats human sizes and ls-style UTC dates" {
+    var size_buf: [24]u8 = undefined;
+    try std.testing.expectEqualStrings("0b", formatHumanSize(0, &size_buf));
+    try std.testing.expectEqualStrings("999b", formatHumanSize(999, &size_buf));
+    try std.testing.expectEqualStrings("1.5k", formatHumanSize(1536, &size_buf));
+    try std.testing.expectEqualStrings("18k", formatHumanSize(18 * 1024, &size_buf));
+    try std.testing.expectEqualStrings("6.1M", formatHumanSize(6 * 1024 * 1024 + 1024 * 1024 / 10, &size_buf));
+
+    const current = store.parseTimestamp("2026-08-29T10:14:00.000Z").?;
+    const now = store.parseTimestamp("2026-12-01T00:00:00.000Z").?;
+    const old = store.parseTimestamp("2025-03-14T09:00:00.000Z").?;
+    var date_buf: [12]u8 = undefined;
+    try std.testing.expectEqualStrings("Aug 29 10:14", formatLsDate(current, now, &date_buf));
+    try std.testing.expectEqualStrings("Mar 14  2025", formatLsDate(old, now, &date_buf));
+    try std.testing.expectEqualStrings("--- -- --:--", formatLsDate(null, now, &date_buf));
 }
 
 fn printLast(gpa: std.mem.Allocator, io: Io, home: ?[]const u8, out: *Io.Writer) !void {

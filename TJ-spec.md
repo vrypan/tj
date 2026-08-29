@@ -600,23 +600,32 @@ AND semantics.
 History renders each entry as:
 
 ```text
-[pin] [number] command @name [tags] [rc=N]
+[flags] [number] [out-size] [UTC date] command @name #tag !N
 ```
 
-The pin and right-aligned number form the left prefix. Name and tags are
-optional suffix metadata, with tags space-separated inside brackets. A nonzero
-exit status follows as `[rc=N]`; status zero and a missing status are omitted.
-On a capable terminal, names and tags are dimmed and a nonzero status is red;
-`NO_COLOR`, `TERM=dumb`, and non-terminal output disable styling.
+`flags` is exactly four positional cells: `*` when pinned, `@` when named,
+`#` when tagged, and `!` when the exit status is nonzero, with a space for each
+absent property. Number and size are
+right-aligned across the selected entries, and every column is separated by
+one space. Size is the logical byte length of
+the `out` resource, formatted in powers of 1024 with `b`, `k`, `M`, `G`, and
+larger suffixes; `-` means the resource is absent and `0b` means present but
+empty. The 12-cell date uses the
+recorded UTC start time, showing `Mon DD HH:MM` during the current UTC year and
+`Mon DD  YYYY` otherwise; missing or malformed timing is `--- -- --:--`.
+The optional name is `@name`, each tag is `#tag`, and a nonzero exit status is
+`!N`. Continuation lines begin beneath the command
+field. Non-terminal output keeps the same fields on one physical line without
+presentation styling. On a color-capable terminal, `*`, `@`, and `#` keep the
+default foreground, while a present `!` is red. Numbers are yellow, sizes and
+name/tag metadata are green, dates are blue, and failures are red.
 
-For terminal output, TJ obtains the width with `TIOCGWINSZ`, reserves the left
-prefix, and word-wraps the command and suffix in the remaining columns.
-Oversized words are hard-wrapped. Continuation lines align with the command.
-Non-terminal output remains one physical line per entry with no ANSI sequences.
-
-When stdout is a terminal and a current journal exists, history lazily encloses
-the listing in one OSC 5107 noout region. No markers are emitted when filters
-select no entries. Redirected or piped history is plain marker-free output.
+For terminal output, TJ obtains the width with `TIOCGWINSZ`, reserves the fixed
+columns, and word-wraps the command and suffix in the remaining cells.
+Oversized words are hard-wrapped. When stdout is a terminal and a current
+journal exists, history lazily encloses the listing in one OSC 5107 noout
+region. No markers are emitted when filters select no entries. Redirected or
+piped history is one physical line per entry, with no styling or OSC markers.
 
 A pin is an idempotent boolean annotation. It appears as `*` beside the
 entry number in history. Pins protect entries and their output
@@ -784,7 +793,7 @@ horizontal whitespace are omitted, while internal spaces and tabs collapse to
 one space. Other source bytes are preserved. Results use history's row grammar:
 
 ``` text
-*   42  [out] matching source line @name [tag] [rc=1]
+*   42  [out] matching source line @name #tag !1
   @8wpc.42  [out] matching source line under --all
 ```
 
@@ -795,8 +804,9 @@ number with the last four bytes of its journal ULID, including results from the
 writer's current journal. A final unterminated source line is still searchable.
 
 On a terminal, TJ obtains the width with `TIOCGWINSZ` and hard-wraps rows under
-the content column without buffering the source line. The resource, name, and
-tags are dimmed and a nonzero status is red when terminal styling is supported.
+the content column without buffering the source line. The resource is dimmed,
+names and tags are green, and a nonzero status is red when terminal styling is
+supported.
 Piped and redirected results use the same fields without wrapping or
 presentation styling. Explicit `--color=always` still styles selected matches
 when redirected, as described above.

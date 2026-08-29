@@ -779,6 +779,8 @@ pub const InteractionInfo = struct {
     command: []const u8,
     /// So a reader can tell what fetching `out` would cost before doing it.
     out_bytes: u64,
+    /// Distinguishes an empty output from one explicitly removed.
+    out_present: bool,
 
     pub fn deinit(self: InteractionInfo, gpa: std.mem.Allocator) void {
         gpa.free(self.command);
@@ -808,15 +810,20 @@ pub fn listInteractions(gpa: std.mem.Allocator, io: Io, root: Dir, journal: []co
             try gpa.dupe(u8, "");
         errdefer gpa.free(command);
 
+        var out_bytes: u64 = 0;
+        var out_present = false;
+        if (interaction.openFile(io, "out", .{})) |file| {
+            defer file.close(io);
+            out_present = true;
+            out_bytes = file.length(io) catch 0;
+        } else |_| {}
+
         try found.append(gpa, .{
             .number = number,
             .exit_code = readExitCode(io, interaction),
             .command = command,
-            .out_bytes = blk: {
-                const file = interaction.openFile(io, "out", .{}) catch break :blk 0;
-                defer file.close(io);
-                break :blk file.length(io) catch 0;
-            },
+            .out_bytes = out_bytes,
+            .out_present = out_present,
         });
     }
 

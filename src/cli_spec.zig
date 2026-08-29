@@ -124,7 +124,7 @@ const commands = [_]zecli.CommandSpec{
     .{
         .name = "hist",
         .aliases = &.{"history"},
-        .description = "List entries in a journal",
+        .description = "List entries with annotations, size, and date",
         .usage = "tj hist [options] [JOURNAL]",
         .flags = &hist_flags,
         .arguments = &.{.{ .name = "JOURNAL", .description = "Journal ID or suffix" }},

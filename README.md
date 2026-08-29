@@ -154,7 +154,7 @@ tj cat @1                 # hello
 Each command becomes a numbered entry:
 
 ```sh
-tj hist                   # pin, number, command, name, tags, status
+tj hist                   # flags, number, output size, date, command metadata
 tj journal list           # every journal, newest first
 tj current                # this journal's id
 tj last                   # the last entry that completed
@@ -261,16 +261,34 @@ Targets in a list are processed from left to right.
 
 `tj hist --tag bug --tag parser` shows entries having every requested
 tag. `tj hist --pinned` (or `--pin`) shows only pinned entries; it combines
-with tag filters using AND semantics. History marks a pin with `*` in the
-left column, then shows the entry number and command. An optional name and
-space-separated tags follow the command as dimmed metadata on capable terminals.
-A nonzero exit status follows them as `[rc=N]`, in red when color is supported.
-Successful and unfinished entries show no status.
+with tag filters using AND semantics.
 
 When history is written directly to a terminal inside a journal writer, TJ
 wraps the listing in a noout region. The listing remains visible, while the
 current entry records only `<tj:noout>` instead of copying the index into the
 journal. Piped and redirected history remains ordinary marker-free output.
+
+History uses an `ls -l`-shaped index:
+
+```text
+*@#  42   18k Aug 29 10:14 zig build test @release #build #ci
+  #  43  1.2k Aug 29  2025 git status #git
+   !  44    0b Aug 29 10:17 false !1
+```
+
+Its four positional flag cells are `*` for pinned, `@` for named, `#` for
+tagged, and `!` for a nonzero exit status; absent flags are spaces. Number and output-resource size are
+right-aligned. Sizes use powers of 1024 and the compact suffixes `b`, `k`, `M`,
+`G`, and so on; `-` means `out` was removed while `0b` means it exists but is
+empty. Dates are recorded start times
+in UTC; entries from the current UTC year show `HH:MM`, while older entries
+show the year. The final field contains the command followed by an optional
+`@name`, one `#tag` per tag, and `!N` for a nonzero exit status. Columns use single-space separators. On capable
+terminals the first three flags keep the default foreground, while a present
+`!` is red. Entry numbers are yellow, sizes and name/tag metadata green, dates
+blue, and failures red. Terminal wrapping,
+`NO_COLOR`, `--tag`, `--pinned`, journal selection, and terminal-only noout
+behavior apply to the index.
 
 Qualified references are read-only. You can read and complete
 `@pgsd.build-failure/out`, but names, tags, pins, and entry/output
@@ -504,10 +522,10 @@ tj grep -- --starts-with-a-dash
 ```
 
 This is fixed-string search, not regular expressions. Each matching line uses
-the same visual grammar as `tj hist`:
+the same annotation and failure markers as `tj hist`:
 
 ```text
-*   42  [out] error: connection reset by peer @build-failure [network] [rc=1]
+*   42  [out] error: connection reset by peer @build-failure #network !1
 ```
 
 The columns are pin, entry number, source resource, matching text, optional
@@ -521,7 +539,7 @@ Matching still uses the original stored bytes. For display, leading and
 trailing spaces or tabs are removed and internal horizontal-whitespace runs
 collapse to one space. Use `tj cat` when exact indentation or layout matters.
 
-Terminal rows wrap beneath the content column and use the same dimmed metadata
+Terminal rows wrap beneath the content column and use the same green metadata
 and red failure styling as history. Piped and redirected rows keep the same
 fields but remain one physical line each and omit presentation styling.
 
