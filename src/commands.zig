@@ -1949,6 +1949,120 @@ const NameRequest = union(enum) {
     remove: []const u8,
 };
 
+/// The entries one command names, whether that was a single reference or a
+/// range. Both forms then apply the same action to the same list, so only the
+/// resolution differs and only it lives here.
+///
+/// A single reference must name an existing entry of the current journal; a
+/// range must select at least one. Those checks are the real difference
+/// between the two forms, not the transaction that follows.
+const MutationTargets = struct {
+    mutation: Mutation,
+    numbers: []u32,
+
+    fn deinit(self: *MutationTargets, gpa: std.mem.Allocator, io: Io) void {
+        gpa.free(self.numbers);
+        self.mutation.deinit(io);
+        self.* = undefined;
+    }
+};
+
+fn openMutationTargets(
+    gpa: std.mem.Allocator,
+    io: Io,
+    home: ?[]const u8,
+    ref: []const u8,
+) !MutationTargets {
+    if (try parseInteractionRange(ref)) |range| {
+        var mutation = try openCurrentMutation(gpa, io, home, .shared);
+        errdefer mutation.deinit(io);
+        const numbers = try selectedNumbers(gpa, io, mutation.root, mutation.journal, range);
+        return .{ .mutation = mutation, .numbers = numbers };
+    }
+
+    const target = blk: {
+        var root = try store.openRoot(io, home);
+        defer root.close(io);
+        break :blk try requireMutationTarget(gpa, io, root, ref);
+    };
+    defer target.deinit(gpa);
+    try requireInteraction(target);
+
+    var mutation = try openCurrentMutation(gpa, io, home, .shared);
+    errdefer mutation.deinit(io);
+    if (!store.interactionExists(io, mutation.root, mutation.journal, target.number)) {
+        return error.NoSuchInteraction;
+    }
+    const numbers = try gpa.alloc(u32, 1);
+    numbers[0] = target.number;
+    return .{ .mutation = mutation, .numbers = numbers };
+}
+
+/// The existing entries a range covers, refusing a range that selects none.
+fn selectedNumbers(
+    gpa: std.mem.Allocator,
+    io: Io,
+    root: store.Dir,
+    journal: []const u8,
+    range: InteractionRange,
+) ![]u32 {
+    const all = try store.listNumbers(gpa, io, root, journal);
+    defer gpa.free(all);
+    if (!rangeSelectsAny(all, range)) return error.NoSuchInteraction;
+
+    var selected: std.ArrayList(u32) = .empty;
+    errdefer selected.deinit(gpa);
+    for (all) |number| {
+        if (range.contains(number)) try selected.append(gpa, number);
+    }
+    return selected.toOwnedSlice(gpa);
+}
+
+/// The read-only counterpart. Queries may name another journal, which
+/// mutations may not, so this resolves a journal alongside its entries.
+const QueryTargets = struct {
+    root: store.Dir,
+    journal: []u8,
+    numbers: []u32,
+
+    fn deinit(self: *QueryTargets, gpa: std.mem.Allocator, io: Io) void {
+        gpa.free(self.numbers);
+        gpa.free(self.journal);
+        self.root.close(io);
+        self.* = undefined;
+    }
+};
+
+fn openQueryTargets(
+    gpa: std.mem.Allocator,
+    io: Io,
+    home: ?[]const u8,
+    ref: []const u8,
+) !QueryTargets {
+    var root = try store.openRoot(io, home);
+    errdefer root.close(io);
+
+    if (try parseInteractionRange(ref)) |range| {
+        const current = try currentJournal();
+        const journal = try gpa.dupe(u8, current);
+        errdefer gpa.free(journal);
+        return .{
+            .root = root,
+            .journal = journal,
+            .numbers = try selectedNumbers(gpa, io, root, current, range),
+        };
+    }
+
+    const target = try locateCommandTarget(gpa, io, root, ref);
+    defer target.deinit(gpa);
+    try requireInteraction(target);
+    const journal = try gpa.dupe(u8, target.journal);
+    errdefer gpa.free(journal);
+    const numbers = try gpa.alloc(u32, 1);
+    numbers[0] = target.number;
+    return .{ .root = root, .journal = journal, .numbers = numbers };
+}
+
 fn nameRequest(parsed: *const zecli.Parsed) !NameRequest {
     const args = parsed.positionals.items;
     if (parsed.present("remove")) {
@@ -2126,22 +2240,20 @@ fn queryTags(
     ref: []const u8,
     out: *Io.Writer,
 ) !void {
-    if (try parseInteractionRange(ref)) |range| {
-        return queryTagsRange(gpa, io, home, range, out);
-    }
-    var root = try store.openRoot(io, home);
-    defer root.close(io);
-    const target = try locateCommandTarget(gpa, io, root, ref);
-    defer target.deinit(gpa);
-    try requireInteraction(target);
-    var metadata = try annotations.openRead(gpa, io, root, target.journal);
+    var targets = try openQueryTargets(gpa, io, home, ref);
+    defer targets.deinit(gpa, io);
+
+    var metadata = try annotations.openRead(gpa, io, targets.root, targets.journal);
     defer metadata.deinit(gpa);
-    var entry = (try metadata.get(gpa, target.number)) orelse return;
-    defer entry.deinit(gpa);
-    if (entry.tags.items.len == 0) return;
-    try printCanonical(out, sys.env("TJ_JOURNAL"), target.journal, target.number);
-    for (entry.tags.items) |tag| try out.print("  {s}", .{tag});
-    try out.writeAll("\n");
+    const current = sys.env("TJ_JOURNAL");
+    for (targets.numbers) |number| {
+        var entry = (try metadata.get(gpa, number)) orelse continue;
+        defer entry.deinit(gpa);
+        if (entry.tags.items.len == 0) continue;
+        try printCanonical(out, current, targets.journal, number);
+        for (entry.tags.items) |tag| try out.print("  {s}", .{tag});
+        try out.writeAll("\n");
+    }
 }
 
 fn updateTags(
@@ -2152,85 +2264,16 @@ fn updateTags(
     tags: []const []const u8,
     removing: bool,
 ) !void {
-    if (try parseInteractionRange(ref)) |range| {
-        return updateTagsRange(gpa, io, home, range, tags, removing);
-    }
-    const target = blk: {
-        var root = try store.openRoot(io, home);
-        defer root.close(io);
-        break :blk try requireMutationTarget(gpa, io, root, ref);
-    };
-    defer target.deinit(gpa);
-    try requireInteraction(target);
-
-    var mutation = try openCurrentMutation(gpa, io, home, .shared);
-    defer mutation.deinit(io);
-    if (!store.interactionExists(io, mutation.root, mutation.journal, target.number)) return error.NoSuchInteraction;
-    const normalized = try normalizeTags(gpa, tags);
-    defer freeTags(gpa, normalized);
-    var metadata = try annotations.openWrite(gpa, io, mutation.root, mutation.journal);
-    defer metadata.deinit(gpa);
-    var transaction = try metadata.begin();
-    defer transaction.deinit();
-    for (normalized) |tag| {
-        if (removing) {
-            try metadata.removeTag(target.number, tag);
-        } else {
-            try metadata.addTag(target.number, tag);
-        }
-    }
-    try transaction.commit();
-}
-
-fn queryTagsRange(
-    gpa: std.mem.Allocator,
-    io: Io,
-    home: ?[]const u8,
-    range: InteractionRange,
-    out: *Io.Writer,
-) !void {
-    const current = try currentJournal();
-    var root = try store.openRoot(io, home);
-    defer root.close(io);
-    const numbers = try store.listNumbers(gpa, io, root, current);
-    defer gpa.free(numbers);
-    if (!rangeSelectsAny(numbers, range)) return error.NoSuchInteraction;
-
-    var metadata = try annotations.openRead(gpa, io, root, current);
-    defer metadata.deinit(gpa);
-    for (numbers) |number| {
-        if (!range.contains(number)) continue;
-        var entry = (try metadata.get(gpa, number)) orelse continue;
-        defer entry.deinit(gpa);
-        if (entry.tags.items.len == 0) continue;
-        try out.print("@{d}", .{number});
-        for (entry.tags.items) |tag| try out.print("  {s}", .{tag});
-        try out.writeAll("\n");
-    }
-}
-
-fn updateTagsRange(
-    gpa: std.mem.Allocator,
-    io: Io,
-    home: ?[]const u8,
-    range: InteractionRange,
-    tags: []const []const u8,
-    removing: bool,
-) !void {
-    var mutation = try openCurrentMutation(gpa, io, home, .shared);
-    defer mutation.deinit(io);
-    const numbers = try store.listNumbers(gpa, io, mutation.root, mutation.journal);
-    defer gpa.free(numbers);
-    if (!rangeSelectsAny(numbers, range)) return error.NoSuchInteraction;
+    var targets = try openMutationTargets(gpa, io, home, ref);
+    defer targets.deinit(gpa, io);
 
     const normalized = try normalizeTags(gpa, tags);
     defer freeTags(gpa, normalized);
-    var metadata = try annotations.openWrite(gpa, io, mutation.root, mutation.journal);
+    var metadata = try annotations.openWrite(gpa, io, targets.mutation.root, targets.mutation.journal);
     defer metadata.deinit(gpa);
     var transaction = try metadata.begin();
     defer transaction.deinit();
-    for (numbers) |number| {
-        if (!range.contains(number)) continue;
+    for (targets.numbers) |number| {
         for (normalized) |tag| {
             if (removing) {
                 try metadata.removeTag(number, tag);
@@ -2303,49 +2346,21 @@ fn pinCommand(
     }
 }
 
-fn updatePin(gpa: std.mem.Allocator, io: Io, home: ?[]const u8, ref: []const u8, pinned: bool) !void {
-    if (try parseInteractionRange(ref)) |range| {
-        return updatePinRange(gpa, io, home, range, pinned);
-    }
-    const target = blk: {
-        var root = try store.openRoot(io, home);
-        defer root.close(io);
-        break :blk try requireMutationTarget(gpa, io, root, ref);
-    };
-    defer target.deinit(gpa);
-    try requireInteraction(target);
-
-    var mutation = try openCurrentMutation(gpa, io, home, .shared);
-    defer mutation.deinit(io);
-    if (!store.interactionExists(io, mutation.root, mutation.journal, target.number)) return error.NoSuchInteraction;
-    var metadata = try annotations.openWrite(gpa, io, mutation.root, mutation.journal);
-    defer metadata.deinit(gpa);
-    var transaction = try metadata.begin();
-    defer transaction.deinit();
-    try metadata.setPinned(target.number, pinned);
-    try transaction.commit();
-}
-
-fn updatePinRange(
+fn updatePin(
     gpa: std.mem.Allocator,
     io: Io,
     home: ?[]const u8,
-    range: InteractionRange,
+    ref: []const u8,
     pinned: bool,
 ) !void {
-    var mutation = try openCurrentMutation(gpa, io, home, .shared);
-    defer mutation.deinit(io);
-    const numbers = try store.listNumbers(gpa, io, mutation.root, mutation.journal);
-    defer gpa.free(numbers);
-    if (!rangeSelectsAny(numbers, range)) return error.NoSuchInteraction;
+    var targets = try openMutationTargets(gpa, io, home, ref);
+    defer targets.deinit(gpa, io);
 
-    var metadata = try annotations.openWrite(gpa, io, mutation.root, mutation.journal);
+    var metadata = try annotations.openWrite(gpa, io, targets.mutation.root, targets.mutation.journal);
     defer metadata.deinit(gpa);
     var transaction = try metadata.begin();
     defer transaction.deinit();
-    for (numbers) |number| {
-        if (range.contains(number)) try metadata.setPinned(number, pinned);
-    }
+    for (targets.numbers) |number| try metadata.setPinned(number, pinned);
     try transaction.commit();
 }
 
@@ -2616,37 +2631,38 @@ fn removeInteractionRange(
     var read_metadata = try annotations.openRead(gpa, io, mutation.root, mutation.journal);
     defer read_metadata.deinit(gpa);
 
-    var staged_paths: std.ArrayList([]u8) = .empty;
+    // One pass decides what is being removed, and the transaction below is
+    // driven by that decision rather than recomputing it against a second
+    // connection. The staged directories and the deleted annotations then
+    // cannot describe different sets of entries.
+    const Staged = struct { number: u32, path: []u8 };
+    var staged: std.ArrayList(Staged) = .empty;
     defer {
-        for (staged_paths.items) |path| gpa.free(path);
-        staged_paths.deinit(gpa);
+        for (staged.items) |item| gpa.free(item.path);
+        staged.deinit(gpa);
     }
-    try staged_paths.ensureTotalCapacity(gpa, selected);
+    try staged.ensureTotalCapacity(gpa, selected);
 
     var skipped_pinned: usize = 0;
     for (numbers) |number| {
-        if (number < range.first or number > range.last) continue;
+        if (!range.contains(number)) continue;
         if (!force and try read_metadata.isPinned(number)) {
             skipped_pinned += 1;
             continue;
         }
-        const staged = try store.stageInteractionRemoval(gpa, io, mutation.root, mutation.journal, number);
-        staged_paths.appendAssumeCapacity(staged);
+        const path = try store.stageInteractionRemoval(gpa, io, mutation.root, mutation.journal, number);
+        staged.appendAssumeCapacity(.{ .number = number, .path = path });
     }
 
-    if (staged_paths.items.len != 0) {
+    if (staged.items.len != 0) {
         var metadata = try annotations.openWrite(gpa, io, mutation.root, mutation.journal);
         defer metadata.deinit(gpa);
         var transaction = try metadata.begin();
         defer transaction.deinit();
-        for (numbers) |number| {
-            if (number < range.first or number > range.last) continue;
-            if (!force and try metadata.isPinned(number)) continue;
-            try metadata.removeEntry(number);
-        }
+        for (staged.items) |item| try metadata.removeEntry(item.number);
         try transaction.commit();
     }
-    for (staged_paths.items) |path| try store.finishStagedRemoval(io, mutation.root, path);
+    for (staged.items) |item| try store.finishStagedRemoval(io, mutation.root, item.path);
     if (skipped_pinned != 0) {
         note("tj: skipped {d} pinned {s}; use --force to remove {s}\n", .{
             skipped_pinned,
