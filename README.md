@@ -238,9 +238,12 @@ tjcd @42
 tjcd @pgsd.42             # qualified references also work outside a writer
 ```
 
-`tjcd` deliberately keeps its reference literal instead of canonicalizing it
-to `~[@REF]`: it resolves the entry, reads `cwd`, verifies that the directory
-still exists, and changes the calling zsh process with `builtin cd`.
+On a simple `tjcd @REF` line, `tjcd` deliberately keeps its reference literal
+instead of canonicalizing it to `~[@REF]`. In a compound line such as
+`tjcd @42 && command`, normal shorthand canonicalization may expand the
+reference before the function runs; `tjcd` accepts either form. It reads the
+entry's `cwd`, verifies that the directory still exists, and changes the
+calling zsh process with `builtin cd`.
 
 ## Names, tags, and pins
 

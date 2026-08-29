@@ -76,6 +76,42 @@ fn runNonTty(gpa: std.mem.Allocator, args: []const []const u8) !std.process.RunR
     });
 }
 
+fn runWithClosedStdout(gpa: std.mem.Allocator, args: []const []const u8) !struct {
+    term: std.process.Child.Term,
+    stderr: []u8,
+} {
+    isolateJournal();
+    const io = std.testing.io;
+
+    var argv: std.ArrayList([]const u8) = .empty;
+    defer argv.deinit(gpa);
+    try argv.append(gpa, tj);
+    try argv.appendSlice(gpa, args);
+
+    var child = try std.process.spawn(io, .{
+        .argv = argv.items,
+        .stdin = .ignore,
+        .stdout = .pipe,
+        .stderr = .pipe,
+    });
+    defer child.kill(io);
+
+    // Model a downstream command such as `head` exiting before tj flushes.
+    child.stdout.?.close(io);
+    child.stdout = null;
+
+    const stderr_file = child.stderr.?;
+    var stderr_reader: Io.File.Reader = .initStreaming(stderr_file, io, &.{});
+    const stderr = try stderr_reader.interface.allocRemaining(gpa, .limited(1 << 20));
+    stderr_file.close(io);
+    child.stderr = null;
+
+    return .{
+        .term = try child.wait(io),
+        .stderr = stderr,
+    };
+}
+
 fn runNonTtyInJournal(
     gpa: std.mem.Allocator,
     args: []const []const u8,
@@ -150,6 +186,33 @@ test "application and every command expose generated help" {
     try std.testing.expect(std.mem.indexOf(u8, grep.stdout, "--color, --colour <WHEN>") != null);
     try std.testing.expect(std.mem.indexOf(u8, grep.stdout, "choices: never, auto, always") != null);
     try std.testing.expect(std.mem.indexOf(u8, grep.stdout, "default: never") != null);
+}
+
+test "a closed stdout pipe exits quietly" {
+    const gpa = std.testing.allocator;
+
+    var scratch = try Scratch.open();
+    defer scratch.close();
+    const large = try gpa.alloc(u8, 1024 * 1024);
+    defer gpa.free(large);
+    @memset(large, 'x');
+    large[0..6].* = "first\n".*;
+    try scratch.tmp.dir.writeFile(std.testing.io, .{ .sub_path = "large-output", .data = large });
+    const large_path = try std.fmt.allocPrint(gpa, "{s}/large-output", .{scratch.path()});
+    defer gpa.free(large_path);
+
+    const cases = [_][]const []const u8{
+        &.{"--help"},
+        &.{"--version"},
+        &.{ "hist", "--help" },
+        &.{ "cat", "--raw", large_path },
+    };
+    for (cases) |args| {
+        const result = try runWithClosedStdout(gpa, args);
+        defer gpa.free(result.stderr);
+        try std.testing.expectEqual(@as(u8, 0), result.term.exited);
+        try std.testing.expectEqualStrings("", result.stderr);
+    }
 }
 
 test "build-time completions expose cli grammar and journal references" {
@@ -863,6 +926,25 @@ test "entries record cwd and tjcd changes zsh without expanding its reference" {
     try std.testing.expect(try child.readUntilFrom(gpa, &transcript, from, expected, timeout_ms));
     try std.testing.expect(try child.readUntilFrom(gpa, &transcript, from, test_prompt, timeout_ms));
 
+    from = transcript.items.len;
+    try child.write("cd /\n");
+    try std.testing.expect(try child.readUntilFrom(gpa, &transcript, from, test_prompt, timeout_ms));
+
+    const compound = "tjcd @2 && print -r -- \"TJCD_COMPOUND=$PWD\"";
+    const compound_expected = try std.fmt.allocPrint(gpa, "TJCD_COMPOUND={s}", .{target});
+    defer gpa.free(compound_expected);
+    from = transcript.items.len;
+    try child.write(compound ++ "\n");
+    try std.testing.expect(try child.readUntilFrom(gpa, &transcript, from, compound_expected, timeout_ms));
+    try std.testing.expect(try child.readUntilFrom(gpa, &transcript, from, test_prompt, timeout_ms));
+
+    from = transcript.items.len;
+    try child.write("cd /; tjcd ~[@2]; print -r -- \"TJCD_CANONICAL=$PWD\"\n");
+    const canonical_expected = try std.fmt.allocPrint(gpa, "TJCD_CANONICAL={s}", .{target});
+    defer gpa.free(canonical_expected);
+    try std.testing.expect(try child.readUntilFrom(gpa, &transcript, from, canonical_expected, timeout_ms));
+    try std.testing.expect(try child.readUntilFrom(gpa, &transcript, from, test_prompt, timeout_ms));
+
     try child.write("exit 0\n");
     try std.testing.expectEqual(@as(u8, 0), try child.finish(gpa, &transcript, timeout_ms));
 
@@ -878,6 +960,9 @@ test "entries record cwd and tjcd changes zsh without expanding its reference" {
     const after_tjcd = try journal.read(gpa, "5/cwd");
     defer gpa.free(after_tjcd);
     try std.testing.expectEqualStrings(target, after_tjcd);
+    const compound_cmd = try journal.read(gpa, "7/cmd");
+    defer gpa.free(compound_cmd);
+    try std.testing.expectEqualStrings(compound, compound_cmd);
 
     // The lightweight function is defined even when recording hooks are
     // inactive, so a qualified reference works from an ordinary zsh too.

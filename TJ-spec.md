@@ -529,10 +529,12 @@ actual process.
 The plugin defines `tjcd REF` as a zsh function because a subprocess cannot
 change its parent shell's directory. For a simple `tjcd @REF` line, the
 accept-line widget exempts the target from shorthand canonicalization. The
-function resolves the literal reference, reads its `cwd`, requires an absolute
-path naming an existing directory, and invokes `builtin cd --`. Qualified
-references work when no current journal is active. Missing `cwd` resources in
-older entries are reported rather than inferred.
+function resolves the literal reference. In compound command lines and for an
+explicit `tjcd ~[@REF]`, zsh may instead pass the already-expanded entry
+directory; the function accepts that form directly. It then reads `cwd`,
+requires an absolute path naming an existing directory, and invokes
+`builtin cd --`. Qualified references work when no current journal is active.
+Missing `cwd` resources in older entries are reported rather than inferred.
 
 ### Completion
 

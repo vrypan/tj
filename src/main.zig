@@ -36,14 +36,18 @@ pub fn main(init: std.process.Init) !u8 {
 
     switch (routed) {
         .help => {
-            try zecli.printApplicationHelp(arena, stdout, cli_spec.application);
-            try stdout.flush();
-            return 0;
+            zecli.printApplicationHelp(arena, stdout, cli_spec.application) catch |err| {
+                if (isBrokenPipe(&stdout_file, err)) return 0;
+                return err;
+            };
+            return flushStdout(&stdout_file, 0);
         },
         .version => {
-            try stdout.writeAll("tj " ++ version ++ "\n");
-            try stdout.flush();
-            return 0;
+            stdout.writeAll("tj " ++ version ++ "\n") catch |err| {
+                if (isBrokenPipe(&stdout_file, err)) return 0;
+                return err;
+            };
+            return flushStdout(&stdout_file, 0);
         },
         .command => |command| {
             const spec = command.which.spec();
@@ -55,9 +59,11 @@ pub fn main(init: std.process.Init) !u8 {
             };
 
             if (zecli.helpRequested(parts.owned)) {
-                try zecli.printCommandHelp(arena, stdout, spec);
-                try stdout.flush();
-                return 0;
+                zecli.printCommandHelp(arena, stdout, spec) catch |err| {
+                    if (isBrokenPipe(&stdout_file, err)) return 0;
+                    return err;
+                };
+                return flushStdout(&stdout_file, 0);
             }
 
             cli.preflightCommandArgs(command.which, parts.owned) catch {
@@ -77,6 +83,7 @@ pub fn main(init: std.process.Init) !u8 {
             defer parsed.deinit(arena);
 
             const status = commands.run(arena, init.io, command, parts.child, &parsed, stdout) catch |err| {
+                if (isBrokenPipe(&stdout_file, err)) return 0;
                 stdout.flush() catch {};
                 try stderr.writeAll(commandErrorMessage(command.which, err));
                 if (isUsageError(err)) {
@@ -87,10 +94,23 @@ pub fn main(init: std.process.Init) !u8 {
                 if (isUsageError(err) or err == error.NoSuchInteraction) return 2;
                 return 1;
             };
-            try stdout.flush();
-            return status;
+            return flushStdout(&stdout_file, status);
         },
     }
+}
+
+fn isBrokenPipe(stdout_file: *const Io.File.Writer, err: anyerror) bool {
+    if (err != error.WriteFailed) return false;
+    if (stdout_file.err) |write_err| return write_err == error.BrokenPipe;
+    return false;
+}
+
+fn flushStdout(stdout_file: *Io.File.Writer, status: u8) !u8 {
+    stdout_file.interface.flush() catch |err| {
+        if (isBrokenPipe(stdout_file, err)) return 0;
+        return err;
+    };
+    return status;
 }
 
 fn rootErrorMessage(err: anyerror) []const u8 {

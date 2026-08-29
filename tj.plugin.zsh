@@ -28,7 +28,14 @@ tjcd() {
   fi
 
   local entry destination=''
-  entry=$(command "$(_tj_bin)" resolve "$1") || return
+  # A compound command is canonicalized word-by-word before zsh parses it, so
+  # `tjcd @1 && ...` reaches this function with the dynamic named directory
+  # already expanded. Simple `tjcd @1` lines still arrive as literal refs.
+  if [[ -d $1 ]]; then
+    entry=$1
+  else
+    entry=$(command "$(_tj_bin)" resolve "$1") || return
+  fi
   if [[ ! -f $entry/cwd ]]; then
     print -ru2 -- 'tjcd: entry has no recorded cwd'
     return 1
