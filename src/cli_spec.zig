@@ -13,7 +13,13 @@ const keep_osc_flag = zecli.FlagSpec{
     .description = "Forward TJ's own control sequences instead of stripping them",
 };
 
-const lifecycle_flags = [_]zecli.FlagSpec{ home_flag, keep_osc_flag };
+const new_flags = [_]zecli.FlagSpec{ home_flag, keep_osc_flag };
+
+const continue_flags = [_]zecli.FlagSpec{
+    home_flag,
+    keep_osc_flag,
+    .{ .name = "no-replay", .description = "Start without replaying the existing journal" },
+};
 
 const root_flags = [_]zecli.FlagSpec{
     home_flag,
@@ -54,7 +60,7 @@ const replay_flags = [_]zecli.FlagSpec{
     .{ .name = "speed", .value = .string, .value_name = "X", .description = "Divide recorded delays by X", .default_value = "1" },
     .{ .name = "typing", .value = .string, .value_name = "MS", .description = "Delay per command character", .default_value = "35" },
     .{ .name = "max-pause", .value = .string, .value_name = "MS", .description = "Cap each recorded pause", .default_value = "2000" },
-    .{ .name = "prompt", .value = .string, .value_name = "TEXT", .description = "Prompt shown before commands", .default_value = "$ " },
+    .{ .name = "prompt", .value = .string, .value_name = "TEXT", .description = "Override captured prompts", .default_value = "$ " },
     .{ .name = "from", .value = .string, .value_name = "N", .description = "Start at interaction N", .default_value = "1" },
     .{ .name = "to", .value = .string, .value_name = "N", .description = "Stop after interaction N" },
     .{ .name = "duration", .description = "Print replay duration instead of playing it" },
@@ -90,14 +96,14 @@ const commands = [_]zecli.CommandSpec{
         .name = "new",
         .description = "Run $SHELL, or a command, writing a new journal",
         .usage = "tj new [options] [-- COMMAND...]",
-        .flags = &lifecycle_flags,
+        .flags = &new_flags,
         .extra_help = "COMMAND may omit `--` when its executable does not begin with `-`.\n",
     },
     .{
         .name = "continue",
         .description = "Run a fresh shell or command, appending to one journal",
         .usage = "tj continue [options] <JOURNAL> [-- COMMAND...]",
-        .flags = &lifecycle_flags,
+        .flags = &continue_flags,
         .arguments = &.{.{
             .name = "JOURNAL",
             .description = "Existing journal ID or unambiguous suffix",

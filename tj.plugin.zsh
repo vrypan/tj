@@ -91,6 +91,19 @@ _tj_precmd() {
 add-zsh-hook preexec _tj_preexec
 add-zsh-hook precmd _tj_precmd
 
+# zsh has rendered PROMPT and RPROMPT by the time it starts ZLE. Mark that
+# boundary without modifying or re-expanding either prompt, so dynamic prompt
+# engines such as Starship are captured exactly once as terminal bytes.
+_tj_prompt_end() {
+  _tj_emit "133;B"
+}
+
+# This helper preserves any existing zle-line-init widget, maintains an
+# ordered hook list, and ignores duplicate registration when the plugin is
+# sourced again.
+autoload -Uz add-zle-hook-widget
+add-zle-hook-widget zle-line-init _tj_prompt_end
+
 # --- the journal namespace --------------------------------------------------
 
 # Whether $1 is exactly a syntactically valid interaction-reference head. The

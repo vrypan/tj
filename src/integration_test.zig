@@ -167,6 +167,7 @@ test "build-time completions expose only the static cli grammar" {
     try std.testing.expect(std.mem.indexOf(u8, zsh, "'hist:List interactions in a journal'") != null);
     try std.testing.expect(std.mem.indexOf(u8, zsh, "_tj__cmd_hist()") != null);
     try std.testing.expect(std.mem.indexOf(u8, zsh, "--tag=[") != null);
+    try std.testing.expect(std.mem.indexOf(u8, zsh, "--no-replay[") != null);
     try std.testing.expect(std.mem.indexOf(u8, zsh, "WHEN:(never auto always)") != null);
 
     const fish = try Dir.cwd().readFileAlloc(io, options.fish_completion, gpa, .limited(1 << 20));
@@ -589,6 +590,46 @@ test "commands are recorded as cmd, out and rc" {
     try std.testing.expectEqualStrings("1\n", second_rc);
 }
 
+test "each interaction records the fully rendered zsh prompt" {
+    if (!haveZsh()) return error.SkipZigTest;
+    const gpa = std.testing.allocator;
+
+    var journal = try Journal.open(gpa);
+    defer journal.close();
+    const child = try spawnJournalZsh(gpa, &journal);
+    var out: std.ArrayList(u8) = .empty;
+    defer out.deinit(gpa);
+    try setupJournalZsh(gpa, child, &out);
+
+    // This stands in for prompt engines such as Starship: command and
+    // parameter substitutions run while zsh renders a coloured, multiline
+    // prompt with a right-hand side. TJ must retain those terminal bytes, not
+    // the PROMPT source text and not a later re-evaluation of it.
+    var from = out.items.len;
+    try child.write("setopt promptsubst; PROMPT='%F{magenta}TJ_DYNAMIC_$(print -rn -- STARSHIP_LIKE)_${TJ_NEXT}%f\nTJ_SECOND> '; RPROMPT='TJ_RIGHT'\n");
+    try std.testing.expect(try child.readUntilFrom(gpa, &out, from, "TJ_DYNAMIC_STARSHIP_LIKE_2", timeout_ms));
+    try std.testing.expect(try child.readUntilFrom(gpa, &out, from, "TJ_RIGHT", timeout_ms));
+
+    from = out.items.len;
+    try child.write("echo PROMPT_CAPTURE_BODY\n");
+    try std.testing.expect(try child.readUntilFrom(gpa, &out, from, "PROMPT_CAPTURE_BODY", timeout_ms));
+    try std.testing.expect(try child.readUntilFrom(gpa, &out, from, "TJ_DYNAMIC_STARSHIP_LIKE_3", timeout_ms));
+    try child.write("exit 0\n");
+    try std.testing.expectEqual(@as(u8, 0), try child.finish(gpa, &out, timeout_ms));
+
+    // Interaction 1 changes the prompt; interaction 2 is the command entered
+    // at the rendered dynamic prompt whose TJ_NEXT value was 2.
+    const prompt = try journal.read(gpa, "2/prompt");
+    defer gpa.free(prompt);
+    try std.testing.expect(std.mem.indexOf(u8, prompt, "TJ_DYNAMIC_STARSHIP_LIKE_2") != null);
+    try std.testing.expect(std.mem.indexOf(u8, prompt, "TJ_SECOND> ") != null);
+    try std.testing.expect(std.mem.indexOf(u8, prompt, "TJ_RIGHT") != null);
+    try std.testing.expect(std.mem.indexOf(u8, prompt, "\x1b[35m") != null);
+    try std.testing.expect(std.mem.indexOf(u8, prompt, "$(print") == null);
+    try std.testing.expect(std.mem.indexOf(u8, prompt, "PROMPT_CAPTURE_BODY") == null);
+    try std.testing.expect(std.mem.indexOf(u8, prompt, "133;B") == null);
+}
+
 test "continue appends to the same journal at its next unused number" {
     if (!haveZsh()) return error.SkipZigTest;
     const gpa = std.testing.allocator;
@@ -759,7 +800,7 @@ test "an interrupted writer leaves the interaction without an rc" {
 
 // --- the journal namespace --------------------------------------------------
 
-test "the tj accept-line widget preserves an existing widget and registers once" {
+test "the tj zle hooks preserve existing widgets and register once" {
     if (!haveZsh()) return error.SkipZigTest;
     const gpa = std.testing.allocator;
 
@@ -771,8 +812,11 @@ test "the tj accept-line widget preserves an existing widget and registers once"
     defer out.deinit(gpa);
     const prefix =
         "typeset -gi TJ_PRIOR_ACCEPT_COUNT=0; " ++
+        "typeset -gi TJ_PRIOR_LINE_INIT_COUNT=0; " ++
         "_tj_prior_accept_line() { (( TJ_PRIOR_ACCEPT_COUNT++ )); zle .accept-line; }; " ++
-        "zle -N accept-line _tj_prior_accept_line";
+        "_tj_prior_line_init() { (( TJ_PRIOR_LINE_INIT_COUNT++ )); }; " ++
+        "zle -N accept-line _tj_prior_accept_line; " ++
+        "zle -N zle-line-init _tj_prior_line_init";
     try setupJournalZshWithPrefix(gpa, child, &out, prefix);
 
     // Sourcing TJ again must neither replace the saved widget nor make TJ's
@@ -787,8 +831,9 @@ test "the tj accept-line widget preserves an existing widget and registers once"
     try std.testing.expect(try child.readUntilFrom(gpa, &out, from, test_prompt, timeout_ms));
 
     from = out.items.len;
-    try child.write("print -r -- TJ_PRIOR_ACCEPT_COUNT=$TJ_PRIOR_ACCEPT_COUNT\n");
+    try child.write("print -r -- TJ_PRIOR_ACCEPT_COUNT=$TJ_PRIOR_ACCEPT_COUNT TJ_PRIOR_LINE_INIT_COUNT=$TJ_PRIOR_LINE_INIT_COUNT\n");
     try std.testing.expect(try child.readUntilFrom(gpa, &out, from, "TJ_PRIOR_ACCEPT_COUNT=2", timeout_ms));
+    try std.testing.expect(try child.readUntilFrom(gpa, &out, from, "TJ_PRIOR_LINE_INIT_COUNT=2", timeout_ms));
     try std.testing.expect(try child.readUntilFrom(gpa, &out, from, test_prompt, timeout_ms));
 
     try child.write("exit 0\n");
@@ -1326,6 +1371,7 @@ test "completion offers resources but never tj's own bookkeeping" {
     defer r.out.deinit(gpa);
     try std.testing.expect(std.mem.indexOf(u8, r.out.items, "@1/cmd") != null);
     try std.testing.expect(std.mem.indexOf(u8, r.out.items, "@1/out") != null);
+    try std.testing.expect(std.mem.indexOf(u8, r.out.items, "@1/prompt") != null);
     try std.testing.expect(std.mem.indexOf(u8, r.out.items, "@1/rc") != null);
     try std.testing.expect(std.mem.indexOf(u8, r.out.items, "meta.json") == null);
 }
@@ -1887,6 +1933,65 @@ test "an empty continue preserves its journal" {
     try std.testing.expectEqual(@as(u8, 0), r.code);
     var dir = try scratch.tmp.dir.openDir(io, &id, .{});
     dir.close(io);
+}
+
+test "continue replays the journal immediately unless no-replay is set" {
+    const gpa = std.testing.allocator;
+    const io = std.testing.io;
+    var scratch = try Scratch.open();
+    defer scratch.close();
+
+    const id = ulid.encode(45, .{2} ** 10);
+    try scratch.makeJournal(id, &.{ "1", "2", "3" });
+    var journal = try scratch.tmp.dir.openDir(io, &id, .{});
+    defer journal.close(io);
+
+    const entries = [_]struct {
+        number: []const u8,
+        command: []const u8,
+        output: []const u8,
+        meta: []const u8,
+    }{
+        .{ .number = "1", .command = "first-command", .output = "\x1b]11;?\x1b\\\x1b[6nREPLAY-FIRST\r\n", .meta = "{\"started\":\"2026-01-01T00:00:00.000Z\",\"ended\":\"2026-01-01T01:00:00.000Z\"}\n" },
+        .{ .number = "2", .command = "second-command", .output = "REPLAY-SECOND\r\n", .meta = "{\"started\":\"2026-01-02T00:00:00.000Z\",\"ended\":\"2026-01-02T01:00:00.000Z\"}\n" },
+        .{ .number = "3", .command = "third-command", .output = "REPLAY-THIRD\r\n", .meta = "{\"started\":\"2026-01-03T00:00:00.000Z\",\"ended\":\"2026-01-03T01:00:00.000Z\"}\n" },
+    };
+    for (entries) |entry| {
+        var dir = try journal.openDir(io, entry.number, .{});
+        defer dir.close(io);
+        try dir.writeFile(io, .{ .sub_path = "cmd", .data = entry.command });
+        try dir.writeFile(io, .{ .sub_path = "out", .data = entry.output });
+        try dir.writeFile(io, .{ .sub_path = "meta.json", .data = entry.meta });
+        if (std.mem.eql(u8, entry.number, "1")) {
+            try dir.writeFile(io, .{ .sub_path = "prompt", .data = "CONTINUE-CAPTURED> " });
+        }
+    }
+
+    // The recorded hour-long commands and day-long gaps must not delay
+    // continuation. Its transcript appears before the fresh child output.
+    var replayed = try run(gpa, &.{
+        "--home", scratch.path(), "continue", &id, "--", "/bin/sh", "-c", "printf 'FRESH-CHILD\\n'",
+    }, 24, 80);
+    defer replayed.out.deinit(gpa);
+    try std.testing.expectEqual(@as(u8, 0), replayed.code);
+    const first = std.mem.indexOf(u8, replayed.out.items, "REPLAY-FIRST") orelse return error.TestUnexpectedResult;
+    const first_prompt = std.mem.indexOf(u8, replayed.out.items, "CONTINUE-CAPTURED> first-command") orelse return error.TestUnexpectedResult;
+    const third = std.mem.indexOf(u8, replayed.out.items, "REPLAY-THIRD") orelse return error.TestUnexpectedResult;
+    const child = std.mem.indexOf(u8, replayed.out.items, "FRESH-CHILD") orelse return error.TestUnexpectedResult;
+    try std.testing.expect(first_prompt < first);
+    try std.testing.expect(first < third);
+    try std.testing.expect(third < child);
+    try std.testing.expect(std.mem.indexOf(u8, replayed.out.items, "\x1b]11;?") == null);
+    try std.testing.expect(std.mem.indexOf(u8, replayed.out.items, "\x1b[6n") == null);
+
+    var skipped = try run(gpa, &.{
+        "--home", scratch.path(), "continue", "--no-replay", &id, "--", "/bin/sh", "-c", "printf 'NO-REPLAY-CHILD\\n'",
+    }, 24, 80);
+    defer skipped.out.deinit(gpa);
+    try std.testing.expectEqual(@as(u8, 0), skipped.code);
+    try std.testing.expect(std.mem.indexOf(u8, skipped.out.items, "NO-REPLAY-CHILD") != null);
+    try std.testing.expect(std.mem.indexOf(u8, skipped.out.items, "REPLAY-FIRST") == null);
+    try std.testing.expect(std.mem.indexOf(u8, skipped.out.items, "first-command") == null);
 }
 
 test "only one process writes a journal and descendants do not retain its lock" {
@@ -2687,6 +2792,42 @@ test "invalid replay numeric options exit cleanly" {
     }
 }
 
+test "replay prefers recorded prompts and permits an explicit override" {
+    const gpa = std.testing.allocator;
+    const io = std.testing.io;
+    leaveJournal();
+    var scratch = try Scratch.open();
+    defer scratch.close();
+
+    const id = ulid.encode(44, .{7} ** 10);
+    try scratch.makeJournal(id, &.{"1"});
+    var journal = try scratch.tmp.dir.openDir(io, &id, .{});
+    defer journal.close(io);
+    var interaction = try journal.openDir(io, "1", .{});
+    defer interaction.close(io);
+    try interaction.writeFile(io, .{ .sub_path = "prompt", .data = "\x1b[36mCAPTURED-PROMPT> \x1b[0m" });
+    try interaction.writeFile(io, .{ .sub_path = "cmd", .data = "recorded-command" });
+    try interaction.writeFile(io, .{ .sub_path = "out", .data = "RECORDED-OUTPUT\r\n" });
+
+    var recorded = try run(gpa, &.{
+        "--home", scratch.path(), "replay", &id, "--typing", "0", "--max-pause", "0",
+    }, 24, 80);
+    defer recorded.out.deinit(gpa);
+    try std.testing.expectEqual(@as(u8, 0), recorded.code);
+    const prompt_at = std.mem.indexOf(u8, recorded.out.items, "CAPTURED-PROMPT") orelse return error.TestUnexpectedResult;
+    const command_at = std.mem.indexOf(u8, recorded.out.items, "recorded-command") orelse return error.TestUnexpectedResult;
+    try std.testing.expect(prompt_at < command_at);
+    try std.testing.expect(std.mem.indexOf(u8, recorded.out.items, "\x1b[36m") != null);
+
+    var overridden = try run(gpa, &.{
+        "--home", scratch.path(), "replay", &id, "--typing", "0", "--max-pause", "0", "--prompt", "OVERRIDE> ",
+    }, 24, 80);
+    defer overridden.out.deinit(gpa);
+    try std.testing.expectEqual(@as(u8, 0), overridden.code);
+    try std.testing.expect(std.mem.indexOf(u8, overridden.out.items, "OVERRIDE> recorded-command") != null);
+    try std.testing.expect(std.mem.indexOf(u8, overridden.out.items, "CAPTURED-PROMPT") == null);
+}
+
 test "a journal replays the commands and output it recorded" {
     if (!haveZsh()) return error.SkipZigTest;
     const gpa = std.testing.allocator;
@@ -2712,7 +2853,7 @@ test "a journal replays the commands and output it recorded" {
     try std.testing.expect(first_cmd < first_out);
     try std.testing.expect(first_out < second_cmd);
 
-    // The synthesised prompt appears, since the journal never recorded one.
+    // An explicit prompt replaces the captured one.
     try std.testing.expect(std.mem.indexOf(u8, r.out.items, "% ") != null);
 }
 

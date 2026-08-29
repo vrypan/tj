@@ -18,7 +18,9 @@ const tty = @import("tty.zig");
 const cli = @import("cli.zig");
 const scanner = @import("scanner.zig");
 const ulid = @import("ulid.zig");
-const Store = @import("store.zig").Store;
+const journal_store = @import("store.zig");
+const Store = journal_store.Store;
+const replay = @import("replay.zig");
 
 const io_buf_size = 64 * 1024;
 const max_protocol_error_log_bytes = 384;
@@ -73,6 +75,21 @@ pub fn run(gpa: std.mem.Allocator, io: std.Io, opts: cli.Proxy) !Result {
         .existing => |selector| try Store.continueJournal(gpa, io, opts.home, selector),
     };
     defer store.close();
+
+    // Continuation reconstructs the journal's visible transcript before a
+    // fresh child starts. Write directly to the outer terminal so replayed
+    // shell-integration sequences never pass through this writer's scanner.
+    if (opts.replay_before_start) {
+        var root = try journal_store.openRoot(io, opts.home);
+        defer root.close(io);
+        var stdout_buffer: [io_buf_size]u8 = undefined;
+        var stdout_file: std.Io.File.Writer = .init(.stdout(), io, &stdout_buffer);
+        try replay.play(gpa, io, root, store.journalId(), .{
+            .typing_ms = 0,
+            .max_pause_ms = 0,
+        }, &stdout_file.interface);
+        try stdout_file.interface.flush();
+    }
 
     // Seed the inner pty with the outer terminal's settings so programs that
     // query them (line width, control characters) see the truth from the start.
@@ -299,9 +316,10 @@ const Recorder = struct {
                 self.has_expanded = false;
             },
             .command_end => |code| self.store.finish(code),
-            // Ends whatever is still open; a no-op right after `command_end`,
-            // which is the usual case since the shell reports both at once.
-            .prompt_start => self.store.finish(null),
+            // Ends whatever is still open, then captures the prompt which
+            // will belong to the next command that actually runs.
+            .prompt_start => self.store.promptStart(),
+            .prompt_end => self.store.promptEnd(),
             .resource_begin => |r| self.store.beginResource(r.path, r.mime),
             .noout_begin => self.store.beginNoout(),
             .region_end => self.store.endRegion(),

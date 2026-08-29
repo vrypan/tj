@@ -6,6 +6,7 @@
 //!         └── 1/
 //!             ├── cmd           the command line as entered
 //!             ├── out           what the terminal saw
+//!             ├── prompt        prompt drawn before the command
 //!             ├── rc            exit status, absent while incomplete
 //!             └── meta.json
 //!
@@ -47,13 +48,18 @@ const max_resources = 32;
 const max_log_bytes: u64 = 64 * 1024;
 const max_log_warnings: usize = 64;
 const log_suppression_notice = "further journal warnings suppressed\n";
+const max_prompt_bytes = 64 * 1024;
+const prompt_end_st = "\x1b]133;B\x1b\\";
+const prompt_end_bel = "\x1b]133;B\x07";
 
 /// Recorded once for a visible region deliberately omitted from `out`.
 pub const noout_placeholder = "<tj:noout>";
 
 /// tj's own bookkeeping, which a program may not overwrite by publishing a
 /// resource with the same name.
-const reserved_names = [_][]const u8{ "cmd", "out", "rc", "meta.json", "out.removed", ".meta.tmp", "log" };
+const reserved_names = [_][]const u8{ "cmd", "out", "prompt", "rc", "meta.json", "out.removed", ".meta.tmp", "log" };
+
+const PromptState = enum { idle, capturing, ready };
 
 pub const Store = struct {
     io: Io,
@@ -72,6 +78,8 @@ pub const Store = struct {
     log_bytes: u64 = 0,
     warning_count: usize = 0,
     warnings_suppressed: bool = false,
+    pending_prompt: std.ArrayList(u8) = .empty,
+    prompt_state: PromptState = .idle,
     /// Set after the first write failure; recording stops, forwarding does not.
     disabled: bool = false,
 
@@ -228,15 +236,22 @@ pub const Store = struct {
 
         self.root.close(self.io);
         self.gpa.free(self.out_buffer);
+        self.pending_prompt.deinit(self.gpa);
     }
 
     pub fn isRecording(self: *const Store) bool {
         return self.current != null;
     }
 
+    /// The exact journal selected and locked by this writer.
+    pub fn journalId(self: *const Store) []const u8 {
+        return &self.journal;
+    }
+
     /// Opens interaction N and writes `cmd` immediately, so a journal that
     /// dies mid-command still shows what was running.
     pub fn begin(self: *Store, cmd: []const u8, expanded: ?[]const u8) void {
+        defer self.discardPrompt();
         if (self.disabled) return;
         if (self.current != null) self.finish(null);
 
@@ -249,13 +264,21 @@ pub const Store = struct {
         var name_buf: [16]u8 = undefined;
         const name = std.fmt.bufPrint(&name_buf, "{d}", .{number}) catch return;
 
-        self.beginFallible(number, name, cmd, expanded) catch |err| {
+        const prompt = if (self.prompt_state == .ready) self.pending_prompt.items else null;
+        self.beginFallible(number, name, cmd, expanded, prompt) catch |err| {
             self.warn("cannot start interaction {s}: {t}", .{ name, err });
             self.disable();
         };
     }
 
-    fn beginFallible(self: *Store, number: u32, name: []const u8, cmd: []const u8, expanded: ?[]const u8) !void {
+    fn beginFallible(
+        self: *Store,
+        number: u32,
+        name: []const u8,
+        cmd: []const u8,
+        expanded: ?[]const u8,
+        prompt: ?[]const u8,
+    ) !void {
         try self.journal_dir.createDir(self.io, name, dir_permissions);
         var dir = try self.journal_dir.openDir(self.io, name, .{});
         errdefer dir.close(self.io);
@@ -263,6 +286,11 @@ pub const Store = struct {
         try dir.writeFile(self.io, .{
             .sub_path = "cmd",
             .data = cmd,
+            .flags = .{ .permissions = file_permissions },
+        });
+        if (prompt) |bytes| try dir.writeFile(self.io, .{
+            .sub_path = "prompt",
+            .data = bytes,
             .flags = .{ .permissions = file_permissions },
         });
 
@@ -280,6 +308,19 @@ pub const Store = struct {
 
     /// Buffered: the poll loop must not wait on the disk to forward a byte.
     pub fn append(self: *Store, bytes: []const u8) void {
+        if (self.prompt_state == .capturing) {
+            if (bytes.len > max_prompt_bytes - self.pending_prompt.items.len) {
+                self.discardPrompt();
+                self.warn("prompt exceeded the {d}-byte limit", .{max_prompt_bytes});
+                return;
+            }
+            self.pending_prompt.appendSlice(self.gpa, bytes) catch {
+                self.discardPrompt();
+                self.warn("cannot buffer prompt", .{});
+            };
+            return;
+        }
+
         const current = &(self.current orelse return);
 
         if (current.open_region) |*region| switch (region.*) {
@@ -294,6 +335,39 @@ pub const Store = struct {
 
         var sink: OutputSink = .{ .store = self, .interaction = current };
         current.fullscreen.feed(bytes, &sink);
+    }
+
+    /// Starts retaining the exact terminal bytes zsh renders as its next
+    /// prompt. A prompt is pending until a later command receives its number.
+    pub fn promptStart(self: *Store) void {
+        self.finish(null);
+        if (self.disabled) {
+            self.discardPrompt();
+            return;
+        }
+        self.pending_prompt.clearRetainingCapacity();
+        self.prompt_state = .capturing;
+    }
+
+    /// Completes a pending prompt. OSC 133 is forwarded before its event is
+    /// reported, so remove the trailing B marker from the captured bytes.
+    pub fn promptEnd(self: *Store) void {
+        if (self.prompt_state != .capturing) return;
+        if (std.mem.endsWith(u8, self.pending_prompt.items, prompt_end_st)) {
+            self.pending_prompt.shrinkRetainingCapacity(self.pending_prompt.items.len - prompt_end_st.len);
+        } else if (std.mem.endsWith(u8, self.pending_prompt.items, prompt_end_bel)) {
+            self.pending_prompt.shrinkRetainingCapacity(self.pending_prompt.items.len - prompt_end_bel.len);
+        } else {
+            self.discardPrompt();
+            self.warn("prompt end marker was not captured", .{});
+            return;
+        }
+        self.prompt_state = .ready;
+    }
+
+    fn discardPrompt(self: *Store) void {
+        self.pending_prompt.clearRetainingCapacity();
+        self.prompt_state = .idle;
     }
 
     /// Starts capturing output as a named resource of this interaction. The
@@ -1469,8 +1543,48 @@ test "tj's bookkeeping files are not part of the namespace" {
     try std.testing.expect(isPrivate("log"));
     try std.testing.expect(!isPrivate("cmd"));
     try std.testing.expect(!isPrivate("out"));
+    try std.testing.expect(!isPrivate("prompt"));
     try std.testing.expect(!isPrivate("rc"));
     try std.testing.expect(!isPrivate("files"));
+}
+
+test "a rendered prompt belongs to the next interaction" {
+    const io = std.testing.io;
+    const gpa = std.testing.allocator;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var root_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const root_len = try tmp.dir.realPath(io, &root_buf);
+
+    var store = try Store.createJournal(gpa, io, root_buf[0..root_len]);
+    defer store.close();
+
+    // A canceled line draws another prompt. Only the most recently completed
+    // one can belong to the command that eventually starts.
+    store.promptStart();
+    store.append("old prompt");
+    store.append(prompt_end_st);
+    store.promptEnd();
+    store.promptStart();
+    const rendered = "\x1b[35mleft\x1b[0m\r\n\x1b[20CRIGHT";
+    store.append(rendered);
+    store.append(prompt_end_st);
+    store.promptEnd();
+    store.begin("echo captured", null);
+    store.finish(0);
+
+    const prompt = try store.journal_dir.readFileAlloc(io, "1/prompt", gpa, .limited(4096));
+    defer gpa.free(prompt);
+    try std.testing.expectEqualStrings(rendered, prompt);
+    try std.testing.expect(std.mem.indexOf(u8, prompt, "133;B") == null);
+
+    // If the B boundary never arrives, the partial prompt is discarded at
+    // command start rather than being attached as if it were complete.
+    store.promptStart();
+    store.append("unfinished prompt");
+    store.begin("echo no-prompt", null);
+    store.finish(0);
+    try std.testing.expectError(error.FileNotFound, store.journal_dir.openFile(io, "2/prompt", .{}));
 }
 
 /// Receives the bytes that survive the full-screen filter and puts them on
@@ -1641,14 +1755,15 @@ test "resource paths that programs may use" {
 test "resource paths that must be refused" {
     for ([_][]const u8{
         // Escaping the interaction directory.
-        "../out", "files/../../etc/passwd", "/etc/passwd", "a//b",
-        "./x",    "..",
+        "../out",    "files/../../etc/passwd", "/etc/passwd", "a//b",
+        "./x",       "..",
         // Overwriting tj's own bookkeeping.
                             "cmd",         "out",
-        "rc",     "meta.json",              "out.removed", ".meta.tmp",
-        "log",
+        "prompt",    "rc",                     "meta.json",   "out.removed",
+        ".meta.tmp", "log",
         // Nothing, or control characters.
-           "",                       "a\x00b",      "a\nb",
+                           "",            "a\x00b",
+        "a\nb",
     }) |path| {
         try std.testing.expect(!validResourcePath(path));
     }

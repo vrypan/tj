@@ -110,6 +110,11 @@ Do not do this blindly. If the question stands on its own, answer it. Fetch
 as readable text when writing to a pipe, which is what you will get. Add
 `--raw` only if you specifically need the bytes, including colour codes.
 
+With the zsh integration, `prompt` contains the exact rendered prompt that
+preceded the interaction, including dynamic prompt-engine output. Use
+`tj cat '@42/prompt'` only when the prompt itself is relevant; it is absent in
+older journals and is not part of `out`.
+
 Two things will look wrong and are not:
 
 - **Full-screen programs record almost nothing.** Editors, pagers and

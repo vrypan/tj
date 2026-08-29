@@ -34,18 +34,21 @@ reassigned; explicit removal may leave holes.
 Each interaction receives an identifier. Journal references use `@N`;
 `@-` refers to the immediately preceding interaction.
 
-Every interaction exposes three core resources:
+Every interaction exposes core resources:
 
 ``` text
 @42/
 ├── cmd
 ├── out
+├── prompt
 └── rc
 ```
 
 `cmd` is the command line as entered. `out` is the terminal output as
 rendered: the bytes the program wrote to the tty, including escape
-sequences. `rc` is the exit status.
+sequences. `prompt` is the exact terminal byte sequence zsh rendered before
+the command, including dynamic prompt-engine output; it is absent in journals
+recorded without prompt-aware shell integration. `rc` is the exit status.
 
 Programs may also mark semantic spans within their output as named
 resources:
@@ -54,6 +57,7 @@ resources:
 @42/
 ├── cmd
 ├── out
+├── prompt
 ├── rc
 └── files/
     ├── data.csv
@@ -126,11 +130,12 @@ Commands no longer produce only terminal output.
 
 They produce reusable objects.
 
-The three core resources are always available:
+The core resources are directly addressable:
 
 ``` text
 @103/cmd
 @103/out
+@103/prompt
 @103/rc
 ```
 
@@ -141,6 +146,7 @@ named resources:
 @103/
 ├── cmd
 ├── out
+├── prompt
 ├── rc
 └── files/
     ├── data.csv
@@ -290,6 +296,14 @@ using the caller's cwd and environment. It restores no cwd, environment,
 shell options, functions, history, jobs, file descriptors, processes, or
 other state from previous writers.
 
+Before launching that fresh child, continuation replays the selected journal
+to the outer terminal by default. It uses the ordinary replay rendering, but
+with command typing delays, recorded command durations, and gaps all set to
+zero. Non-visual background-colour and cursor-position queries are suppressed
+so their terminal replies cannot become input to the fresh child. The replay
+bypasses the new writer's scanner and is not recorded again. `--no-replay`
+suppresses this startup replay.
+
 Interactions start at 1. Every later writer starts at one greater than the
 highest valid numeric interaction directory. A missing `rc` means unfinished,
 but that directory still consumes its number. Gaps are never filled and old
@@ -305,7 +319,7 @@ The lifecycle CLI is explicit:
 
 ``` text
 tj new [--keep-osc] [-- command ...]
-tj continue <id-or-suffix> [--keep-osc] [-- command ...]
+tj continue [--keep-osc] [--no-replay] <id-or-suffix> [-- command ...]
 tj journals
 ```
 
@@ -382,8 +396,21 @@ A small zsh plugin provides two functions:
 
 ### Command boundaries
 
-The plugin uses `preexec` and `precmd`, optionally augmented by OSC 133
-shell integration, to tell TJ when an interaction starts and finishes.
+The plugin uses `preexec`, `precmd`, and a composable `zle-line-init` hook,
+augmented by OSC 133 shell integration, to tell TJ when an interaction starts
+and finishes. `precmd` emits `OSC 133;A ST` immediately before zsh renders a
+prompt. Once zsh has painted `PROMPT` and `RPROMPT`, `zle-line-init` emits
+`OSC 133;B ST`. TJ retains the intervening terminal bytes as the prompt for
+the next command that actually starts. It does not read or re-evaluate prompt
+variables, so prompt substitutions and external engines such as Starship are
+captured exactly as displayed.
+
+The pending prompt is replaced if zsh draws another prompt before a command
+starts, and an unfinished prompt is discarded at the command boundary. The B
+marker itself is not stored in `prompt`. Prompt capture is bounded at 64 KiB;
+exceeding that limit omits the resource and records a journal warning. The
+`zle-line-init` callback is registered through `add-zle-hook-widget`, preserving
+existing callbacks and avoiding duplicate registration.
 
 Each completed interaction becomes a journal entry:
 
@@ -391,6 +418,7 @@ Each completed interaction becomes a journal entry:
 @42/
 ├── cmd
 ├── out
+├── prompt
 └── rc
 ```
 
@@ -506,7 +534,7 @@ cat ~[@10]/<TAB>
 can offer:
 
 ``` text
-cmd  files/  out  rc
+cmd  files/  out  prompt  rc
 ```
 
 and:
@@ -792,7 +820,7 @@ The v1 protocol has deliberately simple rules:
 -   `end` closes whichever region is open
 -   resource names are relative paths
 -   absolute paths and `..` are rejected
--   `cmd`, `out`, `rc`, `meta.json`, and private removal bookkeeping names are
+-   `cmd`, `out`, `prompt`, `rc`, `meta.json`, and private removal bookkeeping names are
     reserved and rejected as resource names
 -   the bytes between `begin` and `end` are exactly the resource
     contents
@@ -808,8 +836,8 @@ forwarding it to the terminal emulator. An option keeps them in the
 forwarded stream, for debugging or for emulators and multiplexers that
 want to interpret them.
 
-Programs that do not emit OSC 5107 still work normally and simply expose
-the three default resources.
+Programs that do not emit OSC 5107 still work normally and expose the core
+resources produced by their shell integration.
 
 `tj noout -- command args...` is the user-facing wrapper for a whole command.
 It requires an active journal and a controlling terminal, writes the region

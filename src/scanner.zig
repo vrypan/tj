@@ -39,6 +39,8 @@ const osc133_prefix = "133;";
 pub const Event = union(enum) {
     /// `OSC 133;A` - the shell is about to draw a prompt.
     prompt_start,
+    /// `OSC 133;B` - the prompt is drawn and line editing is starting.
+    prompt_end,
     /// `OSC 5107;tj;cmd;<base64>` - the command line as the user typed it.
     command_line: []const u8,
     /// `OSC 5107;tj;expanded;<base64>` - executable shell text after the zsh
@@ -414,6 +416,7 @@ pub const Scanner = struct {
 
         switch (kind[0]) {
             'A' => sink.event(.prompt_start),
+            'B' => sink.event(.prompt_end),
             'C' => sink.event(.command_run),
             'D' => {
                 const code = fields.next();
@@ -519,14 +522,15 @@ test "keep_osc forwards tj sequences but never records them" {
 
 test "OSC 133 boundaries are forwarded and reported" {
     const gpa = std.testing.allocator;
-    const input = "\x1b]133;A\x1b\\\x1b]133;C\x07out\x1b]133;D;7\x1b\\";
+    const input = "\x1b]133;A\x1b\\prompt\x1b]133;B\x1b\\\x1b]133;C\x07out\x1b]133;D;7\x1b\\";
     var r = run(gpa, input, input.len, false);
     defer r.deinit();
     try std.testing.expectEqualStrings(input, r.forwarded.items);
-    try std.testing.expectEqual(@as(usize, 3), r.events.items.len);
+    try std.testing.expectEqual(@as(usize, 4), r.events.items.len);
     try std.testing.expect(r.events.items[0] == .prompt_start);
-    try std.testing.expect(r.events.items[1] == .command_run);
-    try std.testing.expectEqual(@as(?u8, 7), r.events.items[2].command_end);
+    try std.testing.expect(r.events.items[1] == .prompt_end);
+    try std.testing.expect(r.events.items[2] == .command_run);
+    try std.testing.expectEqual(@as(?u8, 7), r.events.items[3].command_end);
 }
 
 test "OSC 133;D without a status reports no status" {

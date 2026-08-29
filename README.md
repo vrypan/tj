@@ -109,11 +109,18 @@ Append a later writer run to an existing journal:
 ```sh
 tj continue 01knxf1n5ffvk9jsm8wve1pgsd
 tj continue pgsd -- zsh -f
+tj continue --no-replay pgsd
 ```
 
 `new` always creates a fresh journal. `continue` requires exactly one existing
 journal: a unique suffix is accepted, but an ambiguous suffix is refused.
 Only one writer can attach to a journal at a time.
+
+By default, `continue` first replays the journal into the terminal, then starts
+the fresh shell or command. This replay is immediate: recorded pauses and
+typing delays are ignored. Use `--no-replay` when the existing transcript is
+already visible or should not be redrawn. Replayed bytes go directly to the
+terminal and are not appended to the journal again.
 
 Continuing is append-only, not process resumption. It starts a fresh shell or
 command with the caller's current directory and environment. It does not
@@ -198,8 +205,8 @@ apart. The most recent match wins, so short suffixes are for interactive
 use; anything that must stay valid should use the full id.
 
 `~[@<TAB>` completes dynamic interaction names and appends `]`.
-`~[@42]/<TAB>` uses ordinary filesystem completion for `cmd`, `out`, `rc`,
-`files/`, and published resources. The shorthand `@42/<TAB>` remains
+`~[@42]/<TAB>` uses ordinary filesystem completion for `cmd`, `out`, `prompt`,
+`rc`, `files/`, and published resources. The shorthand `@42/<TAB>` remains
 available, including beneath assigned names. An unresolved name such as
 `@someone` stays literal, so commands that use `@handles` keep working. Words
 that merely contain an `@`, quoted text, and `user@host` are left alone.
@@ -606,7 +613,7 @@ while either kind is already open is refused; the first region remains open
 until the next generic end marker.
 
 Names are the program's choice, so they are checked: a name cannot escape
-its interaction directory, and cannot be `cmd`, `out`, `rc`, `meta.json` or
+its interaction directory, and cannot be `cmd`, `out`, `prompt`, `rc`, `meta.json` or
 TJ's private removal bookkeeping. Refusals are recorded in the journal log. `files/` is a convention,
 not a rule — `err` is a resource too.
 
@@ -625,7 +632,12 @@ mess of it, exactly as they would without tj.
 ## Replaying a journal
 
 `tj replay` plays a recording back into the terminal — the prompt, the command
-typing itself out, then the output exactly as it was captured, colours and all:
+typing itself out, then the output as it was captured, colours and all. With
+the zsh plugin, each interaction keeps the exact prompt bytes zsh rendered
+before it: prompt substitutions, Starship output, colours, multiple lines, and
+the right prompt are replayed rather than evaluated again. Older journals use
+`$ ` as a fallback. Non-visual background-colour and cursor-position queries
+are omitted so their terminal replies cannot become shell input:
 
 ```sh
 tj replay                     # the most recent journal
@@ -652,7 +664,7 @@ does not make a watchable demo.
 | `--speed X` | divide every delay |
 | `--typing MS` | per character of the command line; `0` shows it at once |
 | `--max-pause MS` | longest single pause, however long the real one was |
-| `--prompt S` | the prompt to draw; tj never records one |
+| `--prompt S` | override every captured prompt; also the fallback for entries without one |
 | `--from N` `--to N` | replay part of a journal |
 | `--duration` | print the seconds it would take, and play nothing; allowed inside a journal writer, since it emits no recording |
 
@@ -678,6 +690,7 @@ The journal is plain files under `~/.tj` (override with `$TJ_HOME` or
 ~/.tj/<journal-ulid>/42/
 ├── cmd        the command line as entered
 ├── out        what you could scroll back to, escape sequences and all
+├── prompt     exact rendered zsh prompt; absent in older journals
 ├── rc         exit status; absent means the command never finished
 └── meta.json
 ```
@@ -753,7 +766,7 @@ terminal, both byte streams are forwarded unchanged, `SIGWINCH` propagates,
 signals sent to `tj` reach the shell, and the terminal is handed back with
 its original settings on every exit path.
 
-Recording works for `cmd`, `out` and `rc`; zsh canonicalizes interactive
+Recording works for `cmd`, `out`, `prompt` and `rc`; zsh canonicalizes interactive
 `@REF` shorthand into the `~[@REF]` dynamic named-directory namespace, then
 resolves and completes it through normal filesystem behavior. Selecting,
 locking, and numbering a journal are strict startup requirements and fail

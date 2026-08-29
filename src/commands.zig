@@ -13,6 +13,7 @@ const plain = @import("plain.zig");
 const annotations = @import("annotations.zig");
 const search = @import("search.zig");
 const noout = @import("noout.zig");
+const replay_engine = @import("replay.zig");
 
 pub const Error = error{
     NotInJournal,
@@ -66,6 +67,7 @@ pub fn run(
                 .journal = .{ .existing = parsed.positionals.items[0] },
                 .argv = child,
                 .keep_osc = command.root.keep_osc or parsed.present("keep-osc"),
+                .replay_before_start = !parsed.present("no-replay"),
                 .home = parsed.last("home") orelse home,
             });
             return result.exit_code;
@@ -1599,60 +1601,8 @@ fn isDirectory(io: Io, path: []const u8) bool {
 
 // --- replaying a journal -----------------------------------------------------
 
-/// How a recording is played back. The recorded timings give the rhythm; the
-/// defaults keep it watchable, since a real journal has gaps where somebody
-/// was reading something for a minute.
-const Replay = struct {
-    /// Divides every delay. 2 means twice as fast.
-    speed: f64 = 1.0,
-    /// Per character of the command line. 0 shows it at once.
-    typing_ms: u64 = 35,
-    /// No single pause runs longer than this, however long the real one was.
-    max_pause_ms: u64 = 2000,
-    prompt: []const u8 = "$ ",
-    from: u32 = 1,
-    to: u32 = std.math.maxInt(u32),
-    /// Report how long the replay would take instead of playing it, so a
-    /// generated vhs tape can wait exactly that long and no longer.
-    duration_only: bool = false,
-
-    /// A recorded gap, capped and scaled into something watchable.
-    fn delay(self: Replay, millis: i64) !u64 {
-        if (millis <= 0) return 0;
-        const capped = @min(@as(u64, @intCast(millis)), self.max_pause_ms);
-        return scaleMillis(capped, self.speed);
-    }
-
-    /// Sleeps unless only the total was asked for. Returns what it cost
-    /// either way, so the two paths cannot drift apart.
-    fn wait(self: Replay, millis: i64) !u64 {
-        const ms = try self.delay(millis);
-        if (!self.duration_only) sys.sleepMs(ms);
-        return ms;
-    }
-};
-
-fn scaleMillis(value: u64, speed: f64) !u64 {
-    if (!std.math.isFinite(speed) or speed <= 0) return error.BadReplayOption;
-    const scaled = @as(f64, @floatFromInt(value)) / speed;
-    // maxInt(u64) rounds to 2^64 as an f64, so equality is already outside
-    // the integer range accepted by @intFromFloat.
-    if (!std.math.isFinite(scaled) or scaled < 0 or scaled >= @as(f64, @floatFromInt(std.math.maxInt(u64)))) {
-        return error.BadReplayOption;
-    }
-    return @intFromFloat(scaled);
-}
-
-fn addDuration(total: *u64, value: u64) !void {
-    total.* = std.math.add(u64, total.*, value) catch return error.BadReplayOption;
-}
-
-fn typingDuration(per_char: u64, command_len: u64) !u64 {
-    return std.math.mul(u64, per_char, command_len) catch return error.BadReplayOption;
-}
-
 const ReplayRequest = struct {
-    replay: Replay,
+    replay: replay_engine.Options,
     wanted: ?[]const u8,
 };
 
@@ -1662,7 +1612,10 @@ fn replayRequest(parsed: *const zecli.Parsed) !ReplayRequest {
     if (parsed.last("max-pause")) |text| request.replay.max_pause_ms = parseReplayMillis(text) catch return error.BadReplayOption;
     if (parsed.last("from")) |text| request.replay.from = parseReplayNumber(text) catch return error.BadReplayOption;
     if (parsed.last("to")) |text| request.replay.to = parseReplayNumber(text) catch return error.BadReplayOption;
-    if (parsed.last("prompt")) |text| request.replay.prompt = text;
+    if (parsed.present("prompt")) {
+        request.replay.prompt = parsed.last("prompt") orelse return error.BadReplayOption;
+        request.replay.use_recorded_prompt = false;
+    }
     if (parsed.last("speed")) |text| request.replay.speed = parseReplaySpeed(text) catch return error.BadReplayOption;
     request.replay.duration_only = parsed.present("duration");
     if (parsed.positionals.items.len == 1) request.wanted = parsed.positionals.items[0];
@@ -1723,87 +1676,7 @@ fn replayJournal(
         break :blk owned.?;
     };
 
-    const numbers = store.listNumbers(gpa, io, root, journal) catch return error.NoSuchJournal;
-    defer gpa.free(numbers);
-
-    var previous_end: ?i64 = null;
-    var total_ms: u64 = 0;
-
-    for (numbers) |number| {
-        if (number < replay.from or number > replay.to) continue;
-
-        const timing = store.readTiming(gpa, io, root, journal, number);
-
-        // The gap since the last command finished is the time somebody spent
-        // reading it and typing the next one.
-        if (previous_end) |ended| {
-            if (timing) |t| try addDuration(&total_ms, try replay.wait(t.started - ended));
-        }
-
-        if (!replay.duration_only) try out.writeAll(replay.prompt);
-        try addDuration(&total_ms, try typeOut(io, root, journal, number, replay, out));
-
-        // Then the command runs, which took as long as it took.
-        if (timing) |t| try addDuration(&total_ms, try replay.wait(t.duration()));
-
-        if (!replay.duration_only) {
-            try writeResource(io, root, journal, number, "out", out);
-            try out.flush();
-        }
-
-        previous_end = if (timing) |t| t.ended else null;
-    }
-
-    // Rounded up, so a tape that waits this long never cuts the end off.
-    if (replay.duration_only) try out.print("{d}\n", .{(try std.math.add(u64, total_ms, 999)) / 1000});
-}
-
-/// Types the command line out a character at a time, the way it was typed.
-fn typeOut(
-    io: Io,
-    root: store.Dir,
-    journal: []const u8,
-    number: u32,
-    replay: Replay,
-    out: *Io.Writer,
-) !u64 {
-    var path_buf: [64]u8 = undefined;
-    const sub = try std.fmt.bufPrint(&path_buf, "{s}/{d}/cmd", .{ journal, number });
-    const per_char: u64 = if (replay.typing_ms == 0) 0 else try scaleMillis(replay.typing_ms, replay.speed);
-    var file = root.openFile(io, sub, .{}) catch |err| switch (err) {
-        error.FileNotFound => {
-            if (!replay.duration_only) {
-                try out.writeAll("\r\n");
-                try out.flush();
-            }
-            return 0;
-        },
-        else => |other| return other,
-    };
-    defer file.close(io);
-
-    const total = try typingDuration(per_char, (try file.stat(io)).size);
-    if (replay.duration_only) return total;
-
-    if (per_char == 0) {
-        try copyFile(io, file, out);
-    } else {
-        var reader_buffer: [read_chunk_size]u8 = undefined;
-        var bytes: [read_chunk_size]u8 = undefined;
-        var reader = file.readerStreaming(io, &reader_buffer);
-        while (true) {
-            const n = try reader.interface.readSliceShort(&bytes);
-            if (n == 0) break;
-            for (bytes[0..n]) |char| {
-                try out.writeAll(&[_]u8{char});
-                try out.flush();
-                sys.sleepMs(per_char);
-            }
-        }
-    }
-    try out.writeAll("\r\n");
-    try out.flush();
-    return total;
+    try replay_engine.play(gpa, io, root, journal, replay, out);
 }
 
 fn parseReplayNumber(text: []const u8) !u32 {
@@ -1855,49 +1728,4 @@ test "replay millisecond options use their final u64 type" {
 
 test "replay rejects more than one journal name" {
     try std.testing.expectError(error.ReportedCliError, replayRequestFromArgs(&.{ "first", "second" }));
-}
-
-test "replay timing arithmetic rejects unrepresentable durations" {
-    try std.testing.expectError(error.BadReplayOption, scaleMillis(std.math.maxInt(u64), 1));
-    try std.testing.expectError(error.BadReplayOption, scaleMillis(1, 0));
-    try std.testing.expectError(error.BadReplayOption, typingDuration(std.math.maxInt(u64), 2));
-
-    var total: u64 = std.math.maxInt(u64);
-    try std.testing.expectError(error.BadReplayOption, addDuration(&total, 1));
-}
-
-/// Writes a recorded resource through verbatim. `out` is what the terminal
-/// saw, so replaying it raw is what makes the colours come back.
-fn writeResource(
-    io: Io,
-    root: store.Dir,
-    journal: []const u8,
-    number: u32,
-    name: []const u8,
-    out: *Io.Writer,
-) !void {
-    var path_buf: [64]u8 = undefined;
-    const sub = try std.fmt.bufPrint(&path_buf, "{s}/{d}/{s}", .{ journal, number, name });
-    var file = root.openFile(io, sub, .{}) catch |err| switch (err) {
-        error.FileNotFound => return,
-        else => |other| return other,
-    };
-    defer file.close(io);
-    try copyFile(io, file, out);
-}
-
-test "a recorded gap is capped so a demo stays watchable" {
-    const replay: Replay = .{ .max_pause_ms = 2000, .speed = 1.0 };
-    try std.testing.expectEqual(@as(u64, 0), try replay.delay(0));
-    try std.testing.expectEqual(@as(u64, 0), try replay.delay(-5));
-    try std.testing.expectEqual(@as(u64, 500), try replay.delay(500));
-    // A minute of somebody reading the screen becomes two seconds.
-    try std.testing.expectEqual(@as(u64, 2000), try replay.delay(60_000));
-}
-
-test "speed divides every delay" {
-    const fast: Replay = .{ .max_pause_ms = 4000, .speed = 4.0 };
-    try std.testing.expectEqual(@as(u64, 250), try fast.delay(1000));
-    const slow: Replay = .{ .max_pause_ms = 4000, .speed = 0.5 };
-    try std.testing.expectEqual(@as(u64, 2000), try slow.delay(1000));
 }

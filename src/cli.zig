@@ -51,6 +51,7 @@ pub const Proxy = struct {
     journal: JournalSelection,
     argv: []const []const u8 = &.{},
     keep_osc: bool = false,
+    replay_before_start: bool = false,
     home: ?[]const u8 = null,
 };
 
@@ -286,10 +287,11 @@ test "new and continue split child argv without parsing it" {
     try std.testing.expectEqualStrings("--home=/tmp/j", separated_parts.owned[0]);
     try std.testing.expectEqualStrings("--nope", separated_parts.child[0]);
 
-    const continued = (try parse(std.testing.allocator, &.{ "continue", "abcd", "--keep-osc", "zsh", "-f" })).command;
+    const continued = (try parse(std.testing.allocator, &.{ "continue", "abcd", "--keep-osc", "--no-replay", "zsh", "-f" })).command;
     const continued_parts = try splitCommandArgs(continued);
-    try std.testing.expectEqual(@as(usize, 2), continued_parts.owned.len);
+    try std.testing.expectEqual(@as(usize, 3), continued_parts.owned.len);
     try std.testing.expectEqualStrings("abcd", continued_parts.owned[0]);
+    try std.testing.expectEqualStrings("--no-replay", continued_parts.owned[2]);
     try std.testing.expectEqualStrings("zsh", continued_parts.child[0]);
 }
 
