@@ -35,6 +35,69 @@ pub const Error = error{
     AnnotationDatabaseFailure,
 };
 
+/// SQLite handles that speak this module's error set.
+///
+/// The mapping from `sqlite.Error` used to be spelled at every call site -
+/// seventy-five `catch |err| return mapSqlite(err)` clauses - which buried the
+/// queries in error plumbing. It belongs at one boundary, so these wrappers
+/// own it and expose the same narrow operations `sqlite.zig` does. There is
+/// deliberately no general SQL escape hatch here.
+const Db = struct {
+    inner: sqlite.Database,
+
+    fn close(self: *Db) void {
+        self.inner.close();
+    }
+
+    fn exec(self: *Db, sql: [*:0]const u8) Error!void {
+        self.inner.exec(sql) catch |err| return mapSqlite(err);
+    }
+
+    fn prepare(self: *Db, sql: [*:0]const u8) Error!Stmt {
+        return .{ .inner = self.inner.prepare(sql) catch |err| return mapSqlite(err) };
+    }
+
+    fn busyTimeout(self: *Db, milliseconds: c_int) Error!void {
+        self.inner.busyTimeout(milliseconds) catch |err| return mapSqlite(err);
+    }
+
+    fn extendedCode(self: *Db) c_int {
+        return self.inner.extendedCode();
+    }
+};
+
+const Stmt = struct {
+    inner: sqlite.Statement,
+
+    fn finalize(self: *Stmt) void {
+        self.inner.finalize();
+    }
+
+    fn reset(self: *Stmt) Error!void {
+        self.inner.reset() catch |err| return mapSqlite(err);
+    }
+
+    fn bindInt(self: *Stmt, index: c_int, value: i64) Error!void {
+        self.inner.bindInt(index, value) catch |err| return mapSqlite(err);
+    }
+
+    fn bindText(self: *Stmt, index: c_int, value: []const u8) Error!void {
+        self.inner.bindText(index, value) catch |err| return mapSqlite(err);
+    }
+
+    fn step(self: *Stmt) Error!sqlite.Step {
+        return self.inner.step() catch |err| mapSqlite(err);
+    }
+
+    fn columnInt(self: *const Stmt, column: c_int) i64 {
+        return self.inner.columnInt(column);
+    }
+
+    fn columnText(self: *const Stmt, column: c_int) Error![]const u8 {
+        return self.inner.columnText(column) catch |err| mapSqlite(err);
+    }
+};
+
 pub const Entry = struct {
     number: u32,
     name: ?[]u8 = null,
@@ -119,7 +182,7 @@ pub fn loadSet(gpa: std.mem.Allocator, connection: *Connection) !Set {
 }
 
 pub const Connection = struct {
-    database: ?sqlite.Database,
+    database: ?Db,
     path: [:0]u8,
 
     pub fn deinit(self: *Connection, gpa: std.mem.Allocator) void {
@@ -130,7 +193,7 @@ pub const Connection = struct {
 
     pub fn begin(self: *Connection) !Transaction {
         const database = if (self.database) |*database_value| database_value else return error.AnnotationDatabaseFailure;
-        return .{ .inner = sqlite.Transaction.beginImmediate(database) catch |err| return mapSqlite(err) };
+        return .{ .inner = sqlite.Transaction.beginImmediate(&database.inner) catch |err| return mapSqlite(err) };
     }
 
     pub fn get(self: *Connection, gpa: std.mem.Allocator, number: u32) !?Entry {
@@ -138,25 +201,25 @@ pub const Connection = struct {
         errdefer result.deinit(gpa);
         const database = if (self.database) |*value| value else return null;
 
-        var name = database.prepare("SELECT name FROM names WHERE entry=?") catch |err| return mapSqlite(err);
+        var name = try database.prepare("SELECT name FROM names WHERE entry=?");
         defer name.finalize();
-        name.bindInt(1, number) catch |err| return mapSqlite(err);
-        if ((name.step() catch |err| return mapSqlite(err)) == .row) {
-            const text = name.columnText(0) catch |err| return mapSqlite(err);
+        try name.bindInt(1, number);
+        if ((try name.step()) == .row) {
+            const text = try name.columnText(0);
             if (!validName(text)) return error.InvalidAnnotationDatabase;
             result.name = try gpa.dupe(u8, text);
         }
 
-        var pin = database.prepare("SELECT 1 FROM pins WHERE entry=?") catch |err| return mapSqlite(err);
+        var pin = try database.prepare("SELECT 1 FROM pins WHERE entry=?");
         defer pin.finalize();
-        pin.bindInt(1, number) catch |err| return mapSqlite(err);
-        result.pinned = (pin.step() catch |err| return mapSqlite(err)) == .row;
+        try pin.bindInt(1, number);
+        result.pinned = (try pin.step()) == .row;
 
-        var tag_statement = database.prepare("SELECT tag FROM tags WHERE entry=? ORDER BY tag") catch |err| return mapSqlite(err);
+        var tag_statement = try database.prepare("SELECT tag FROM tags WHERE entry=? ORDER BY tag");
         defer tag_statement.finalize();
-        tag_statement.bindInt(1, number) catch |err| return mapSqlite(err);
-        while ((tag_statement.step() catch |err| return mapSqlite(err)) == .row) {
-            const text = tag_statement.columnText(0) catch |err| return mapSqlite(err);
+        try tag_statement.bindInt(1, number);
+        while ((try tag_statement.step()) == .row) {
+            const text = try tag_statement.columnText(0);
             if (!validStoredTag(text)) return error.InvalidAnnotationDatabase;
             const owned = try gpa.dupe(u8, text);
             errdefer gpa.free(owned);
@@ -173,51 +236,52 @@ pub const Connection = struct {
     pub fn numberForName(self: *Connection, name: []const u8) !?u32 {
         if (!validName(name)) return null;
         const database = if (self.database) |*value| value else return null;
-        var statement = database.prepare("SELECT entry FROM names WHERE name=?") catch |err| return mapSqlite(err);
+        var statement = try database.prepare("SELECT entry FROM names WHERE name=?");
         defer statement.finalize();
-        statement.bindText(1, name) catch |err| return mapSqlite(err);
-        if ((statement.step() catch |err| return mapSqlite(err)) == .done) return null;
+        try statement.bindText(1, name);
+        if ((try statement.step()) == .done) return null;
         return try checkedNumber(statement.columnInt(0));
     }
 
     pub fn hasAllTags(self: *Connection, number: u32, wanted: []const []const u8) !bool {
         if (wanted.len == 0) return true;
         const database = if (self.database) |*value| value else return false;
-        var statement = database.prepare("SELECT 1 FROM tags WHERE entry=? AND tag=?") catch |err| return mapSqlite(err);
+        var statement = try database.prepare("SELECT 1 FROM tags WHERE entry=? AND tag=?");
         defer statement.finalize();
         for (wanted) |tag| {
-            statement.reset() catch |err| return mapSqlite(err);
-            statement.bindInt(1, number) catch |err| return mapSqlite(err);
-            statement.bindText(2, tag) catch |err| return mapSqlite(err);
-            if ((statement.step() catch |err| return mapSqlite(err)) == .done) return false;
+            try statement.reset();
+            try statement.bindInt(1, number);
+            try statement.bindText(2, tag);
+            if ((try statement.step()) == .done) return false;
         }
         return true;
     }
 
     pub fn isPinned(self: *Connection, number: u32) !bool {
         const database = if (self.database) |*value| value else return false;
-        var statement = database.prepare("SELECT 1 FROM pins WHERE entry=?") catch |err| return mapSqlite(err);
+        var statement = try database.prepare("SELECT 1 FROM pins WHERE entry=?");
         defer statement.finalize();
-        statement.bindInt(1, number) catch |err| return mapSqlite(err);
-        return (statement.step() catch |err| return mapSqlite(err)) == .row;
+        try statement.bindInt(1, number);
+        return (try statement.step()) == .row;
     }
 
     pub fn setName(self: *Connection, number: u32, name: []const u8) !void {
         if (!validName(name)) return error.InvalidName;
         const database = if (self.database) |*value| value else return error.AnnotationDatabaseFailure;
-        var statement = database.prepare(
+        var statement = try database.prepare(
             "INSERT INTO names(entry,name) VALUES(?,?) " ++
                 "ON CONFLICT(entry) DO UPDATE SET name=excluded.name",
-        ) catch |err| return mapSqlite(err);
+        );
         defer statement.finalize();
-        statement.bindInt(1, number) catch |err| return mapSqlite(err);
-        statement.bindText(2, name) catch |err| return mapSqlite(err);
+        try statement.bindInt(1, number);
+        try statement.bindText(2, name);
         _ = statement.step() catch |err| switch (err) {
-            error.Constraint => {
+            // A name already taken is the one constraint a caller can act on.
+            error.AnnotationConstraint => {
                 if (database.extendedCode() == sqlite.c.SQLITE_CONSTRAINT_UNIQUE) return error.NameTaken;
-                return error.AnnotationConstraint;
+                return err;
             },
-            else => return mapSqlite(err),
+            else => return err,
         };
     }
 
@@ -228,66 +292,66 @@ pub const Connection = struct {
 
     pub fn addTag(self: *Connection, number: u32, tag: []const u8) !void {
         const database = if (self.database) |*value| value else return error.AnnotationDatabaseFailure;
-        var statement = database.prepare("INSERT OR IGNORE INTO tags(entry,tag) VALUES(?,?)") catch |err| return mapSqlite(err);
+        var statement = try database.prepare("INSERT OR IGNORE INTO tags(entry,tag) VALUES(?,?)");
         defer statement.finalize();
-        statement.bindInt(1, number) catch |err| return mapSqlite(err);
-        statement.bindText(2, tag) catch |err| return mapSqlite(err);
-        _ = statement.step() catch |err| return mapSqlite(err);
+        try statement.bindInt(1, number);
+        try statement.bindText(2, tag);
+        _ = try statement.step();
     }
 
     pub fn removeTag(self: *Connection, number: u32, tag: []const u8) !void {
         const database = if (self.database) |*value| value else return error.AnnotationDatabaseFailure;
-        var statement = database.prepare("DELETE FROM tags WHERE entry=? AND tag=?") catch |err| return mapSqlite(err);
+        var statement = try database.prepare("DELETE FROM tags WHERE entry=? AND tag=?");
         defer statement.finalize();
-        statement.bindInt(1, number) catch |err| return mapSqlite(err);
-        statement.bindText(2, tag) catch |err| return mapSqlite(err);
-        _ = statement.step() catch |err| return mapSqlite(err);
+        try statement.bindInt(1, number);
+        try statement.bindText(2, tag);
+        _ = try statement.step();
     }
 
     pub fn setPinned(self: *Connection, number: u32, pinned: bool) !void {
         const database = if (self.database) |*value| value else return error.AnnotationDatabaseFailure;
-        var statement = database.prepare(if (pinned)
+        var statement = try database.prepare(if (pinned)
             "INSERT OR IGNORE INTO pins(entry) VALUES(?)"
         else
-            "DELETE FROM pins WHERE entry=?") catch |err| return mapSqlite(err);
+            "DELETE FROM pins WHERE entry=?");
         defer statement.finalize();
-        statement.bindInt(1, number) catch |err| return mapSqlite(err);
-        _ = statement.step() catch |err| return mapSqlite(err);
+        try statement.bindInt(1, number);
+        _ = try statement.step();
     }
 
     pub fn removeEntry(self: *Connection, number: u32) !void {
         const database = if (self.database) |*value| value else return;
-        var statement = database.prepare(
+        var statement = try database.prepare(
             "DELETE FROM names WHERE entry=?;",
-        ) catch |err| return mapSqlite(err);
+        );
         defer statement.finalize();
-        statement.bindInt(1, number) catch |err| return mapSqlite(err);
-        _ = statement.step() catch |err| return mapSqlite(err);
+        try statement.bindInt(1, number);
+        _ = try statement.step();
         try deleteNumber(database, "DELETE FROM pins WHERE entry=?", number);
         try deleteNumber(database, "DELETE FROM tags WHERE entry=?", number);
     }
 
     pub fn names(self: *Connection) !NameIterator {
         const database = if (self.database) |*value| value else return .{};
-        return .{ .statement = database.prepare("SELECT entry,name FROM names ORDER BY entry") catch |err| return mapSqlite(err) };
+        return .{ .statement = try database.prepare("SELECT entry,name FROM names ORDER BY entry") };
     }
 
     pub fn tags(self: *Connection) !TagIterator {
         const database = if (self.database) |*value| value else return .{};
-        return .{ .statement = database.prepare("SELECT entry,tag FROM tags ORDER BY entry,tag") catch |err| return mapSqlite(err) };
+        return .{ .statement = try database.prepare("SELECT entry,tag FROM tags ORDER BY entry,tag") };
     }
 
     pub fn pins(self: *Connection) !PinIterator {
         const database = if (self.database) |*value| value else return .{};
-        return .{ .statement = database.prepare("SELECT entry FROM pins ORDER BY entry") catch |err| return mapSqlite(err) };
+        return .{ .statement = try database.prepare("SELECT entry FROM pins ORDER BY entry") };
     }
 
     fn executeText(self: *Connection, sql_text: [*:0]const u8, value: []const u8) !void {
         const database = if (self.database) |*database_value| database_value else return error.AnnotationDatabaseFailure;
-        var statement = database.prepare(sql_text) catch |err| return mapSqlite(err);
+        var statement = try database.prepare(sql_text);
         defer statement.finalize();
-        statement.bindText(1, value) catch |err| return mapSqlite(err);
-        _ = statement.step() catch |err| return mapSqlite(err);
+        try statement.bindText(1, value);
+        _ = try statement.step();
     }
 };
 
@@ -295,7 +359,7 @@ pub const Transaction = struct {
     inner: sqlite.Transaction,
 
     pub fn commit(self: *Transaction) !void {
-        self.inner.commit() catch |err| return mapSqlite(err);
+        try self.inner.commit();
     }
 
     pub fn deinit(self: *Transaction) void {
@@ -306,40 +370,39 @@ pub const Transaction = struct {
 pub const NameRow = struct { number: u32, name: []const u8 };
 pub const TagRow = struct { number: u32, tag: []const u8 };
 
-pub const NameIterator = struct {
-    statement: ?sqlite.Statement = null,
+/// Streams `(entry, text)` rows, validating the text on the way out. The three
+/// annotation tables differ only in what a valid value looks like, so they
+/// share one iterator parameterized by that check.
+///
+/// A null statement is the absent-database case and simply yields nothing.
+fn TextIterator(comptime Row: type, comptime field: []const u8, comptime valid: fn ([]const u8) bool) type {
+    return struct {
+        const Self = @This();
 
-    pub fn deinit(self: *NameIterator) void {
-        if (self.statement) |*statement| statement.finalize();
-    }
+        statement: ?Stmt = null,
 
-    pub fn next(self: *NameIterator) !?NameRow {
-        const statement = if (self.statement) |*value| value else return null;
-        if ((statement.step() catch |err| return mapSqlite(err)) == .done) return null;
-        const name = statement.columnText(1) catch |err| return mapSqlite(err);
-        if (!validName(name)) return error.InvalidAnnotationDatabase;
-        return .{ .number = try checkedNumber(statement.columnInt(0)), .name = name };
-    }
-};
+        pub fn deinit(self: *Self) void {
+            if (self.statement) |*statement| statement.finalize();
+        }
 
-pub const TagIterator = struct {
-    statement: ?sqlite.Statement = null,
+        pub fn next(self: *Self) !?Row {
+            const statement = if (self.statement) |*value| value else return null;
+            if ((try statement.step()) == .done) return null;
+            const text = try statement.columnText(1);
+            if (!valid(text)) return error.InvalidAnnotationDatabase;
+            var row: Row = undefined;
+            row.number = try checkedNumber(statement.columnInt(0));
+            @field(row, field) = text;
+            return row;
+        }
+    };
+}
 
-    pub fn deinit(self: *TagIterator) void {
-        if (self.statement) |*statement| statement.finalize();
-    }
-
-    pub fn next(self: *TagIterator) !?TagRow {
-        const statement = if (self.statement) |*value| value else return null;
-        if ((statement.step() catch |err| return mapSqlite(err)) == .done) return null;
-        const tag = statement.columnText(1) catch |err| return mapSqlite(err);
-        if (!validStoredTag(tag)) return error.InvalidAnnotationDatabase;
-        return .{ .number = try checkedNumber(statement.columnInt(0)), .tag = tag };
-    }
-};
+pub const NameIterator = TextIterator(NameRow, "name", validName);
+pub const TagIterator = TextIterator(TagRow, "tag", validStoredTag);
 
 pub const PinIterator = struct {
-    statement: ?sqlite.Statement = null,
+    statement: ?Stmt = null,
 
     pub fn deinit(self: *PinIterator) void {
         if (self.statement) |*statement| statement.finalize();
@@ -347,7 +410,7 @@ pub const PinIterator = struct {
 
     pub fn next(self: *PinIterator) !?u32 {
         const statement = if (self.statement) |*value| value else return null;
-        if ((statement.step() catch |err| return mapSqlite(err)) == .done) return null;
+        if ((try statement.step()) == .done) return null;
         return try checkedNumber(statement.columnInt(0));
     }
 };
@@ -363,7 +426,7 @@ pub fn openRead(gpa: std.mem.Allocator, io: Io, root: Dir, journal: []const u8) 
         else => return err,
     };
     if (stat.kind != .file) return error.InvalidAnnotationDatabase;
-    var database = sqlite.Database.open(path.ptr, sqlite.c.SQLITE_OPEN_READONLY) catch |err| return mapSqlite(err);
+    var database: Db = .{ .inner = sqlite.Database.open(path.ptr, sqlite.c.SQLITE_OPEN_READONLY) catch |err| return mapSqlite(err) };
     errdefer database.close();
     try configure(&database, false);
     if (try isUninitialized(&database)) {
@@ -403,78 +466,78 @@ pub fn openWrite(gpa: std.mem.Allocator, io: Io, root: Dir, journal: []const u8)
 
     const path = try databasePath(gpa, io, root, journal);
     errdefer gpa.free(path);
-    var database = sqlite.Database.open(
+    var database: Db = .{ .inner = sqlite.Database.open(
         path.ptr,
         sqlite.c.SQLITE_OPEN_READWRITE,
-    ) catch |err| return mapSqlite(err);
+    ) catch |err| return mapSqlite(err) };
     errdefer database.close();
     try configure(&database, true);
     if (new_file or try isUninitialized(&database)) try initializeSchema(&database) else try verifySchema(&database);
     return .{ .database = database, .path = path };
 }
 
-fn configure(database: *sqlite.Database, writable: bool) !void {
-    database.busyTimeout(5000) catch |err| return mapSqlite(err);
-    database.exec("PRAGMA cache_size=-512") catch |err| return mapSqlite(err);
-    database.exec("PRAGMA mmap_size=0") catch |err| return mapSqlite(err);
-    database.exec("PRAGMA trusted_schema=OFF") catch |err| return mapSqlite(err);
+fn configure(database: *Db, writable: bool) !void {
+    try database.busyTimeout(5000);
+    try database.exec("PRAGMA cache_size=-512");
+    try database.exec("PRAGMA mmap_size=0");
+    try database.exec("PRAGMA trusted_schema=OFF");
     if (!writable) return;
-    var journal_mode = database.prepare("PRAGMA journal_mode=WAL") catch |err| return mapSqlite(err);
+    var journal_mode = try database.prepare("PRAGMA journal_mode=WAL");
     defer journal_mode.finalize();
-    if ((journal_mode.step() catch |err| return mapSqlite(err)) != .row) return error.InvalidAnnotationDatabase;
-    const mode = journal_mode.columnText(0) catch |err| return mapSqlite(err);
+    if ((try journal_mode.step()) != .row) return error.InvalidAnnotationDatabase;
+    const mode = try journal_mode.columnText(0);
     if (!std.mem.eql(u8, mode, "wal")) return error.InvalidAnnotationDatabase;
-    database.exec("PRAGMA synchronous=FULL") catch |err| return mapSqlite(err);
+    try database.exec("PRAGMA synchronous=FULL");
 }
 
-fn initializeSchema(database: *sqlite.Database) !void {
-    var transaction = sqlite.Transaction.beginImmediate(database) catch |err| return mapSqlite(err);
+fn initializeSchema(database: *Db) !void {
+    var transaction = sqlite.Transaction.beginImmediate(&database.inner) catch |err| return mapSqlite(err);
     defer transaction.deinit();
-    database.exec(
+    try database.exec(
         names_schema ++ ";" ++ pins_schema ++ ";" ++ tags_schema ++ ";" ++ tags_index_schema ++ ";" ++
             "PRAGMA application_id=0x544A4442;" ++
             "PRAGMA user_version=1;",
-    ) catch |err| return mapSqlite(err);
-    transaction.commit() catch |err| return mapSqlite(err);
+    );
+    try transaction.commit();
     try verifySchema(database);
 }
 
-fn verifySchema(database: *sqlite.Database) !void {
+fn verifySchema(database: *Db) !void {
     if (try pragmaInt(database, "PRAGMA application_id") != application_id or
         try pragmaInt(database, "PRAGMA user_version") != schema_version) return error.InvalidAnnotationDatabase;
     if (try schemaObjectCount(database) != 4) return error.InvalidAnnotationDatabase;
-    var statement = database.prepare(
+    var statement = try database.prepare(
         "SELECT count(*) FROM sqlite_schema WHERE " ++
             "(type='table' AND name='names' AND sql='" ++ names_schema ++ "') OR " ++
             "(type='table' AND name='pins' AND sql='" ++ pins_schema ++ "') OR " ++
             "(type='table' AND name='tags' AND sql='" ++ tags_schema ++ "') OR " ++
             "(type='index' AND name='tags_by_tag' AND sql='" ++ tags_index_schema ++ "')",
-    ) catch |err| return mapSqlite(err);
+    );
     defer statement.finalize();
-    if ((statement.step() catch |err| return mapSqlite(err)) != .row or statement.columnInt(0) != 4) {
+    if ((try statement.step()) != .row or statement.columnInt(0) != 4) {
         return error.InvalidAnnotationDatabase;
     }
 }
 
-fn isUninitialized(database: *sqlite.Database) !bool {
+fn isUninitialized(database: *Db) !bool {
     return try pragmaInt(database, "PRAGMA application_id") == 0 and
         try pragmaInt(database, "PRAGMA user_version") == 0 and
         try schemaObjectCount(database) == 0;
 }
 
-fn schemaObjectCount(database: *sqlite.Database) !i64 {
-    var statement = database.prepare(
+fn schemaObjectCount(database: *Db) !i64 {
+    var statement = try database.prepare(
         "SELECT count(*) FROM sqlite_schema WHERE name NOT LIKE 'sqlite_%'",
-    ) catch |err| return mapSqlite(err);
+    );
     defer statement.finalize();
-    if ((statement.step() catch |err| return mapSqlite(err)) != .row) return error.InvalidAnnotationDatabase;
+    if ((try statement.step()) != .row) return error.InvalidAnnotationDatabase;
     return statement.columnInt(0);
 }
 
-fn pragmaInt(database: *sqlite.Database, sql_text: [*:0]const u8) !i64 {
-    var statement = database.prepare(sql_text) catch |err| return mapSqlite(err);
+fn pragmaInt(database: *Db, sql_text: [*:0]const u8) !i64 {
+    var statement = try database.prepare(sql_text);
     defer statement.finalize();
-    if ((statement.step() catch |err| return mapSqlite(err)) != .row) return error.InvalidAnnotationDatabase;
+    if ((try statement.step()) != .row) return error.InvalidAnnotationDatabase;
     return statement.columnInt(0);
 }
 
@@ -531,11 +594,11 @@ pub fn recoverStagedRemovals(
     try transaction.commit();
 }
 
-fn deleteNumber(database: *sqlite.Database, sql_text: [*:0]const u8, number: u32) !void {
-    var statement = database.prepare(sql_text) catch |err| return mapSqlite(err);
+fn deleteNumber(database: *Db, sql_text: [*:0]const u8, number: u32) !void {
+    var statement = try database.prepare(sql_text);
     defer statement.finalize();
-    statement.bindInt(1, number) catch |err| return mapSqlite(err);
-    _ = statement.step() catch |err| return mapSqlite(err);
+    try statement.bindInt(1, number);
+    _ = try statement.step();
 }
 
 fn checkedNumber(value: i64) !u32 {
@@ -671,7 +734,7 @@ test "annotation database policy and schema fail closed" {
             try std.testing.expectEqual(@as(u16, 0o600), @as(u16, @intCast(@intFromEnum(sidecar.permissions) & 0o777)));
         }
     }
-    database.exec("PRAGMA user_version=2") catch |err| return mapSqlite(err);
+    try database.exec("PRAGMA user_version=2");
     connection.deinit(gpa);
     try std.testing.expectError(error.InvalidAnnotationDatabase, openRead(gpa, io, root, "journal"));
 }
