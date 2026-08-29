@@ -1,4 +1,5 @@
 const std = @import("std");
+const builtin = @import("builtin");
 const Io = std.Io;
 const zecli = @import("zecli");
 
@@ -16,8 +17,27 @@ fn onPanic(msg: []const u8, first_trace_addr: ?usize) noreturn {
     std.debug.defaultPanic(msg, first_trace_addr);
 }
 
+/// Leak detection for the command allocator, active only in debug builds so
+/// the test suite fails on a leak that a release build would never notice.
+var debug_allocator: std.heap.DebugAllocator(.{}) = .init;
+
+const leak_checked = builtin.mode == .Debug;
+
+/// Commands run on a real allocator, not on `init.arena`. Listing a journal
+/// frees each entry's scratch as it goes, and an arena cannot honor that:
+/// its `free` is a no-op, so peak memory would grow with the entry count.
+/// The arena still owns argv and parsed CLI state, which live for the whole
+/// process by design.
+fn commandAllocator() std.mem.Allocator {
+    return if (leak_checked) debug_allocator.allocator() else std.heap.smp_allocator;
+}
+
 pub fn main(init: std.process.Init) !u8 {
     const arena = init.arena.allocator();
+    const gpa = commandAllocator();
+    defer if (leak_checked) {
+        if (debug_allocator.deinit() == .leak) @panic("tj leaked memory in a command path");
+    };
     const args = try init.minimal.args.toSlice(arena);
 
     var stdout_buf: [4096]u8 = undefined;
@@ -82,7 +102,7 @@ pub fn main(init: std.process.Init) !u8 {
             };
             defer parsed.deinit(arena);
 
-            const status = commands.run(arena, init.io, command, parts.child, &parsed, stdout) catch |err| {
+            const status = commands.run(gpa, init.io, command, parts.child, &parsed, stdout) catch |err| {
                 if (isBrokenPipe(&stdout_file, err)) return 0;
                 stdout.flush() catch {};
                 try stderr.writeAll(commandErrorMessage(command.which, err));

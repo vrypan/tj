@@ -23,6 +23,7 @@ pub fn run(gpa: std.mem.Allocator, argv_words: []const []const u8) !Result {
     defer sys.close(tty_fd);
 
     const argv = try buildArgv(gpa, argv_words);
+    defer freeArgv(gpa, argv);
     try sys.writeAll(tty_fd, begin_marker);
 
     const pid = c.fork();
@@ -41,8 +42,23 @@ pub fn run(gpa: std.mem.Allocator, argv_words: []const []const u8) !Result {
 
 fn buildArgv(gpa: std.mem.Allocator, words: []const []const u8) ![:null]const ?[*:0]const u8 {
     const argv = try gpa.allocSentinel(?[*:0]const u8, words.len, null);
-    for (words, 0..) |word, i| argv[i] = try gpa.dupeZ(u8, word);
+    var duplicated: usize = 0;
+    errdefer {
+        for (argv[0..duplicated]) |word| gpa.free(std.mem.span(word.?));
+        gpa.free(argv);
+    }
+    for (words, 0..) |word, i| {
+        argv[i] = try gpa.dupeZ(u8, word);
+        duplicated += 1;
+    }
     return argv;
+}
+
+/// Safe to call once the child has been forked: the child received its own
+/// copy of this memory, so releasing the parent's has no effect on the exec.
+fn freeArgv(gpa: std.mem.Allocator, argv: [:null]const ?[*:0]const u8) void {
+    for (argv) |word| gpa.free(std.mem.span(word.?));
+    gpa.free(argv);
 }
 
 fn childExec(tty_fd: sys.Fd, argv: [:null]const ?[*:0]const u8) noreturn {

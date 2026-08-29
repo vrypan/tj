@@ -61,6 +61,7 @@ pub const Result = struct { exit_code: u8 };
 
 pub fn run(gpa: std.mem.Allocator, io: std.Io, opts: cli.Proxy) !Result {
     const argv = try buildArgv(gpa, opts.argv);
+    defer freeArgv(gpa, argv);
 
     // Panes and multiplexers make nesting legitimate. A new writer shadows
     // the outer journal environment; continuing it fails on the lock.
@@ -164,8 +165,23 @@ fn buildArgv(gpa: std.mem.Allocator, requested: []const []const u8) ![:null]cons
     }
 
     const argv = try gpa.allocSentinel(?[*:0]const u8, words.items.len, null);
-    for (words.items, 0..) |word, i| argv[i] = try gpa.dupeZ(u8, word);
+    var duplicated: usize = 0;
+    errdefer {
+        for (argv[0..duplicated]) |word| gpa.free(std.mem.span(word.?));
+        gpa.free(argv);
+    }
+    for (words.items, 0..) |word, i| {
+        argv[i] = try gpa.dupeZ(u8, word);
+        duplicated += 1;
+    }
     return argv;
+}
+
+/// Safe to call once the child has been forked: the child received its own
+/// copy of this memory, so releasing the parent's has no effect on the exec.
+fn freeArgv(gpa: std.mem.Allocator, argv: [:null]const ?[*:0]const u8) void {
+    for (argv) |word| gpa.free(std.mem.span(word.?));
+    gpa.free(argv);
 }
 
 /// Everything here runs between fork and exec, so it stays within the set of
