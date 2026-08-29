@@ -27,21 +27,11 @@ PREFIX ?= $(HOME)/.local
 build:
 	$(ZIG) build
 
-# Install the companion tools with the binary so documented workflows do not
-# depend on reaching back into a source checkout.
-install: build
-	install -d $(PREFIX)/bin
-	install -d $(PREFIX)/share/bash-completion/completions
-	install -d $(PREFIX)/share/zsh/site-functions
-	install -d $(PREFIX)/share/fish/vendor_completions.d
-	install -m 755 zig-out/bin/tj $(PREFIX)/bin/
-	install -m 755 contrib/tj-fence $(PREFIX)/bin/
-	install -m 755 contrib/tj-grep $(PREFIX)/bin/
-	install -m 755 contrib/tj-tape $(PREFIX)/bin/
-	install -m 644 zig-out/share/bash-completion/completions/tj $(PREFIX)/share/bash-completion/completions/
-	install -m 644 zig-out/share/zsh/site-functions/_tj $(PREFIX)/share/zsh/site-functions/
-	install -m 644 zig-out/share/fish/vendor_completions.d/tj.fish $(PREFIX)/share/fish/vendor_completions.d/
-	@echo "installed tj, companion tools, and shell completions under $(PREFIX)"
+# Use the same install graph as cross-builds and release packages. Keeping one
+# manifest prevents local installs from quietly containing more than archives.
+install:
+	$(ZIG) build --prefix $(PREFIX)
+	@echo "installed tj, zsh integration, companion tools, and shell completions under $(PREFIX)"
 
 test:
 	$(ZIG) build test
@@ -67,6 +57,11 @@ $(TARGETS):
 
 package: all
 	@for t in $(TARGETS); do \
+		test -x $(DIST)/$$t/bin/tj || exit 1; \
+		test -x $(DIST)/$$t/bin/tj-fence || exit 1; \
+		test -x $(DIST)/$$t/bin/tj-grep || exit 1; \
+		test -x $(DIST)/$$t/bin/tj-tape || exit 1; \
+		test -r $(DIST)/$$t/share/tj/tj.plugin.zsh || exit 1; \
 		tar -czf $(DIST)/tj-$(VERSION)-$$t.tar.gz -C $(DIST)/$$t bin share || exit 1; \
 		echo "$(DIST)/tj-$(VERSION)-$$t.tar.gz"; \
 	done

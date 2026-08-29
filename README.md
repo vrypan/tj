@@ -28,10 +28,14 @@ tj --version                          # tj 0.2.1
 tj-fence < /dev/null && echo ok       # used by the agent wrappers below
 ```
 
-`make install` also installs generated command and option completions under
-the selected prefix:
+`make install` installs the runtime plugin, companion tools, and generated
+command and option completions under the selected prefix:
 
 ```text
+bin/tj-fence
+bin/tj-grep
+bin/tj-tape
+share/tj/tj.plugin.zsh
 share/bash-completion/completions/tj
 share/zsh/site-functions/_tj
 share/fish/vendor_completions.d/tj.fish
@@ -53,7 +57,7 @@ named directory before a command runs.
 Add one line to `~/.zshrc`:
 
 ```sh
-source ~/src/tj/tj.plugin.zsh
+source ~/.local/share/tj/tj.plugin.zsh
 ```
 
 If your zsh setup does not already include your installation prefix's
@@ -63,10 +67,10 @@ If your zsh setup does not already include your installation prefix's
 fpath=(~/.local/share/zsh/site-functions $fpath)
 ```
 
-Adjust the path to wherever you cloned it. The plugin starts with a guard on
-`$TJ_JOURNAL`, so outside a tj journal writer it does nothing at all — loading
-it unconditionally is safe, and it costs nothing in shells that never run
-under tj.
+Adjust the path for the prefix passed to `make install`. The plugin starts
+with a guard on `$TJ_JOURNAL`, so outside a tj journal writer it does nothing
+at all — loading it unconditionally is safe, and it costs nothing in shells
+that never run under tj.
 
 **Without this line tj still runs and your terminal still behaves normally,
 but nothing is recorded** and `tj hist` comes back empty. That is the one
@@ -741,7 +745,7 @@ Cross-compiles with nothing installed on the host:
 ```sh
 make list         # the target list
 make -j6 all      # every target -> dist/<target>/bin/tj
-make package      # bin/ and share/ as dist/tj-<version>-<target>.tar.gz
+make package      # complete install trees as dist/tj-<version>-<target>.tar.gz
 ```
 
 Targets: `{aarch64,x86_64}` × `{macos, linux-musl, linux-gnu}`. The musl

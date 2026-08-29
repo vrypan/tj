@@ -16,6 +16,13 @@ pub fn build(b: *std.Build) void {
     const exe = b.addExecutable(.{ .name = "tj", .root_module = exe_mod });
     b.installArtifact(exe);
 
+    // Runtime files belong to the Zig install graph so local installation,
+    // cross-build prefixes, and release archives all contain the same tools.
+    b.installFile("tj.plugin.zsh", "share/tj/tj.plugin.zsh");
+    b.installBinFile("contrib/tj-fence", "tj-fence");
+    b.installBinFile("contrib/tj-grep", "tj-grep");
+    b.installBinFile("contrib/tj-tape", "tj-tape");
+
     // Completion scripts describe only TJ's static CLI grammar. Generate them
     // during the build with a host executable even when `tj` itself is being
     // cross-compiled; the helper is not part of the installed artifacts.

@@ -43,4 +43,4 @@ jobs:
         with:
           version: 0.16.0
       - run: zig version
-      - run: make -j6 all
+      - run: make -j6 package
