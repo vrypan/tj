@@ -152,7 +152,7 @@ test "application and every command expose generated help" {
     try std.testing.expect(std.mem.indexOf(u8, grep.stdout, "default: never") != null);
 }
 
-test "build-time completions expose only the static cli grammar" {
+test "build-time completions expose cli grammar and journal references" {
     const gpa = std.testing.allocator;
     const io = std.testing.io;
 
@@ -186,10 +186,10 @@ test "build-time completions expose only the static cli grammar" {
     try std.testing.expect(std.mem.indexOf(u8, fish, "__tj_vals_cmd_grep_f_color") != null);
     try std.testing.expect(std.mem.indexOf(u8, fish, "__tj_vals_cmd_journal_a_ACTION") != null);
 
-    // Runtime references remain the existing `tj complete`/plugin concern;
-    // no generated script invokes that command as an external completer.
+    // Positional entry-reference slots use the same runtime resolver as the
+    // plugin's global shorthand completion.
     for ([_][]const u8{ bash, zsh, fish }) |script| {
-        try std.testing.expect(std.mem.indexOf(u8, script, "'tj' 'complete'") == null);
+        try std.testing.expect(std.mem.indexOf(u8, script, "'tj' 'complete'") != null);
     }
 }
 
@@ -3191,7 +3191,11 @@ test "zsh completion keeps special resource names as one inert argument" {
     // must not satisfy the wait before setup actually reaches its end.
     var completion_setup: std.ArrayList(u8) = .empty;
     defer completion_setup.deinit(gpa);
-    try completion_setup.appendSlice(gpa, "autoload -Uz compinit && compinit -D -i && . ");
+    // Generated external completers invoke `tj complete`. Point that name at
+    // the just-built binary instead of any older TJ installed on the host.
+    try completion_setup.appendSlice(gpa, "tj() { command ");
+    try appendShellQuoted(gpa, &completion_setup, tj);
+    try completion_setup.appendSlice(gpa, " \"$@\"; }; autoload -Uz compinit && compinit -D -i && . ");
     try appendShellQuoted(gpa, &completion_setup, options.zsh_completion);
     try completion_setup.appendSlice(
         gpa,
@@ -3263,7 +3267,10 @@ test "zsh completion keeps special resource names as one inert argument" {
     from = out.items.len;
     try child.write("cat ~[@1");
     try child.write("\t");
-    try std.testing.expect(try child.readUntilFrom(gpa, &out, from, "~[@1]", timeout_ms));
+    if (!try child.readUntilFrom(gpa, &out, from, "~[@1]", timeout_ms)) {
+        std.debug.print("numeric dynamic-directory completion failed; transcript follows:\n{s}\n", .{out.items[from..]});
+        return error.NumericDirectoryCompletionMismatch;
+    }
     try child.write("/out\n");
     try std.testing.expect(try child.readUntilFrom(gpa, &out, from, "special-resource-content", timeout_ms));
     // Output can arrive before precmd has redrawn the prompt. Do not start the
@@ -3361,6 +3368,24 @@ test "zsh completion keeps special resource names as one inert argument" {
     try child.write("\n");
     try std.testing.expect(try child.readUntilFrom(gpa, &out, from, "special-resource-content", timeout_ms));
     try std.testing.expect(try child.readUntilFrom(gpa, &out, from, test_prompt, timeout_ms));
+
+    // Zecli's positional completion delegates back to `tj complete`, so TJ
+    // commands get the same entry-resource candidates as arbitrary commands.
+    // Keep this after the numeric dynamic-directory checks: cancelling a ZLE
+    // line records a probe command and can create an otherwise-ambiguous @10.
+    from = out.items.len;
+    try child.write("tj cat @1/cw");
+    try child.write("\t");
+    if (!try child.readUntilFrom(gpa, &out, from, "@1/cwd", timeout_ms)) {
+        std.debug.print("generated reference completion offered no cwd resource; transcript follows:\n{s}\n", .{out.items[from..]});
+        return error.CommandReferenceCompletionMissing;
+    }
+    try child.write("\x18\x14");
+    if (!try child.readUntilFrom(gpa, &out, from, "TJ_BUFFER=", timeout_ms)) {
+        std.debug.print("generated reference completion produced the wrong ZLE buffer; transcript follows:\n{s}\n", .{out.items[from..]});
+        return error.CommandReferenceCompletionMismatch;
+    }
+    try cancelZleLine(gpa, child, &out);
 
     try child.write("exit 0\n");
     try std.testing.expectEqual(@as(u8, 0), try child.finish(gpa, &out, timeout_ms));

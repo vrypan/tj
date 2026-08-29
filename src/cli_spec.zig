@@ -1,5 +1,10 @@
 const zecli = @import("zecli");
 
+const reference_completion = zecli.CompletionKind{ .external = .{
+    .executable = "tj",
+    .arguments = &.{"complete"},
+} };
+
 const home_flag = zecli.FlagSpec{
     .name = "home",
     .value = .string,
@@ -127,7 +132,12 @@ const commands = [_]zecli.CommandSpec{
         .description = "List entries with annotations, size, and date",
         .usage = "tj hist [options] [TARGET...]",
         .flags = &hist_flags,
-        .arguments = &.{.{ .name = "TARGET", .description = "Entry reference, numeric range, or @journal-suffix.", .repeatable = true }},
+        .arguments = &.{.{
+            .name = "TARGET",
+            .description = "Entry reference, numeric range, or @journal-suffix.",
+            .repeatable = true,
+            .completion = reference_completion,
+        }},
         .extra_help = "With no targets, list the current journal. A trailing dot selects an entire journal: @8wpc.\n",
     },
     .{
@@ -148,7 +158,13 @@ const commands = [_]zecli.CommandSpec{
         .description = "Print what one or more references name",
         .usage = "tj cat [options] <REF>...",
         .flags = &cat_flags,
-        .arguments = &.{.{ .name = "REF", .description = "Journal reference, numeric range, or resolved path", .required = true, .repeatable = true }},
+        .arguments = &.{.{
+            .name = "REF",
+            .description = "Journal reference, numeric range, or resolved path",
+            .required = true,
+            .repeatable = true,
+            .completion = reference_completion,
+        }},
     },
     .{
         .name = "replay",
@@ -161,13 +177,13 @@ const commands = [_]zecli.CommandSpec{
         .name = "resolve",
         .description = "Print the filesystem path named by a reference",
         .usage = "tj resolve <REF>",
-        .arguments = &.{.{ .name = "REF", .description = "Journal reference", .required = true }},
+        .arguments = &.{.{ .name = "REF", .description = "Journal reference", .required = true, .completion = reference_completion }},
     },
     .{
         .name = "complete",
         .description = "Print candidates for a partial journal reference",
         .usage = "tj complete [REF]",
-        .arguments = &.{.{ .name = "REF", .description = "Partial journal reference" }},
+        .arguments = &.{.{ .name = "REF", .description = "Partial journal reference", .completion = reference_completion }},
     },
     .{
         .name = "name",
@@ -175,7 +191,7 @@ const commands = [_]zecli.CommandSpec{
         .usage = "tj name [--remove] [REF [NAME]]",
         .flags = &remove_flag,
         .arguments = &.{
-            .{ .name = "REF", .description = "Entry reference or assigned name" },
+            .{ .name = "REF", .description = "Entry reference or assigned name", .completion = reference_completion },
             .{ .name = "NAME", .description = "New entry name" },
         },
     },
@@ -185,8 +201,13 @@ const commands = [_]zecli.CommandSpec{
         .usage = "tj tag [--remove] [TARGET... [TAG...]]",
         .flags = &remove_flag,
         .arguments = &.{
-            .{ .name = "TARGET", .description = "First entry reference or numeric range" },
-            .{ .name = "TARGET_OR_TAG", .description = "Additional targets, then journal-local tags", .repeatable = true },
+            .{ .name = "TARGET", .description = "First entry reference or numeric range", .completion = reference_completion },
+            .{
+                .name = "TARGET_OR_TAG",
+                .description = "Additional targets, then journal-local tags",
+                .repeatable = true,
+                .completion = reference_completion,
+            },
         },
         .extra_help = "Targets must precede tags. With no tags, the selected targets are queried.\n",
     },
@@ -195,14 +216,20 @@ const commands = [_]zecli.CommandSpec{
         .description = "Pin, unpin, or list pinned entries",
         .usage = "tj pin [--remove] [REF]",
         .flags = &remove_flag,
-        .arguments = &.{.{ .name = "REF", .description = "Entry reference or numeric range" }},
+        .arguments = &.{.{ .name = "REF", .description = "Entry reference or numeric range", .completion = reference_completion }},
     },
     .{
         .name = "rm",
         .description = "Remove recorded entry data",
         .usage = "tj rm [--force] <TARGET>...",
         .flags = &force_flag,
-        .arguments = &.{.{ .name = "TARGET", .description = "Entry, out resource, or numeric range", .required = true, .repeatable = true }},
+        .arguments = &.{.{
+            .name = "TARGET",
+            .description = "Entry, out resource, or numeric range",
+            .required = true,
+            .repeatable = true,
+            .completion = reference_completion,
+        }},
         .extra_help = "Pinned targets are skipped unless --force is present. Use `tj journal rm ID` to remove a whole journal.\n",
     },
     .{

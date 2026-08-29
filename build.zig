@@ -23,9 +23,9 @@ pub fn build(b: *std.Build) void {
     b.installBinFile("contrib/tj-grep", "tj-grep");
     b.installBinFile("contrib/tj-tape", "tj-tape");
 
-    // Completion scripts describe only TJ's static CLI grammar. Generate them
-    // during the build with a host executable even when `tj` itself is being
-    // cross-compiled; the helper is not part of the installed artifacts.
+    // Generate command, option, and runtime-reference completion scripts with
+    // a host executable even when `tj` itself is being cross-compiled; the
+    // helper is not part of the installed artifacts.
     const completion_generator_mod = b.createModule(.{
         .root_source_file = b.path("src/completion_main.zig"),
         .target = b.graph.host,

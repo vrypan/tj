@@ -568,6 +568,13 @@ The global shorthand completer remains available for `@10/<TAB>`. Normal zsh
 completion runs before that fallback so dynamic named-directory and ordinary
 filesystem completion retain their native behavior.
 
+The installed command-completion scripts use `tj complete` for positional
+entry-reference arguments accepted by TJ commands. Thus `tj cat @10/<TAB>`
+and the equivalent reference positions in `hist`, `resolve`, `name`, `tag`,
+`pin`, and `rm` use the same journal-local candidates in bash, zsh, and fish.
+This is separate from zsh's global shorthand fallback, which completes
+references in arbitrary command lines.
+
 Numeric and assigned-name candidates are offered in both completion paths.
 Resources below a named entry complete exactly as resources below its
 numeric identity.

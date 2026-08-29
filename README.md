@@ -24,7 +24,7 @@ make install                          # tj and contrib tools into ~/.local/bin
 Check they landed:
 
 ```sh
-tj --version                          # tj 0.2.1
+tj --version                          # tj 0.3.0
 tj-fence < /dev/null && echo ok       # used by the agent wrappers below
 ```
 
@@ -41,9 +41,12 @@ share/zsh/site-functions/_tj
 share/fish/vendor_completions.d/tj.fish
 ```
 
-These complete static CLI syntax such as `tj <TAB>`, `tj hist --<TAB>`, and
-the values of `tj grep --color=<TAB>`. Journal-reference completion remains
-the responsibility of the zsh integration described below.
+These complete CLI syntax such as `tj <TAB>`, `tj hist --<TAB>`, and the
+values of `tj grep --color=<TAB>`. For commands that accept entry references,
+they also invoke `tj complete`, so forms such as `tj cat @42/<TAB>` work in
+bash, zsh, and fish. The zsh integration described below additionally provides
+reference completion in arbitrary commands and the canonical `~[@REF]`
+namespace.
 
 ## Set up zsh
 
@@ -841,7 +844,7 @@ Targets: `{aarch64,x86_64}` × `{macos, linux-musl, linux-gnu}`. The musl
 builds are static. Override `OPTIMIZE` (default `ReleaseSafe`) or `ZIG`
 to change how they are built.
 
-The build fetches the exactly pinned, std-only Zecli 0.2.0 source package on
+The build fetches the exactly pinned, std-only Zecli 0.2.1 source package on
 first use. Zecli is compiled into `tj`; release binaries remain self-contained
 and have no Zecli runtime dependency.
 
