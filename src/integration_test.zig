@@ -1222,6 +1222,83 @@ test "history shows positional annotation flags size UTC date and wrapped comman
     try std.testing.expect(std.mem.indexOf(u8, pinned.stdout, "false") == null);
 }
 
+test "history accepts ordered entry ranges and trailing-dot journal selectors" {
+    if (!haveZsh()) return error.SkipZigTest;
+    const gpa = std.testing.allocator;
+    const io = std.testing.io;
+    var journal = try Journal.open(gpa);
+    defer journal.close();
+    try recordJournal(gpa, &journal, &.{
+        "echo HIST_TARGET_ONE",
+        "echo HIST_TARGET_TWO",
+        "echo HIST_TARGET_THREE",
+        "echo HIST_TARGET_FOUR",
+    });
+    try journal.enter(gpa);
+    const home = try journal.homeArg(gpa);
+    defer gpa.free(home);
+    const id = try journal.journalName(gpa);
+    defer gpa.free(id);
+
+    var removed = try run(gpa, &.{ "--home", home, "rm", "@3" }, 24, 100);
+    defer removed.out.deinit(gpa);
+    try std.testing.expectEqual(@as(u8, 0), removed.code);
+
+    const selected = try runNonTtyInJournal(
+        gpa,
+        &.{ "--home", home, "hist", "@4", "@1..@3" },
+        id,
+        "5",
+    );
+    defer gpa.free(selected.stdout);
+    defer gpa.free(selected.stderr);
+    try std.testing.expectEqual(@as(u8, 0), selected.term.exited);
+    const four_at = std.mem.indexOf(u8, selected.stdout, "HIST_TARGET_FOUR") orelse return error.TestUnexpectedResult;
+    const one_at = std.mem.indexOf(u8, selected.stdout, "HIST_TARGET_ONE") orelse return error.TestUnexpectedResult;
+    const two_at = std.mem.indexOf(u8, selected.stdout, "HIST_TARGET_TWO") orelse return error.TestUnexpectedResult;
+    try std.testing.expect(four_at < one_at and one_at < two_at);
+    try std.testing.expect(std.mem.indexOf(u8, selected.stdout, "HIST_TARGET_THREE") == null);
+
+    const foreign = ulid.encode(std.math.maxInt(u48), .{0} ** 10);
+    var root = try journal.tmp.dir.openDir(io, journal_dir, .{});
+    defer root.close(io);
+    try root.createDir(io, &foreign, @enumFromInt(0o700));
+    var foreign_dir = try root.openDir(io, &foreign, .{});
+    defer foreign_dir.close(io);
+    try foreign_dir.createDir(io, "1", @enumFromInt(0o700));
+    var foreign_entry = try foreign_dir.openDir(io, "1", .{});
+    defer foreign_entry.close(io);
+    try foreign_entry.writeFile(io, .{ .sub_path = "cmd", .data = "echo HIST_TARGET_FOREIGN" });
+    try foreign_entry.writeFile(io, .{ .sub_path = "out", .data = "HIST_TARGET_FOREIGN\n" });
+    try foreign_entry.writeFile(io, .{ .sub_path = "rc", .data = "0\n" });
+
+    const suffix = foreign[foreign.len - 4 ..];
+    const journal_selector = try std.fmt.allocPrint(gpa, "@{s}.", .{suffix});
+    defer gpa.free(journal_selector);
+    const mixed = try runNonTtyInJournal(
+        gpa,
+        &.{ "--home", home, "hist", "@2", journal_selector, "@1" },
+        id,
+        "5",
+    );
+    defer gpa.free(mixed.stdout);
+    defer gpa.free(mixed.stderr);
+    try std.testing.expectEqual(@as(u8, 0), mixed.term.exited);
+    const mixed_two = std.mem.indexOf(u8, mixed.stdout, "HIST_TARGET_TWO") orelse return error.TestUnexpectedResult;
+    const mixed_foreign = std.mem.indexOf(u8, mixed.stdout, "HIST_TARGET_FOREIGN") orelse return error.TestUnexpectedResult;
+    const mixed_one = std.mem.indexOf(u8, mixed.stdout, "HIST_TARGET_ONE") orelse return error.TestUnexpectedResult;
+    try std.testing.expect(mixed_two < mixed_foreign and mixed_foreign < mixed_one);
+    const qualified = try std.fmt.allocPrint(gpa, "@{s}.1", .{suffix});
+    defer gpa.free(qualified);
+    try std.testing.expect(std.mem.indexOf(u8, mixed.stdout, qualified) != null);
+
+    const bare = try runNonTtyInJournal(gpa, &.{ "--home", home, "hist", suffix }, id, "5");
+    defer gpa.free(bare.stdout);
+    defer gpa.free(bare.stderr);
+    try std.testing.expectEqual(@as(u8, 1), bare.term.exited);
+    try std.testing.expect(std.mem.indexOf(u8, bare.stderr, "not a journal reference") != null);
+}
+
 test "tag pin and cat ranges are inclusive and skip numbering holes" {
     if (!haveZsh()) return error.SkipZigTest;
     const gpa = std.testing.allocator;
@@ -2655,7 +2732,7 @@ test "native grep searches literal command and output lines with stable statuses
     defer gpa.free(command_only.stdout);
     defer gpa.free(command_only.stderr);
     try std.testing.expectEqual(@as(u8, 0), command_only.term.exited);
-    try std.testing.expectEqualStrings("  1  [cmd] : COMMAND_LITERAL_012\n", command_only.stdout);
+    try std.testing.expectEqualStrings("     1 > : COMMAND_LITERAL_012\n", command_only.stdout);
     try std.testing.expectEqualStrings("", command_only.stderr);
 
     const automatic_pipe = try runNonTtyInJournal(gpa, &.{ "--home", home, "grep", "--cmd", "--color", "auto", "COMMAND_LITERAL_012" }, id, "");
@@ -2666,7 +2743,7 @@ test "native grep searches literal command and output lines with stable statuses
     const forced_color = try runNonTtyInJournal(gpa, &.{ "--home", home, "grep", "--cmd", "--color=always", "COMMAND_LITERAL_012" }, id, "");
     defer gpa.free(forced_color.stdout);
     defer gpa.free(forced_color.stderr);
-    try std.testing.expectEqualStrings("  1  [cmd] :\x1b[01;31m COMMAND_LITERAL_012\x1b[m\n", forced_color.stdout);
+    try std.testing.expectEqualStrings("     1 > :\x1b[01;31m COMMAND_LITERAL_012\x1b[m\n", forced_color.stdout);
 
     const disabled_color = try runNonTtyInJournal(gpa, &.{ "--home", home, "grep", "--cmd", "--color=never", "COMMAND_LITERAL_012" }, id, "");
     defer gpa.free(disabled_color.stdout);
@@ -2677,19 +2754,19 @@ test "native grep searches literal command and output lines with stable statuses
     defer gpa.free(output_only.stdout);
     defer gpa.free(output_only.stderr);
     try std.testing.expectEqual(@as(u8, 0), output_only.term.exited);
-    try std.testing.expectEqualStrings("  2  [out] OUTPUT_LITERAL_012\n", output_only.stdout);
+    try std.testing.expectEqualStrings("     2 < OUTPUT_LITERAL_012\n", output_only.stdout);
 
     const folded = try runNonTtyInJournal(gpa, &.{ "--home", home, "grep", "-i", "mixedascii012" }, id, "");
     defer gpa.free(folded.stdout);
     defer gpa.free(folded.stderr);
     try std.testing.expectEqual(@as(u8, 0), folded.term.exited);
-    try std.testing.expect(std.mem.indexOf(u8, folded.stdout, "  2  [out] MixedAscii012") != null);
+    try std.testing.expect(std.mem.indexOf(u8, folded.stdout, "     2 < MixedAscii012") != null);
 
     const literal = try runNonTtyInJournal(gpa, &.{ "--home", home, "grep", "--cmd", "[x].*" }, id, "");
     defer gpa.free(literal.stdout);
     defer gpa.free(literal.stderr);
     try std.testing.expectEqual(@as(u8, 0), literal.term.exited);
-    try std.testing.expectEqualStrings("  3  [cmd] : '[x].*'\n", literal.stdout);
+    try std.testing.expectEqualStrings("     3 > : '[x].*'\n", literal.stdout);
 
     const missing = try runNonTtyInJournal(gpa, &.{ "--home", home, "grep", "absent-literal-012" }, id, "");
     defer gpa.free(missing.stdout);
@@ -2713,8 +2790,8 @@ test "native grep searches literal command and output lines with stable statuses
     defer gpa.free(both.stdout);
     defer gpa.free(both.stderr);
     try std.testing.expectEqual(@as(u8, 0), both.term.exited);
-    try std.testing.expect(std.mem.indexOf(u8, both.stdout, "  4  [cmd]") != null);
-    try std.testing.expect(std.mem.indexOf(u8, both.stdout, "  4  [out]") != null);
+    try std.testing.expect(std.mem.indexOf(u8, both.stdout, "     4 >") != null);
+    try std.testing.expect(std.mem.indexOf(u8, both.stdout, "     4 <") != null);
 
     const outside = try runNonTtyInJournal(gpa, &.{ "--home", home, "grep", "x" }, "", "");
     defer gpa.free(outside.stdout);
@@ -2770,9 +2847,9 @@ test "native grep all qualifies journal suffixes and orders newest first" {
     try std.testing.expectEqual(@as(u8, 0), result.term.exited);
     const expected = try std.fmt.allocPrint(
         gpa,
-        "  @{s}.1  [cmd] : SHARED_GREP_012\n" ++
-            "  @{s}.1  [out] SHARED_GREP_012\n" ++
-            "  @{s}.1  [cmd] : SHARED_GREP_012\n",
+        "     @{s}.1 > : SHARED_GREP_012\n" ++
+            "     @{s}.1 < SHARED_GREP_012\n" ++
+            "     @{s}.1 > : SHARED_GREP_012\n",
         .{ newest[newest.len - 4 ..], newest[newest.len - 4 ..], older[older.len - 4 ..] },
     );
     defer gpa.free(expected);
@@ -2815,7 +2892,7 @@ test "terminal native grep omits its results while redirected output stays plain
 
     from = transcript.items.len;
     try child.write("env -u NO_COLOR TERM=xterm-256color GREP_COLORS='mt=4;32' \"$TJ\" grep --color auto --out NOOUT_GREP_PAYLOAD_012\n");
-    try std.testing.expect(try child.readUntilFrom(gpa, &transcript, from, "* 1  \x1b[2m[out]\x1b[0m", timeout_ms));
+    try std.testing.expect(try child.readUntilFrom(gpa, &transcript, from, "*@#\x1b[31m!\x1b[0m \x1b[33m1\x1b[0m \x1b[2m<\x1b[0m", timeout_ms));
     try std.testing.expect(try child.readUntilFrom(gpa, &transcript, from, "\x1b[4;32mNOOUT_GREP_PAYLOAD_012\x1b[m", timeout_ms));
     try std.testing.expect(try child.readUntilFrom(gpa, &transcript, from, "\x1b[32m@grep-hit #bug #parser\x1b[0m", timeout_ms));
     try std.testing.expect(try child.readUntilFrom(gpa, &transcript, from, "\x1b[31m!7\x1b[0m", timeout_ms));
@@ -2853,7 +2930,7 @@ test "terminal native grep omits its results while redirected output stays plain
     const redirected = try journal.tmp.dir.readFileAlloc(std.testing.io, "redirected-grep", gpa, .limited(4096));
     defer gpa.free(redirected);
     try std.testing.expectEqualStrings(
-        "* 1  [out] NOOUT_GREP_PAYLOAD_012 padded result @grep-hit #bug #parser !7\n",
+        "*@#! 1 < NOOUT_GREP_PAYLOAD_012 padded result @grep-hit #bug #parser !7\n",
         redirected,
     );
     const redirected_out = try journal.read(gpa, "4/out");

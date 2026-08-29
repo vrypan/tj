@@ -29,6 +29,9 @@ the plain name.
 
 ```sh
 tj hist
+tj hist @242
+tj hist @2..@10 @15
+tj hist @8wpc.
 ```
 
 ```
@@ -37,20 +40,25 @@ tj hist
      3   0b Aug 29 10:12 vi parser.go
 ```
 
-Columns: positional annotation flags, number, output size, UTC date, and the
+Columns: positional annotation flags, entry reference, output size, UTC date, and the
 command followed by optional `@name`, `#tag`, and nonzero `!N` status. Long
 commands wrap under the command column on a terminal.
 The whole index is a few hundred tokens even for a long journal. The output
 of a single entry can be 50K. **Read the index first and fetch
 deliberately.**
 
+`tj hist` with no target lists the current journal. Pass one or more entry
+references or inclusive numeric ranges to inspect exact entries. Use
+`@SUFFIX.` (including the trailing dot) to select an entire journal; bare
+journal suffixes are not accepted.
+
 The four flag cells are positional: `*` pinned, `@` named, `#` tagged, and `!`
-failed, with spaces for absent properties. It then shows number, human-readable `out` size,
+failed, with spaces for absent properties. It then shows the entry reference, human-readable `out` size,
 UTC start date, and the same command/name/tags/status payload as history.
 Sizes use powers of 1024 with compact `b`, `k`, `M`, and `G` suffixes.
 Columns have single-space separators; terminal output keeps flags in the
 default foreground for `*@#`, renders a present `!` red, size plus `@name` and
-`#tag` metadata in green, dates in blue, numbers in yellow, and `!N` failures in red. Piped output
+`#tag` metadata in green, dates in blue, entry references in yellow, and `!N` failures in red. Piped output
 stays plain.
 
 When the user gives a distinctive literal rather than an entry number,
@@ -61,9 +69,11 @@ tj grep --out 'connection refused'
 tj grep --cmd 'docker compose'
 ```
 
-Results use history-like rows: pin, entry reference, `[cmd]` or `[out]`, the
-matching line, optional `@name` and `#tag` markers, and `!N` for failures. Redirected
-results keep the same fields without terminal wrapping or presentation color.
+Results use history-like rows: four annotation/status flags, entry reference,
+`>` for commands or `<` for output, the matching line, optional `@name` and
+`#tag` markers, and `!N` for failures. Terminal results keep the complete first
+match and trim surrounding context to one line; redirected results are
+untrimmed and omit presentation color.
 Displayed matching lines collapse horizontal whitespace; use `tj cat` for the
 original indentation or layout.
 

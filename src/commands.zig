@@ -168,8 +168,8 @@ fn colorEnabled(when: ColorWhen) bool {
 /// TJ emits only selected lines, so GNU grep's `mt`/`ms` capabilities are the
 /// relevant portion of GREP_COLORS. Later capabilities override earlier ones.
 fn selectedMatchSgr(colors: ?[]const u8) []const u8 {
-    const text = colors orelse return "01;31";
-    var selected: []const u8 = "01;31";
+    const text = colors orelse return "33";
+    var selected: []const u8 = "33";
     var parts = std.mem.splitScalar(u8, text, ':');
     while (parts.next()) |part| {
         if (!std.mem.startsWith(u8, part, "mt=") and !std.mem.startsWith(u8, part, "ms=")) continue;
@@ -210,94 +210,6 @@ const GrepOutput = struct {
     terminal_columns: ?usize,
     layout_color: bool,
     reference_width: usize,
-};
-
-/// Adds hard terminal-width boundaries while forwarding source bytes and ANSI
-/// sequences unchanged. It deliberately buffers nothing: grep retains its
-/// fixed-memory behavior even for a very long matching source line.
-const GrepWrapWriter = struct {
-    downstream: *Io.Writer,
-    interface: Io.Writer,
-    columns: usize,
-    prefix_width: usize,
-    column: usize,
-    escape: enum { normal, esc, csi, string, string_esc } = .normal,
-
-    fn init(downstream: *Io.Writer, columns: usize, prefix_width: usize) GrepWrapWriter {
-        return .{
-            .downstream = downstream,
-            .interface = .{ .vtable = &.{ .drain = drain }, .buffer = &.{} },
-            .columns = columns,
-            .prefix_width = prefix_width,
-            .column = prefix_width,
-        };
-    }
-
-    fn drain(writer: *Io.Writer, data: []const []const u8, splat: usize) Io.Writer.Error!usize {
-        const self: *GrepWrapWriter = @alignCast(@fieldParentPtr("interface", writer));
-        for (data[0 .. data.len - 1]) |bytes| try self.writeBytes(bytes);
-        const pattern = data[data.len - 1];
-        for (0..splat) |_| try self.writeBytes(pattern);
-        writer.end = 0;
-        return Io.Writer.countSplat(data, splat);
-    }
-
-    fn writeBytes(self: *GrepWrapWriter, bytes: []const u8) Io.Writer.Error!void {
-        for (bytes) |byte| try self.writeByte(byte);
-    }
-
-    fn writeByte(self: *GrepWrapWriter, byte: u8) Io.Writer.Error!void {
-        switch (self.escape) {
-            .normal => {
-                if (byte == 0x1b) {
-                    self.escape = .esc;
-                    return self.downstream.writeByte(byte);
-                }
-                var width: usize = 0;
-                if (byte == '\t') {
-                    width = 8 - (self.column % 8);
-                } else if (byte >= 0x20 and byte != 0x7f and (byte & 0xc0) != 0x80) {
-                    // Match history's UTF-8 policy: one cell per scalar. Wide
-                    // glyphs remain the terminal's decision.
-                    width = 1;
-                } else if (byte == 0x08 and self.column > self.prefix_width) {
-                    self.column -= 1;
-                }
-                if (width != 0 and self.columns > self.prefix_width and self.column + width > self.columns) {
-                    try self.downstream.writeByte('\n');
-                    try self.downstream.splatByteAll(' ', self.prefix_width);
-                    self.column = self.prefix_width;
-                    if (byte == '\t') width = 8 - (self.column % 8);
-                }
-                try self.downstream.writeByte(byte);
-                self.column += width;
-            },
-            .esc => {
-                try self.downstream.writeByte(byte);
-                self.escape = switch (byte) {
-                    '[' => .csi,
-                    ']', 'P', '^', '_' => .string,
-                    else => .normal,
-                };
-            },
-            .csi => {
-                try self.downstream.writeByte(byte);
-                if (byte >= 0x40 and byte <= 0x7e) self.escape = .normal;
-            },
-            .string => {
-                try self.downstream.writeByte(byte);
-                if (byte == 0x07) {
-                    self.escape = .normal;
-                } else if (byte == 0x1b) {
-                    self.escape = .string_esc;
-                }
-            },
-            .string_esc => {
-                try self.downstream.writeByte(byte);
-                self.escape = if (byte == '\\') .normal else if (byte == 0x1b) .string_esc else .string;
-            },
-        }
-    }
 };
 
 /// Grep is a discovery view rather than a byte-for-byte resource renderer.
@@ -382,6 +294,82 @@ const GrepNormalizeWriter = struct {
     }
 };
 
+const GrepWindow = struct {
+    start: u64,
+    end: u64,
+    leading_ellipsis: bool = false,
+    trailing_ellipsis: bool = false,
+};
+
+/// Selects a conservative byte window around a complete match. Raw bytes are
+/// treated as cells, which can only under-fill the row for UTF-8, collapsed
+/// whitespace, or terminal control sequences. The complete match has priority
+/// when it alone is wider than the available content area.
+fn grepWindow(
+    line_start: u64,
+    line_end: u64,
+    match_start: u64,
+    match_end: u64,
+    budget: usize,
+) GrepWindow {
+    std.debug.assert(line_start <= match_start);
+    std.debug.assert(match_start <= match_end);
+    std.debug.assert(match_end <= line_end);
+
+    const budget_u64: u64 = @intCast(budget);
+    if (line_end - line_start <= budget_u64) return .{ .start = line_start, .end = line_end };
+
+    const match_len_u64 = match_end - match_start;
+    if (match_len_u64 > budget_u64) {
+        return .{
+            .start = match_start,
+            .end = match_end,
+            .leading_ellipsis = match_start > line_start,
+            .trailing_ellipsis = match_end < line_end,
+        };
+    }
+
+    const match_len: usize = @intCast(match_len_u64);
+    const left_available: usize = @intCast(match_start - line_start);
+    const right_available: usize = @intCast(line_end - match_end);
+    var remaining = budget - match_len;
+    var leading_ellipsis = false;
+    var trailing_ellipsis = false;
+
+    if (left_available != 0 and right_available != 0) {
+        if (remaining >= 2) {
+            leading_ellipsis = true;
+            trailing_ellipsis = true;
+            remaining -= 2;
+        } else if (remaining == 1) {
+            trailing_ellipsis = true;
+            remaining = 0;
+        }
+    } else if (left_available != 0 and remaining != 0) {
+        leading_ellipsis = true;
+        remaining -= 1;
+    } else if (right_available != 0 and remaining != 0) {
+        trailing_ellipsis = true;
+        remaining -= 1;
+    }
+
+    var left_take = @min(left_available, remaining / 2);
+    var right_take = @min(right_available, remaining - left_take);
+    var unused = remaining - left_take - right_take;
+    const left_room = left_available - left_take;
+    const extra_left = @min(left_room, unused);
+    left_take += extra_left;
+    unused -= extra_left;
+    right_take += @min(right_available - right_take, unused);
+
+    return .{
+        .start = match_start - left_take,
+        .end = match_end + right_take,
+        .leading_ellipsis = leading_ellipsis and left_take < left_available,
+        .trailing_ellipsis = trailing_ellipsis and right_take < right_available,
+    };
+}
+
 const GrepLineSink = struct {
     output: *GrepOutput,
     journal: []const u8,
@@ -396,51 +384,105 @@ const GrepLineSink = struct {
         const self: *GrepLineSink = @ptrCast(@alignCast(context));
         try self.output.noout_region.begin();
 
+        const has_name = self.annotation != null and self.annotation.?.name != null;
+        const has_tags = self.annotation != null and self.annotation.?.tags.items.len != 0;
+        const has_failure = self.exit_code != null and self.exit_code.? != 0;
+
         var reference_buf: [64]u8 = undefined;
         const reference_text = if (self.qualified) blk: {
             const suffix = journalDisplaySuffix(self.journal);
             break :blk try std.fmt.bufPrint(&reference_buf, "@{s}.{d}", .{ suffix, self.number });
         } else try std.fmt.bufPrint(&reference_buf, "{d}", .{self.number});
-        const prefix_width = 1 + 1 + self.output.reference_width + 2;
+        const prefix_width = 4 + 1 + self.output.reference_width + 1 + 1 + 1;
         try self.output.out.writeByte(if (self.annotation != null and self.annotation.?.pinned) '*' else ' ');
+        try self.output.out.writeByte(if (has_name) '@' else ' ');
+        try self.output.out.writeByte(if (has_tags) '#' else ' ');
+        if (has_failure and self.output.layout_color) try self.output.out.writeAll("\x1b[31m");
+        try self.output.out.writeByte(if (has_failure) '!' else ' ');
+        if (has_failure and self.output.layout_color) try self.output.out.writeAll("\x1b[0m");
         try self.output.out.writeByte(' ');
         try self.output.out.splatByteAll(' ', self.output.reference_width - reference_text.len);
+        if (self.output.layout_color) try self.output.out.writeAll("\x1b[33m");
         try self.output.out.writeAll(reference_text);
-        try self.output.out.writeAll("  ");
+        if (self.output.layout_color) try self.output.out.writeAll("\x1b[0m");
+        try self.output.out.writeByte(' ');
+        if (self.output.layout_color) try self.output.out.writeAll("\x1b[2m");
+        try self.output.out.writeByte(if (std.mem.eql(u8, self.resource, "cmd")) '>' else '<');
+        if (self.output.layout_color) try self.output.out.writeAll("\x1b[0m");
+        try self.output.out.writeByte(' ');
 
         if (self.output.terminal_columns) |columns| {
-            var wrapped = GrepWrapWriter.init(self.output.out, columns, prefix_width);
-            try self.writePayload(file, start, end, &wrapped.interface);
+            const fixed_width = prefix_width + self.metadataWidth();
+            const budget = if (columns > fixed_width) columns - fixed_width else 0;
+            try self.writePayload(file, start, end, self.output.out, budget);
         } else {
-            try self.writePayload(file, start, end, self.output.out);
+            try self.writePayload(file, start, end, self.output.out, null);
         }
         try self.output.out.writeAll("\n");
     }
 
-    fn writePayload(self: *GrepLineSink, file: Io.File, start: u64, original_end: u64, writer: *Io.Writer) !void {
-        if (self.output.layout_color) try writer.writeAll("\x1b[2m");
-        try writer.print("[{s}]", .{self.resource});
-        if (self.output.layout_color) try writer.writeAll("\x1b[0m");
-        try writer.writeByte(' ');
-
+    fn writePayload(
+        self: *GrepLineSink,
+        file: Io.File,
+        start: u64,
+        original_end: u64,
+        writer: *Io.Writer,
+        budget: ?usize,
+    ) !void {
         var end = original_end;
         if (end > start) {
             var last: [1]u8 = undefined;
             const n = try file.readPositional(self.output.io, &.{last[0..]}, end - 1);
             if (n == 1 and last[0] == '\r') end -= 1;
         }
+
+        var window: GrepWindow = .{ .start = start, .end = end };
+        if (budget) |width| {
+            if (end - start > width) {
+                const match = (try search.firstMatchSpan(self.output.io, file, start, end, self.matcher)) orelse
+                    return error.UnexpectedEndOfFile;
+                window = grepWindow(start, end, match.start, match.end, width);
+            }
+        }
+        if (window.leading_ellipsis) try writer.writeAll("…");
         var normalized = GrepNormalizeWriter.init(writer);
         try search.copyHighlightedSpan(
             self.output.io,
             file,
-            start,
-            end,
+            window.start,
+            window.end,
             self.matcher,
             self.output.match_sgr,
             &normalized.interface,
         );
         normalized.finish();
 
+        if (window.trailing_ellipsis) try writer.writeAll("…");
+        try self.writeMetadata(writer);
+    }
+
+    fn metadataWidth(self: *const GrepLineSink) usize {
+        const has_name = self.annotation != null and self.annotation.?.name != null;
+        const has_tags = self.annotation != null and self.annotation.?.tags.items.len != 0;
+        const has_failure = self.exit_code != null and self.exit_code.? != 0;
+        if (!has_name and !has_tags and !has_failure) return 0;
+
+        var width: usize = 1;
+        if (has_name) width += 1 + self.annotation.?.name.?.len;
+        if (has_tags) {
+            for (self.annotation.?.tags.items, 0..) |tag, i| {
+                if (has_name or i != 0) width += 1;
+                width += 1 + tag.len;
+            }
+        }
+        if (has_failure) {
+            if (has_name or has_tags) width += 1;
+            width += 1 + decimalWidth(self.exit_code.?);
+        }
+        return width;
+    }
+
+    fn writeMetadata(self: *const GrepLineSink, writer: *Io.Writer) !void {
         const has_name = self.annotation != null and self.annotation.?.name != null;
         const has_tags = self.annotation != null and self.annotation.?.tags.items.len != 0;
         const has_failure = self.exit_code != null and self.exit_code.? != 0;
@@ -468,19 +510,59 @@ const GrepLineSink = struct {
     }
 };
 
-test "grep wrapping ignores styling and aligns continuation rows" {
+test "grep windows retain the complete match and nearby context" {
+    try std.testing.expectEqualDeep(
+        GrepWindow{ .start = 5, .end = 13, .leading_ellipsis = true, .trailing_ellipsis = true },
+        grepWindow(0, 20, 8, 10, 10),
+    );
+    try std.testing.expectEqualDeep(
+        GrepWindow{ .start = 8, .end = 18, .leading_ellipsis = true, .trailing_ellipsis = true },
+        grepWindow(0, 20, 8, 18, 5),
+    );
+    try std.testing.expectEqualDeep(
+        GrepWindow{ .start = 0, .end = 5 },
+        grepWindow(0, 5, 1, 3, 5),
+    );
+}
+
+test "terminal grep emits one width-bounded row containing the match" {
+    const io = std.testing.io;
     const gpa = std.testing.allocator;
+    const text = "0123456789MATCHabcdefghij";
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var file = try tmp.dir.createFile(io, "grep-window", .{ .read = true });
+    defer file.close(io);
+    try file.writePositionalAll(io, text, 0);
+
+    var matcher = try search.Matcher.init(gpa, "MATCH", false);
+    defer matcher.deinit();
     var bytes: std.ArrayList(u8) = .empty;
     defer bytes.deinit(gpa);
-    var downstream = Io.Writer.Allocating.fromArrayList(gpa, &bytes);
-    defer bytes = downstream.toArrayList();
-    var wrapped = GrepWrapWriter.init(&downstream.writer, 14, 5);
+    var writer = Io.Writer.Allocating.fromArrayList(gpa, &bytes);
+    defer bytes = writer.toArrayList();
+    var output: GrepOutput = .{
+        .io = io,
+        .out = &writer.writer,
+        .noout_region = .{ .out = &writer.writer, .enabled = false },
+        .match_sgr = "",
+        .terminal_columns = 20,
+        .layout_color = false,
+        .reference_width = 1,
+    };
+    var sink: GrepLineSink = .{
+        .output = &output,
+        .journal = "journal",
+        .number = 1,
+        .resource = "out",
+        .qualified = false,
+        .matcher = &matcher,
+        .annotation = null,
+        .exit_code = 0,
+    };
 
-    try wrapped.interface.writeAll("[out] \x1b[31mabcdefgh\x1b[0m");
-    try std.testing.expectEqualStrings(
-        "[out] \x1b[31mabc\n     defgh\x1b[0m",
-        downstream.writer.buffered(),
-    );
+    try GrepLineSink.emit(&sink, file, 0, text.len);
+    try std.testing.expectEqualStrings("     1 < …89MATCHab…\n", writer.writer.buffered());
 }
 
 test "grep display normalizes horizontal whitespace without touching control sequences" {
@@ -537,7 +619,7 @@ fn grepCommand(
     defer root.close(io);
     var matcher = try search.Matcher.init(gpa, request.pattern, request.ignore_case);
     defer matcher.deinit();
-    const terminal_columns = historyTerminalColumns();
+    const terminal_columns = if (sys.isTty(1)) historyTerminalColumns() else null;
     var output: GrepOutput = .{
         .io = io,
         .out = out,
@@ -664,10 +746,10 @@ test "grep rejects missing multiline extra and unknown patterns" {
 }
 
 test "GNU grep selected-match colors use mt and ms capabilities" {
-    try std.testing.expectEqualStrings("01;31", selectedMatchSgr(null));
+    try std.testing.expectEqualStrings("33", selectedMatchSgr(null));
     try std.testing.expectEqualStrings("4;32", selectedMatchSgr("fn=35:mt=1;31:ms=4;32"));
     try std.testing.expectEqualStrings("", selectedMatchSgr("mt="));
-    try std.testing.expectEqualStrings("01;31", selectedMatchSgr("mt=not-sgr"));
+    try std.testing.expectEqualStrings("33", selectedMatchSgr("mt=not-sgr"));
 }
 
 fn listJournals(gpa: std.mem.Allocator, io: Io, home: ?[]const u8, out: *Io.Writer) !void {
@@ -697,6 +779,129 @@ fn listJournals(gpa: std.mem.Allocator, io: Io, home: ?[]const u8, out: *Io.Writ
     }
 }
 
+const HistoryJournal = struct {
+    name: []u8,
+    manifest: annotations.Manifest,
+    interactions: []store.InteractionInfo,
+
+    fn deinit(self: *HistoryJournal, gpa: std.mem.Allocator) void {
+        self.manifest.deinit(gpa);
+        for (self.interactions) |info| info.deinit(gpa);
+        gpa.free(self.interactions);
+        gpa.free(self.name);
+    }
+
+    fn interactionIndex(self: *const HistoryJournal, number: u32) ?usize {
+        for (self.interactions, 0..) |info, index| {
+            if (info.number == number) return index;
+        }
+        return null;
+    }
+};
+
+const HistorySelection = struct {
+    journal_index: usize,
+    interaction_index: usize,
+    qualified: bool,
+};
+
+fn loadHistoryJournal(
+    gpa: std.mem.Allocator,
+    io: Io,
+    root: store.Dir,
+    journals: *std.ArrayList(HistoryJournal),
+    name: []const u8,
+) !usize {
+    for (journals.items, 0..) |journal, index| {
+        if (std.mem.eql(u8, journal.name, name)) return index;
+    }
+
+    const owned_name = try gpa.dupe(u8, name);
+    errdefer gpa.free(owned_name);
+    var manifest = annotations.load(gpa, io, root, name) catch |err| switch (err) {
+        error.InvalidAnnotations => return error.InvalidAnnotations,
+        else => return err,
+    };
+    errdefer manifest.deinit(gpa);
+    const interactions = store.listInteractions(gpa, io, root, name) catch |err| switch (err) {
+        error.FileNotFound => return error.NoSuchJournal,
+        else => return err,
+    };
+    errdefer {
+        for (interactions) |info| info.deinit(gpa);
+        gpa.free(interactions);
+    }
+    try journals.append(gpa, .{
+        .name = owned_name,
+        .manifest = manifest,
+        .interactions = interactions,
+    });
+    return journals.items.len - 1;
+}
+
+fn parseHistoryJournalSelector(text: []const u8) ?[]const u8 {
+    if (text.len < 3 or text[0] != '@' or text[text.len - 1] != '.') return null;
+    const suffix = text[1 .. text.len - 1];
+    if (suffix.len == 0 or suffix.len > reference.max_suffix) return null;
+    for (suffix) |char| {
+        if (!std.ascii.isDigit(char) and !std.ascii.isAlphabetic(char)) return null;
+    }
+    return suffix;
+}
+
+test "history journal selectors use a trailing dot" {
+    try std.testing.expectEqualStrings("8wpc", parseHistoryJournalSelector("@8wpc.").?);
+    try std.testing.expectEqualStrings("01m12awjf7hd5pdfvnkzmw8wpc", parseHistoryJournalSelector("@01m12awjf7hd5pdfvnkzmw8wpc.").?);
+    try std.testing.expect(parseHistoryJournalSelector("8wpc") == null);
+    try std.testing.expect(parseHistoryJournalSelector("@8wpc") == null);
+    try std.testing.expect(parseHistoryJournalSelector("@.") == null);
+    try std.testing.expect(parseHistoryJournalSelector("@bad_suffix.") == null);
+}
+
+fn appendWholeHistoryJournal(
+    gpa: std.mem.Allocator,
+    io: Io,
+    root: store.Dir,
+    journals: *std.ArrayList(HistoryJournal),
+    selected: *std.ArrayList(HistorySelection),
+    name: []const u8,
+    qualified: bool,
+) !void {
+    const journal_index = try loadHistoryJournal(gpa, io, root, journals, name);
+    for (journals.items[journal_index].interactions, 0..) |_, interaction_index| {
+        try selected.append(gpa, .{
+            .journal_index = journal_index,
+            .interaction_index = interaction_index,
+            .qualified = qualified,
+        });
+    }
+}
+
+fn historyReferenceWidth(journal: *const HistoryJournal, selection: HistorySelection) usize {
+    const number_width = decimalWidth(journal.interactions[selection.interaction_index].number);
+    if (!selection.qualified) return number_width;
+    return 1 + journalDisplaySuffix(journal.name).len + 1 + number_width;
+}
+
+fn writeHistoryReference(
+    out: *Io.Writer,
+    journal: *const HistoryJournal,
+    selection: HistorySelection,
+    width: usize,
+    color_enabled: bool,
+) !void {
+    const info = journal.interactions[selection.interaction_index];
+    const actual_width = historyReferenceWidth(journal, selection);
+    try out.splatByteAll(' ', width - actual_width);
+    if (color_enabled) try out.writeAll("\x1b[33m");
+    if (selection.qualified) {
+        try out.print("@{s}.{d}", .{ journalDisplaySuffix(journal.name), info.number });
+    } else {
+        try out.print("{d}", .{info.number});
+    }
+    if (color_enabled) try out.writeAll("\x1b[0m");
+}
+
 fn listInteractions(
     gpa: std.mem.Allocator,
     io: Io,
@@ -717,34 +922,69 @@ fn listInteractions(
         try filters.append(gpa, annotations.normalizeTag(gpa, flag.value.?) catch return error.InvalidTag);
     }
     const pinned_only = parsed.present("pinned");
-    const wanted = if (parsed.positionals.items.len == 1) parsed.positionals.items[0] else null;
 
-    var journal_owned: ?[]u8 = null;
-    defer if (journal_owned) |name| gpa.free(name);
-    const journal: []const u8 = if (wanted) |selector| blk: {
-        journal_owned = try store.findNewestJournal(gpa, io, root, selector) orelse return error.NoSuchJournal;
-        break :blk journal_owned.?;
-    } else try currentJournal();
-
-    var manifest = annotations.load(gpa, io, root, journal) catch |err| switch (err) {
-        error.InvalidAnnotations => return error.InvalidAnnotations,
-        else => return err,
-    };
-    defer manifest.deinit(gpa);
-    const interactions = store.listInteractions(gpa, io, root, journal) catch |err| switch (err) {
-        error.FileNotFound => return error.NoSuchJournal,
-        else => return err,
-    };
+    var journals: std.ArrayList(HistoryJournal) = .empty;
     defer {
-        for (interactions) |info| info.deinit(gpa);
-        gpa.free(interactions);
+        for (journals.items) |*journal| journal.deinit(gpa);
+        journals.deinit(gpa);
+    }
+    var selected: std.ArrayList(HistorySelection) = .empty;
+    defer selected.deinit(gpa);
+
+    if (parsed.positionals.items.len == 0) {
+        try appendWholeHistoryJournal(gpa, io, root, &journals, &selected, try currentJournal(), false);
+    } else {
+        for (parsed.positionals.items) |text| {
+            if (parseHistoryJournalSelector(text)) |suffix| {
+                const journal = try store.findNewestJournal(gpa, io, root, suffix) orelse return error.NoSuchJournal;
+                defer gpa.free(journal);
+                try appendWholeHistoryJournal(gpa, io, root, &journals, &selected, journal, true);
+                continue;
+            }
+
+            const maybe_range = parseInteractionRange(text) catch |err| switch (err) {
+                error.CrossJournalMutation => return error.InvalidRange,
+                else => |other| return other,
+            };
+            if (maybe_range) |range| {
+                const journal_index = try loadHistoryJournal(gpa, io, root, &journals, try currentJournal());
+                var found = false;
+                for (journals.items[journal_index].interactions, 0..) |info, interaction_index| {
+                    if (!range.contains(info.number)) continue;
+                    found = true;
+                    try selected.append(gpa, .{
+                        .journal_index = journal_index,
+                        .interaction_index = interaction_index,
+                        .qualified = false,
+                    });
+                }
+                if (!found) return error.NoSuchInteraction;
+                continue;
+            }
+
+            const target = try locateCommandTarget(gpa, io, root, text);
+            defer target.deinit(gpa);
+            try requireInteraction(target);
+            const journal_index = try loadHistoryJournal(gpa, io, root, &journals, target.journal);
+            const interaction_index = journals.items[journal_index].interactionIndex(target.number) orelse
+                return error.NoSuchInteraction;
+            const current = sys.env("TJ_JOURNAL");
+            try selected.append(gpa, .{
+                .journal_index = journal_index,
+                .interaction_index = interaction_index,
+                .qualified = target.syntactically_qualified or current == null or
+                    !std.mem.eql(u8, current.?, target.journal),
+            });
+        }
     }
 
     var number_width: usize = 1;
     var size_width: usize = 1;
-    for (interactions) |info| {
-        if (!historyEntryVisible(&manifest, info.number, filters.items, pinned_only)) continue;
-        number_width = @max(number_width, decimalWidth(info.number));
+    for (selected.items) |selection| {
+        const journal = &journals.items[selection.journal_index];
+        const info = journal.interactions[selection.interaction_index];
+        if (!historyEntryVisible(&journal.manifest, info.number, filters.items, pinned_only)) continue;
+        number_width = @max(number_width, historyReferenceWidth(journal, selection));
         var size_buf: [24]u8 = undefined;
         size_width = @max(size_width, formatEntrySize(info, &size_buf).len);
     }
@@ -765,9 +1005,11 @@ fn listInteractions(
     defer noout_region.finish();
     const now_ms = Io.Clock.now(.real, io).toMilliseconds();
 
-    for (interactions) |info| {
-        const annotation = manifest.findConst(info.number);
-        if (!historyEntryVisible(&manifest, info.number, filters.items, pinned_only)) continue;
+    for (selected.items) |selection| {
+        const journal = &journals.items[selection.journal_index];
+        const info = journal.interactions[selection.interaction_index];
+        const annotation = journal.manifest.findConst(info.number);
+        if (!historyEntryVisible(&journal.manifest, info.number, filters.items, pinned_only)) continue;
 
         var payload: std.ArrayList(u8) = .empty;
         defer payload.deinit(gpa);
@@ -806,7 +1048,7 @@ fn listInteractions(
         var size_buf: [24]u8 = undefined;
         const size_text = formatEntrySize(info, &size_buf);
         var date_buf: [date_width]u8 = undefined;
-        const timing = store.readTiming(gpa, io, root, journal, info.number);
+        const timing = store.readTiming(gpa, io, root, journal.name, info.number);
         const date_text = formatLsDate(if (timing) |value| value.started else null, now_ms, &date_buf);
 
         for (lines.items, 0..) |line, line_i| {
@@ -818,10 +1060,7 @@ fn listInteractions(
                 try out.writeByte(if (has_failure) '!' else ' ');
                 if (has_failure and color_enabled) try out.writeAll("\x1b[0m");
                 try out.writeByte(' ');
-                try out.splatByteAll(' ', number_width - decimalWidth(info.number));
-                if (color_enabled) try out.writeAll("\x1b[33m");
-                try out.print("{d}", .{info.number});
-                if (color_enabled) try out.writeAll("\x1b[0m");
+                try writeHistoryReference(out, journal, selection, number_width, color_enabled);
                 try out.writeByte(' ');
                 try out.splatByteAll(' ', size_width - size_text.len);
                 if (color_enabled) try out.writeAll("\x1b[32m");

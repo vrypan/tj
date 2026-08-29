@@ -125,9 +125,10 @@ const commands = [_]zecli.CommandSpec{
         .name = "hist",
         .aliases = &.{"history"},
         .description = "List entries with annotations, size, and date",
-        .usage = "tj hist [options] [JOURNAL]",
+        .usage = "tj hist [options] [TARGET...]",
         .flags = &hist_flags,
-        .arguments = &.{.{ .name = "JOURNAL", .description = "Journal ID or suffix" }},
+        .arguments = &.{.{ .name = "TARGET", .description = "Entry reference, numeric range, or @journal-suffix.", .repeatable = true }},
+        .extra_help = "With no targets, list the current journal. A trailing dot selects an entire journal: @8wpc.\n",
     },
     .{
         .name = "journal",

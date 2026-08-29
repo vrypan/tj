@@ -154,7 +154,10 @@ tj cat @1                 # hello
 Each command becomes a numbered entry:
 
 ```sh
-tj hist                   # flags, number, output size, date, command metadata
+tj hist                   # flags, entry reference, output size, date, command metadata
+tj hist @242              # full details for one entry
+tj hist @2..@10 @15       # selected entries, inclusive ranges skip holes
+tj hist @8wpc.            # every entry in the journal ending in 8wpc
 tj journal list           # every journal, newest first
 tj current                # this journal's id
 tj last                   # the last entry that completed
@@ -263,6 +266,13 @@ Targets in a list are processed from left to right.
 tag. `tj hist --pinned` (or `--pin`) shows only pinned entries; it combines
 with tag filters using AND semantics.
 
+With no targets, `tj hist` lists the current journal. Otherwise it accepts
+one or more entry references, inclusive current-journal numeric ranges, and
+journal selectors, in argument order. A journal selector is an `@`-prefixed
+ID suffix followed by a dot: `@8wpc.`. Bare IDs and suffixes are not history
+targets. Foreign-journal entries are displayed as `@8wpc.42`, including when
+several journals are mixed in one listing.
+
 When history is written directly to a terminal inside a journal writer, TJ
 wraps the listing in a noout region. The listing remains visible, while the
 current entry records only `<tj:noout>` instead of copying the index into the
@@ -277,7 +287,7 @@ History uses an `ls -l`-shaped index:
 ```
 
 Its four positional flag cells are `*` for pinned, `@` for named, `#` for
-tagged, and `!` for a nonzero exit status; absent flags are spaces. Number and output-resource size are
+tagged, and `!` for a nonzero exit status; absent flags are spaces. Entry reference and output-resource size are
 right-aligned. Sizes use powers of 1024 and the compact suffixes `b`, `k`, `M`,
 `G`, and so on; `-` means `out` was removed while `0b` means it exists but is
 empty. Dates are recorded start times
@@ -285,7 +295,7 @@ in UTC; entries from the current UTC year show `HH:MM`, while older entries
 show the year. The final field contains the command followed by an optional
 `@name`, one `#tag` per tag, and `!N` for a nonzero exit status. Columns use single-space separators. On capable
 terminals the first three flags keep the default foreground, while a present
-`!` is red. Entry numbers are yellow, sizes and name/tag metadata green, dates
+`!` is red. Entry references are yellow, sizes and name/tag metadata green, dates
 blue, and failures red. Terminal wrapping,
 `NO_COLOR`, `--tag`, `--pinned`, journal selection, and terminal-only noout
 behavior apply to the index.
@@ -525,11 +535,12 @@ This is fixed-string search, not regular expressions. Each matching line uses
 the same annotation and failure markers as `tj hist`:
 
 ```text
-*   42  [out] error: connection reset by peer @build-failure #network !1
+*@#! 42 < error: connection reset by peer @build-failure #network !1
 ```
 
-The columns are pin, entry number, source resource, matching text, optional
-name and tags, and a nonzero status. Current-journal rows use a plain number;
+The four flags have the same meaning as history. `>` marks a command match and
+`<` marks output, following request/response direction. The remaining columns
+are entry reference, matching text, optional name and tags, and a nonzero status. Current-journal rows use a plain number;
 `--all` works outside a writer and qualifies it with the journal's four-byte
 suffix, such as `@8wpc.42`. Use `--cmd` and `--out` together to select both
 explicitly. Exit status 0 means at least one line matched, 1 means no match,
@@ -539,16 +550,18 @@ Matching still uses the original stored bytes. For display, leading and
 trailing spaces or tabs are removed and internal horizontal-whitespace runs
 collapse to one space. Use `tj cat` when exact indentation or layout matters.
 
-Terminal rows wrap beneath the content column and use the same green metadata
-and red failure styling as history. Piped and redirected rows keep the same
-fields but remain one physical line each and omit presentation styling.
+Terminal rows are trimmed to one physical line around the complete first match,
+with `…` marking omitted context. They use the same flag, reference, metadata,
+and failure styling as history. If the match itself cannot fit, it is shown in
+full and may exceed the terminal width. Piped and redirected rows remain
+untrimmed and omit presentation styling.
 
 Highlighting uses GNU grep's three color modes and is off by default. `--color`
 (also `--colour`) requires `never`, `auto`, or `always`, supplied either as the
 next argument or with `=`. Auto enables match highlighting only when stdout is
 a terminal and `TERM` indicates color support. Always emits match styling even
 through a pipe or redirect, while never disables it. Selected matches default
-to bold red and honor the `mt` or `ms` selected-match capability in
+to the same yellow as entry references and honor the `mt` or `ms` selected-match capability in
 `GREP_COLORS`.
 
 When results go directly to a terminal inside a journal writer, TJ wraps them

@@ -597,15 +597,24 @@ filters use AND semantics. `tj hist --pinned`, with `--pin` as an alias,
 restricts history to pinned entries and combines with every tag filter using
 AND semantics.
 
+With no operands, `tj hist` selects every entry in the current journal. With
+operands, it accepts entry references, inclusive unqualified numeric ranges,
+and journal selectors, processing them from left to right. A journal selector
+has the form `@SUFFIX.`; the trailing dot distinguishes the journal itself
+from `@SUFFIX.ENTRY`. Bare journal IDs and suffixes are not accepted. Ranges
+skip numbering holes and fail when they select no existing entry. Entries
+selected from another journal use `@SUFFIX.N` in the reference column so a
+mixed listing remains unambiguous.
+
 History renders each entry as:
 
 ```text
-[flags] [number] [out-size] [UTC date] command @name #tag !N
+[flags] [entry-reference] [out-size] [UTC date] command @name #tag !N
 ```
 
 `flags` is exactly four positional cells: `*` when pinned, `@` when named,
 `#` when tagged, and `!` when the exit status is nonzero, with a space for each
-absent property. Number and size are
+absent property. Entry reference and size are
 right-aligned across the selected entries, and every column is separated by
 one space. Size is the logical byte length of
 the `out` resource, formatted in powers of 1024 with `b`, `k`, `M`, `G`, and
@@ -778,10 +787,11 @@ argument or with `=`; bare `--color` is invalid. `WHEN` is `never`, `auto`, or
 `always`. Auto mode enables color only when stdout is a terminal and non-empty
 `TERM` is not `dumb`. Always mode emits SGR sequences even to redirected or
 piped stdout, and never mode emits none. Selected non-empty, non-overlapping
-matches default to bold red (`01;31`). When `GREP_COLORS` is set, valid
+matches default to the same yellow as entry references (`33`). When `GREP_COLORS` is set, valid
 decimal/semicolon `mt` and `ms` capabilities are applied in order, with the
 later selected-match value winning; an empty selected-match value disables
-match styling. TJ does not style its reference prefix.
+match styling. These modes control match highlighting independently of the
+yellow reference and other layout colors.
 
 Iteration uses the storage model rather than recursive filesystem traversal:
 journals are newest first, entries are numeric ascending, resources are
@@ -793,23 +803,25 @@ horizontal whitespace are omitted, while internal spaces and tabs collapse to
 one space. Other source bytes are preserved. Results use history's row grammar:
 
 ``` text
-*   42  [out] matching source line @name #tag !1
-  @8wpc.42  [out] matching source line under --all
+*@#! 42 < matching source line @name #tag !1
+     @8wpc.42 > matching command line under --all
 ```
 
-The leading pin, optional name and tags, and nonzero status come from the same
-journal-local annotations and entry metadata as history. Current-journal
-results use a plain right-aligned number. Every `--all` result qualifies the
+The four positional flags match history. `>` denotes `cmd` and `<` denotes
+`out`. Optional name and tags, and nonzero status come from the same journal-local
+annotations and entry metadata as history. Current-journal results use a plain right-aligned number. Every `--all` result qualifies the
 number with the last four bytes of its journal ULID, including results from the
 writer's current journal. A final unterminated source line is still searchable.
 
-On a terminal, TJ obtains the width with `TIOCGWINSZ` and hard-wraps rows under
-the content column without buffering the source line. The resource is dimmed,
-names and tags are green, and a nonzero status is red when terminal styling is
-supported.
-Piped and redirected results use the same fields without wrapping or
-presentation styling. Explicit `--color=always` still styles selected matches
-when redirected, as described above.
+On a terminal, TJ obtains the width with `TIOCGWINSZ` and emits one physical
+row per result. If the full row does not fit, it finds the first match with a
+bounded positional scan, selects context on both sides, and uses `…` for each
+omitted side. The complete match is never cut; when the fixed columns, metadata,
+and match cannot fit together, the row may exceed the width. The resource
+direction is dimmed, references are yellow, names and tags are green, and
+failures are red. Piped and redirected results use the same fields without
+trimming or presentation styling. Explicit `--color=always` still styles
+selected matches when redirected, as described above.
 
 When `TJ_JOURNAL` is set and decimal `TJ_NEXT` is greater than one, entry
 `TJ_NEXT - 1` in that exact journal is treated as the command currently
@@ -817,9 +829,9 @@ executing and excluded. A missing or malformed counter does not cause another
 entry to be guessed or excluded.
 
 Search streams each resource in fixed-size chunks with matcher state carried
-across reads and reset at line boundaries. Matching-line spans are copied by
-positional reads, so memory use is proportional to the pattern and fixed
-buffers rather than to the resource, line, or match count.
+across reads and reset at line boundaries. Matching-line and terminal-window
+spans are copied by positional reads, so memory use is proportional to the
+pattern and fixed buffers rather than to the resource, line, or match count.
 
 When stdout is a terminal and a current journal exists, search lazily encloses
 all result lines in one OSC 5107 noout region. No markers are emitted for help,

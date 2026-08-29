@@ -47,6 +47,48 @@ pub const Sink = struct {
     emit: *const fn (context: *anyopaque, file: Io.File, start: u64, end: u64) anyerror!void,
 };
 
+pub const MatchSpan = struct {
+    start: u64,
+    end: u64,
+};
+
+/// Finds the first match within `[start, end)` without changing the file's
+/// streaming cursor. The returned offsets bound the complete raw match.
+pub fn firstMatchSpan(
+    io: Io,
+    file: Io.File,
+    start: u64,
+    end: u64,
+    matcher: *const Matcher,
+) !?MatchSpan {
+    if (end < start) return error.InvalidOffset;
+    var buffer: [chunk_size]u8 = undefined;
+    var read_offset = start;
+    var prefix_len: usize = 0;
+    while (read_offset < end) {
+        const remaining = end - read_offset;
+        const wanted: usize = @intCast(@min(remaining, buffer.len));
+        const n = try file.readPositional(io, &.{buffer[0..wanted]}, read_offset);
+        if (n == 0) return error.UnexpectedEndOfFile;
+        for (buffer[0..n], 0..) |raw, i| {
+            const byte = fold(raw, matcher.ignore_case);
+            while (prefix_len > 0 and matcher.pattern[prefix_len] != byte) {
+                prefix_len = matcher.failure[prefix_len - 1];
+            }
+            if (matcher.pattern[prefix_len] == byte) prefix_len += 1;
+            if (prefix_len != matcher.pattern.len) continue;
+
+            const match_end = try std.math.add(u64, read_offset, i + 1);
+            return .{
+                .start = try std.math.sub(u64, match_end, matcher.pattern.len),
+                .end = match_end,
+            };
+        }
+        read_offset = try std.math.add(u64, read_offset, n);
+    }
+    return null;
+}
+
 /// Calls `sink` once for every source line containing the pattern. Offsets do
 /// not include the terminating newline. Matcher state never crosses a newline.
 pub fn scanFile(io: Io, file: Io.File, matcher: *const Matcher, sink: Sink) !u64 {
@@ -300,4 +342,24 @@ test "highlighted copying finds non-overlapping matches across chunk boundaries"
     overlap = overlap_writer.toArrayList();
     defer overlap.deinit(gpa);
     try std.testing.expectEqualStrings("\x1b[1maa\x1b[ma", overlap.items);
+}
+
+test "first match span crosses chunks and honors ASCII folding" {
+    const io = std.testing.io;
+    const gpa = std.testing.allocator;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var file = try tmp.dir.createFile(io, "first-match", .{ .read = true });
+    defer file.close(io);
+    const prefix = try gpa.alloc(u8, chunk_size - 2);
+    defer gpa.free(prefix);
+    @memset(prefix, 'x');
+    try file.writePositionalAll(io, prefix, 0);
+    try file.writePositionalAll(io, "Needle tail needle", prefix.len);
+
+    var matcher = try Matcher.init(gpa, "needle", true);
+    defer matcher.deinit();
+    const found = (try firstMatchSpan(io, file, 0, prefix.len + "Needle tail needle".len, &matcher)).?;
+    try std.testing.expectEqual(@as(u64, prefix.len), found.start);
+    try std.testing.expectEqual(@as(u64, prefix.len + "Needle".len), found.end);
 }
