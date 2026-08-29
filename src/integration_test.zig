@@ -188,6 +188,34 @@ test "application and every command expose generated help" {
     try std.testing.expect(std.mem.indexOf(u8, grep.stdout, "default: never") != null);
 }
 
+test "cat reads a plain file before any journal exists" {
+    const gpa = std.testing.allocator;
+
+    var scratch = try Scratch.open();
+    defer scratch.close();
+    try scratch.tmp.dir.writeFile(std.testing.io, .{ .sub_path = "notes.txt", .data = "plain\n" });
+    const file_path = try std.fmt.allocPrint(gpa, "{s}/notes.txt", .{scratch.path()});
+    defer gpa.free(file_path);
+
+    // A home that has never held a journal. Reading a filesystem path must not
+    // depend on one existing; only a reference needs the journal root.
+    const empty_home = try std.fmt.allocPrint(gpa, "{s}/never-recorded", .{scratch.path()});
+    defer gpa.free(empty_home);
+
+    const file_result = try runNonTty(gpa, &.{ "--home", empty_home, "cat", "--raw", file_path });
+    defer gpa.free(file_result.stdout);
+    defer gpa.free(file_result.stderr);
+    try std.testing.expectEqualStrings("", file_result.stderr);
+    try std.testing.expectEqual(@as(u8, 0), file_result.term.exited);
+    try std.testing.expectEqualStrings("plain\n", file_result.stdout);
+
+    // A reference with no journal still says so rather than silently passing.
+    const reference = try runNonTty(gpa, &.{ "--home", empty_home, "cat", "@1/out" });
+    defer gpa.free(reference.stdout);
+    defer gpa.free(reference.stderr);
+    try std.testing.expect(reference.term.exited != 0);
+}
+
 test "a closed stdout pipe exits quietly" {
     const gpa = std.testing.allocator;
 

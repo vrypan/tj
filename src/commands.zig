@@ -2706,8 +2706,12 @@ fn catResource(
     // convention and let either flag settle it explicitly.
     const request = catRequest(parsed, sys.isTty(1));
 
-    var root = try store.openRoot(io, home);
-    defer root.close(io);
+    // `tj cat ./notes.txt` is a plain file read that happens to share a
+    // command with references. Opening the journal root up front made it fail
+    // with "no journal yet" on a machine that has never recorded one, so the
+    // root is opened only once an argument actually needs it.
+    var root: LazyRoot = .{ .io = io, .home = home };
+    defer root.close();
 
     for (request.refs) |text| {
         const maybe_range = parseInteractionRange(text) catch |err| switch (err) {
@@ -2717,12 +2721,32 @@ fn catResource(
             else => |other| return other,
         };
         if (maybe_range) |range| {
-            try catRange(gpa, io, root, request, range, out);
+            try catRange(gpa, io, try root.get(), request, range, out);
         } else {
-            try catOne(gpa, io, root, request, text, out);
+            try catOne(gpa, io, &root, request, text, out);
         }
     }
 }
+
+/// Opens the journal root on first use. A reference or a range needs it; a
+/// filesystem path does not, and must not fail because no journal exists yet.
+const LazyRoot = struct {
+    io: Io,
+    home: ?[]const u8,
+    dir: ?store.Dir = null,
+
+    fn get(self: *LazyRoot) !store.Dir {
+        if (self.dir) |dir| return dir;
+        const dir = try store.openRoot(self.io, self.home);
+        self.dir = dir;
+        return dir;
+    }
+
+    fn close(self: *LazyRoot) void {
+        if (self.dir) |dir| dir.close(self.io);
+        self.dir = null;
+    }
+};
 
 fn catRange(
     gpa: std.mem.Allocator,
@@ -2745,18 +2769,19 @@ fn catRange(
         }
     }
 
+    var opened: LazyRoot = .{ .io = io, .home = null, .dir = root };
     for (numbers) |number| {
         if (!range.contains(number)) continue;
         var ref_buf: [16]u8 = undefined;
         const ref = try std.fmt.bufPrint(&ref_buf, "@{d}", .{number});
-        try catOne(gpa, io, root, request, ref, out);
+        try catOne(gpa, io, &opened, request, ref, out);
     }
 }
 
 fn catOne(
     gpa: std.mem.Allocator,
     io: Io,
-    root: store.Dir,
+    root: *LazyRoot,
     request: CatRequest,
     text: []const u8,
     out: *Io.Writer,
@@ -2997,14 +3022,14 @@ test "streaming windows keep whole lines across chunk boundaries" {
 /// place it is most likely to be typed. Outside a writer there is no named
 /// directory expansion and the reference is resolved here instead. Either way
 /// it ends at the same open file.
-fn openTarget(gpa: std.mem.Allocator, io: Io, root: store.Dir, text: []const u8) !Io.File {
+fn openTarget(gpa: std.mem.Allocator, io: Io, root: *LazyRoot, text: []const u8) !Io.File {
     var path_buf: [std.fs.max_path_bytes]u8 = undefined;
     var path: []const u8 = text;
     var owned: ?[]const u8 = null;
     defer if (owned) |value| gpa.free(value);
 
     if (reference.parse(text)) |parsed| {
-        const found = try store.locate(gpa, io, root, sys.env("TJ_JOURNAL"), parsed);
+        const found = try store.locate(gpa, io, try root.get(), sys.env("TJ_JOURNAL"), parsed);
         defer found.deinit(gpa);
         if (!found.exists) return error.NoSuchInteraction;
         owned = try gpa.dupe(u8, found.path);
