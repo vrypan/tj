@@ -24,7 +24,7 @@ make install                          # tj and contrib tools into ~/.local/bin
 Check they landed:
 
 ```sh
-tj --version                          # tj 0.2.0
+tj --version                          # tj 0.2.1
 tj-fence < /dev/null && echo ok       # used by the agent wrappers below
 ```
 
