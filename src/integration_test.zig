@@ -210,7 +210,16 @@ test "a closed stdout pipe exits quietly" {
     for (cases) |args| {
         const result = try runWithClosedStdout(gpa, args);
         defer gpa.free(result.stderr);
-        try std.testing.expectEqual(@as(u8, 0), result.term.exited);
+        // Name the case and show what tj said. Without this a failure reports
+        // only "expected 0, found 1", which identifies neither the argument
+        // list nor the diagnostic that explains it.
+        if (result.term != .exited or result.term.exited != 0 or result.stderr.len != 0) {
+            std.debug.print(
+                "closed-stdout case failed: argv={any} term={any} stderr=\"{s}\"\n",
+                .{ args, result.term, result.stderr },
+            );
+        }
+        try std.testing.expectEqual(std.process.Child.Term{ .exited = 0 }, result.term);
         try std.testing.expectEqualStrings("", result.stderr);
     }
 }
