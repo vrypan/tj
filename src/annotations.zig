@@ -48,6 +48,76 @@ pub const Entry = struct {
     }
 };
 
+/// Every annotation in one journal, read with three table scans instead of
+/// three indexed lookups per entry.
+///
+/// This is the one place TJ holds journal-wide annotation state. It is a
+/// deliberate trade against `Connection.get`, which costs three prepared
+/// statements per entry and made listing a large journal dominated by SQL
+/// parsing. The tables are sparse - they hold rows only for entries somebody
+/// actually named, tagged, or pinned - so the resident size tracks the number
+/// of annotations, not the number of entries. A journal of 200000 entries with
+/// 50 named ones holds 50 rows.
+///
+/// Use this for listings, which touch every entry. Single-entry commands
+/// should still use `Connection.get`.
+pub const Set = struct {
+    entries: std.AutoHashMapUnmanaged(u32, Entry) = .empty,
+
+    pub fn deinit(self: *Set, gpa: std.mem.Allocator) void {
+        var it = self.entries.valueIterator();
+        while (it.next()) |entry| entry.deinit(gpa);
+        self.entries.deinit(gpa);
+        self.* = undefined;
+    }
+
+    pub fn get(self: *const Set, number: u32) ?*const Entry {
+        return self.entries.getPtr(number);
+    }
+
+    fn slot(self: *Set, gpa: std.mem.Allocator, number: u32) !*Entry {
+        const found = try self.entries.getOrPut(gpa, number);
+        if (!found.found_existing) found.value_ptr.* = .{ .number = number };
+        return found.value_ptr;
+    }
+};
+
+/// Reads a whole journal's annotations. An absent database yields an empty
+/// set, exactly as the per-entry path yields no annotations.
+pub fn loadSet(gpa: std.mem.Allocator, connection: *Connection) !Set {
+    var set: Set = .{};
+    errdefer set.deinit(gpa);
+    if (connection.database == null) return set;
+
+    var names_iterator = try connection.names();
+    defer names_iterator.deinit();
+    while (try names_iterator.next()) |row| {
+        const entry = try set.slot(gpa, row.number);
+        const owned = try gpa.dupe(u8, row.name);
+        errdefer gpa.free(owned);
+        if (entry.name) |previous| gpa.free(previous);
+        entry.name = owned;
+    }
+
+    var tags_iterator = try connection.tags();
+    defer tags_iterator.deinit();
+    while (try tags_iterator.next()) |row| {
+        const entry = try set.slot(gpa, row.number);
+        const owned = try gpa.dupe(u8, row.tag);
+        errdefer gpa.free(owned);
+        try entry.tags.append(gpa, owned);
+    }
+
+    var pins_iterator = try connection.pins();
+    defer pins_iterator.deinit();
+    while (try pins_iterator.next()) |number| {
+        const entry = try set.slot(gpa, number);
+        entry.pinned = true;
+    }
+
+    return set;
+}
+
 pub const Connection = struct {
     database: ?sqlite.Database,
     path: [:0]u8,

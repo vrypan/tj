@@ -1372,8 +1372,8 @@ test "history shows positional annotation flags size UTC date and wrapped comman
     defer gpa.free(plain_result.stdout);
     defer gpa.free(plain_result.stderr);
     try std.testing.expectEqual(@as(u8, 0), plain_result.term.exited);
-    try std.testing.expect(std.mem.indexOf(u8, plain_result.stdout, "*@#  1 10b Aug 29  2001 printf 1234567890 # alpha beta gamma delta epsilon @display-name #bug\n") != null);
-    try std.testing.expect(std.mem.indexOf(u8, plain_result.stdout, "  #! 2  0b Mar 14  2002 false #failure !1\n") != null);
+    try std.testing.expect(std.mem.indexOf(u8, plain_result.stdout, "*@#  1   10b Aug 29  2001 printf 1234567890 # alpha beta gamma delta epsilon @display-name #bug\n") != null);
+    try std.testing.expect(std.mem.indexOf(u8, plain_result.stdout, "  #! 2    0b Mar 14  2002 false #failure !1\n") != null);
     try std.testing.expect(std.mem.indexOf(u8, plain_result.stdout, noout.begin_marker) == null);
     try std.testing.expect(std.mem.indexOfScalar(u8, plain_result.stdout, 0x1b) == null);
 
@@ -1390,7 +1390,7 @@ test "history shows positional annotation flags size UTC date and wrapped comman
     const visible = terminal.items[content_start..end_at];
     try std.testing.expect(std.mem.indexOf(u8, visible, "*@#  \x1b[33m1\x1b[0m") != null);
     try std.testing.expect(std.mem.indexOf(u8, visible, "  #\x1b[31m!\x1b[0m \x1b[33m2\x1b[0m") != null);
-    try std.testing.expect(std.mem.indexOf(u8, visible, "\x1b[33m1\x1b[0m \x1b[32m10b\x1b[0m \x1b[34mAug 29  2001\x1b[0m") != null);
+    try std.testing.expect(std.mem.indexOf(u8, visible, "\x1b[33m1\x1b[0m   \x1b[32m10b\x1b[0m \x1b[34mAug 29  2001\x1b[0m") != null);
     try std.testing.expect(std.mem.indexOf(u8, visible, "\x1b[32m@display-name\x1b[0m") != null);
     try std.testing.expect(std.mem.indexOf(u8, visible, "\x1b[32m#bug\x1b[0m") != null);
     try std.testing.expect(std.mem.indexOf(u8, visible, "\x1b[31m!1\x1b[0m") != null);
@@ -1404,6 +1404,21 @@ test "history shows positional annotation flags size UTC date and wrapped comman
     defer gpa.free(pinned.stderr);
     try std.testing.expect(std.mem.indexOf(u8, pinned.stdout, "display-name") != null);
     try std.testing.expect(std.mem.indexOf(u8, pinned.stdout, "false") == null);
+
+    // Columns are fixed rather than fitted to whatever a filter matched, so a
+    // narrowed listing lines up with the full one instead of shifting left.
+    const whole_line = "*@#  1   10b Aug 29  2001 printf";
+    try std.testing.expect(std.mem.indexOf(u8, plain_result.stdout, whole_line) != null);
+    for ([_][]const []const u8{
+        &.{ "--home", home, "hist", "--pinned" },
+        &.{ "--home", home, "hist", "@1" },
+        &.{ "--home", home, "hist", "@1..@1" },
+    }) |args| {
+        const narrowed = try runNonTtyInJournal(gpa, args, id, "4");
+        defer gpa.free(narrowed.stdout);
+        defer gpa.free(narrowed.stderr);
+        try std.testing.expect(std.mem.indexOf(u8, narrowed.stdout, whole_line) != null);
+    }
 }
 
 test "history accepts ordered entry ranges and trailing-dot journal selectors" {

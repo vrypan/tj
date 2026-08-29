@@ -765,23 +765,24 @@ fn grepJournal(
     output: *GrepOutput,
     total: *u64,
 ) !void {
-    const interactions = store.listInteractions(gpa, io, root, journal) catch |err| switch (err) {
+    // Grep matches against the resource files directly, so it never needs an
+    // entry's recorded command text in memory.
+    var interactions = store.iterateInteractions(gpa, io, root, journal, store.no_command) catch |err| switch (err) {
         error.FileNotFound => return error.NoSuchJournal,
         else => |other| return other,
     };
-    defer {
-        for (interactions) |info| info.deinit(gpa);
-        gpa.free(interactions);
-    }
+    defer interactions.deinit();
     var metadata = try annotations.openRead(gpa, io, root, journal);
     defer metadata.deinit(gpa);
+    var journal_annotations = try annotations.loadSet(gpa, &metadata);
+    defer journal_annotations.deinit(gpa);
 
-    for (interactions) |info| {
+    while (try interactions.next()) |info| {
+        defer info.deinit(gpa);
         if (active) |item| {
             if (item.number == info.number and std.mem.eql(u8, item.journal, journal)) continue;
         }
-        var annotation = try metadata.get(gpa, info.number);
-        defer if (annotation) |*entry| entry.deinit(gpa);
+        const annotation = journal_annotations.get(info.number);
         for ([_]struct { enabled: bool, name: []const u8 }{
             .{ .enabled = request.commands, .name = "cmd" },
             .{ .enabled = request.output, .name = "out" },
@@ -801,7 +802,7 @@ fn grepJournal(
                 .resource = resource.name,
                 .qualified = request.all,
                 .matcher = matcher,
-                .annotation = if (annotation) |*entry| entry else null,
+                .annotation = annotation,
                 .exit_code = info.exit_code,
             };
             const found = try search.scanFile(io, file, matcher, .{
@@ -864,43 +865,94 @@ fn listJournals(gpa: std.mem.Allocator, io: Io, home: ?[]const u8, out: *Io.Writ
 
     const current = sys.env("TJ_JOURNAL");
     for (journals) |name| {
-        const interactions = store.listInteractions(gpa, io, root, name) catch continue;
-        defer {
-            for (interactions) |info| info.deinit(gpa);
-            gpa.free(interactions);
-        }
+        const entries = store.countInteractions(gpa, io, root, name) catch continue;
         const marker = if (current != null and std.mem.eql(u8, current.?, name)) "*" else " ";
         try out.print("{s} {s}  {d} {s}\n", .{
             marker,
             name,
-            interactions.len,
-            if (interactions.len == 1) "entry" else "entries",
+            entries,
+            if (entries == 1) "entry" else "entries",
         });
     }
 }
 
 const HistoryJournal = struct {
     name: []u8,
-    interactions: []store.InteractionInfo,
+    /// Entry numbers only. A listing reads one entry at a time, so a journal's
+    /// recorded commands never all sit in memory at once.
+    numbers: []u32,
 
     fn deinit(self: *HistoryJournal, gpa: std.mem.Allocator) void {
-        for (self.interactions) |info| info.deinit(gpa);
-        gpa.free(self.interactions);
+        gpa.free(self.numbers);
         gpa.free(self.name);
     }
 
-    fn interactionIndex(self: *const HistoryJournal, number: u32) ?usize {
-        for (self.interactions, 0..) |info, index| {
-            if (info.number == number) return index;
+    fn has(self: *const HistoryJournal, number: u32) bool {
+        for (self.numbers) |candidate| {
+            if (candidate == number) return true;
         }
-        return null;
+        return false;
     }
 };
 
+/// What a command-line argument selected, kept as a rule rather than as an
+/// expanded list of entries. The number of rules is bounded by argv; expanding
+/// them into entries is done twice, lazily, by `HistoryCursor`.
 const HistorySelection = struct {
     journal_index: usize,
-    interaction_index: usize,
     qualified: bool,
+    what: union(enum) {
+        whole,
+        range: InteractionRange,
+        single: u32,
+    },
+};
+
+/// Walks every entry the selections name, in the order they were given.
+const HistoryCursor = struct {
+    journals: []const HistoryJournal,
+    selections: []const HistorySelection,
+    selection: usize = 0,
+    index: usize = 0,
+
+    const Item = struct {
+        journal_index: usize,
+        number: u32,
+        qualified: bool,
+    };
+
+    fn next(self: *HistoryCursor) ?Item {
+        while (self.selection < self.selections.len) {
+            const selection = self.selections[self.selection];
+            const journal = &self.journals[selection.journal_index];
+            switch (selection.what) {
+                .single => |number| {
+                    self.selection += 1;
+                    self.index = 0;
+                    return .{
+                        .journal_index = selection.journal_index,
+                        .number = number,
+                        .qualified = selection.qualified,
+                    };
+                },
+                .whole, .range => {
+                    while (self.index < journal.numbers.len) {
+                        const number = journal.numbers[self.index];
+                        self.index += 1;
+                        if (selection.what == .range and !selection.what.range.contains(number)) continue;
+                        return .{
+                            .journal_index = selection.journal_index,
+                            .number = number,
+                            .qualified = selection.qualified,
+                        };
+                    }
+                    self.selection += 1;
+                    self.index = 0;
+                },
+            }
+        }
+        return null;
+    }
 };
 
 fn loadHistoryJournal(
@@ -916,17 +968,14 @@ fn loadHistoryJournal(
 
     const owned_name = try gpa.dupe(u8, name);
     errdefer gpa.free(owned_name);
-    const interactions = store.listInteractions(gpa, io, root, name) catch |err| switch (err) {
+    const numbers = store.listNumbers(gpa, io, root, name) catch |err| switch (err) {
         error.FileNotFound => return error.NoSuchJournal,
         else => return err,
     };
-    errdefer {
-        for (interactions) |info| info.deinit(gpa);
-        gpa.free(interactions);
-    }
+    errdefer gpa.free(numbers);
     try journals.append(gpa, .{
         .name = owned_name,
-        .interactions = interactions,
+        .numbers = numbers,
     });
     return journals.items.len - 1;
 }
@@ -960,36 +1009,33 @@ fn appendWholeHistoryJournal(
     qualified: bool,
 ) !void {
     const journal_index = try loadHistoryJournal(gpa, io, root, journals, name);
-    for (journals.items[journal_index].interactions, 0..) |_, interaction_index| {
-        try selected.append(gpa, .{
-            .journal_index = journal_index,
-            .interaction_index = interaction_index,
-            .qualified = qualified,
-        });
-    }
+    try selected.append(gpa, .{
+        .journal_index = journal_index,
+        .qualified = qualified,
+        .what = .whole,
+    });
 }
 
-fn historyReferenceWidth(journal: *const HistoryJournal, selection: HistorySelection) usize {
-    const number_width = decimalWidth(journal.interactions[selection.interaction_index].number);
-    if (!selection.qualified) return number_width;
+fn historyReferenceWidth(journal: *const HistoryJournal, item: HistoryCursor.Item) usize {
+    const number_width = decimalWidth(item.number);
+    if (!item.qualified) return number_width;
     return 1 + journalDisplaySuffix(journal.name).len + 1 + number_width;
 }
 
 fn writeHistoryReference(
     out: *Io.Writer,
     journal: *const HistoryJournal,
-    selection: HistorySelection,
+    item: HistoryCursor.Item,
     width: usize,
     color_enabled: bool,
 ) !void {
-    const info = journal.interactions[selection.interaction_index];
-    const actual_width = historyReferenceWidth(journal, selection);
+    const actual_width = historyReferenceWidth(journal, item);
     try out.splatByteAll(' ', width - actual_width);
     if (color_enabled) try out.writeAll("\x1b[33m");
-    if (selection.qualified) {
-        try out.print("@{s}.{d}", .{ journalDisplaySuffix(journal.name), info.number });
+    if (item.qualified) {
+        try out.print("@{s}.{d}", .{ journalDisplaySuffix(journal.name), item.number });
     } else {
-        try out.print("{d}", .{info.number});
+        try out.print("{d}", .{item.number});
     }
     if (color_enabled) try out.writeAll("\x1b[0m");
 }
@@ -1040,17 +1086,14 @@ fn listInteractions(
             };
             if (maybe_range) |range| {
                 const journal_index = try loadHistoryJournal(gpa, io, root, &journals, try currentJournal());
-                var found = false;
-                for (journals.items[journal_index].interactions, 0..) |info, interaction_index| {
-                    if (!range.contains(info.number)) continue;
-                    found = true;
-                    try selected.append(gpa, .{
-                        .journal_index = journal_index,
-                        .interaction_index = interaction_index,
-                        .qualified = false,
-                    });
+                if (!rangeSelectsAny(journals.items[journal_index].numbers, range)) {
+                    return error.NoSuchInteraction;
                 }
-                if (!found) return error.NoSuchInteraction;
+                try selected.append(gpa, .{
+                    .journal_index = journal_index,
+                    .qualified = false,
+                    .what = .{ .range = range },
+                });
                 continue;
             }
 
@@ -1058,40 +1101,36 @@ fn listInteractions(
             defer target.deinit(gpa);
             try requireInteraction(target);
             const journal_index = try loadHistoryJournal(gpa, io, root, &journals, target.journal);
-            const interaction_index = journals.items[journal_index].interactionIndex(target.number) orelse
-                return error.NoSuchInteraction;
+            if (!journals.items[journal_index].has(target.number)) return error.NoSuchInteraction;
             const current = sys.env("TJ_JOURNAL");
             try selected.append(gpa, .{
                 .journal_index = journal_index,
-                .interaction_index = interaction_index,
                 .qualified = target.syntactically_qualified or current == null or
                     !std.mem.eql(u8, current.?, target.journal),
+                .what = .{ .single = target.number },
             });
         }
     }
 
+    // Column widths depend on every visible entry, so they need a pass before
+    // anything is printed. It keeps nothing: each entry is read, measured, and
+    // released, and the print pass reads it again. Two cheap passes cost less
+    // than one resident copy of the journal.
+    // Columns are fixed, so nothing has to be read before printing starts.
+    // The reference column is as wide as its journal's highest entry number
+    // ever needs, which the sorted number list already knows; the size column
+    // is as wide as `formatHumanSize` can ever be. Both are exact rather than
+    // guessed, and a listing lines up with every other listing of the same
+    // journal instead of shifting with whatever the filter happened to match.
     var number_width: usize = 1;
-    var size_width: usize = 1;
-    var sizing_metadata: ?annotations.Connection = null;
-    defer if (sizing_metadata) |*metadata| metadata.deinit(gpa);
-    var sizing_journal: ?usize = null;
     for (selected.items) |selection| {
         const journal = &journals.items[selection.journal_index];
-        const info = journal.interactions[selection.interaction_index];
-        if (sizing_journal != selection.journal_index) {
-            if (sizing_metadata) |*metadata| metadata.deinit(gpa);
-            sizing_metadata = null;
-            sizing_metadata = try annotations.openRead(gpa, io, root, journal.name);
-            sizing_journal = selection.journal_index;
-        }
-        const metadata = if (sizing_metadata) |*value| value else unreachable;
-        var annotation = try metadata.get(gpa, info.number);
-        defer if (annotation) |*entry| entry.deinit(gpa);
-        if (!historyEntryVisible(if (annotation) |*entry| entry else null, filters.items, pinned_only)) continue;
-        number_width = @max(number_width, historyReferenceWidth(journal, selection));
-        var size_buf: [24]u8 = undefined;
-        size_width = @max(size_width, formatEntrySize(info, &size_buf).len);
+        if (journal.numbers.len == 0) continue;
+        var width = decimalWidth(journal.numbers[journal.numbers.len - 1]);
+        if (selection.qualified) width += 1 + journalDisplaySuffix(journal.name).len + 1;
+        number_width = @max(number_width, width);
     }
+    const size_width = max_entry_size_width;
 
     const date_width = 12;
     const prefix_width = 4 + 1 + number_width + 1 + size_width + 1 + date_width + 1;
@@ -1112,20 +1151,31 @@ fn listInteractions(
     var render_metadata: ?annotations.Connection = null;
     defer if (render_metadata) |*metadata| metadata.deinit(gpa);
     var render_journal: ?usize = null;
-    for (selected.items) |selection| {
-        const journal = &journals.items[selection.journal_index];
-        const info = journal.interactions[selection.interaction_index];
-        if (render_journal != selection.journal_index) {
+    var render_annotations: annotations.Set = .{};
+    defer render_annotations.deinit(gpa);
+    var render_cursor: HistoryCursor = .{ .journals = journals.items, .selections = selected.items };
+    while (render_cursor.next()) |item| {
+        const journal = &journals.items[item.journal_index];
+        if (render_journal != item.journal_index) {
             if (render_metadata) |*metadata| metadata.deinit(gpa);
             render_metadata = null;
             render_metadata = try annotations.openRead(gpa, io, root, journal.name);
-            render_journal = selection.journal_index;
+            render_annotations.deinit(gpa);
+            render_annotations = try annotations.loadSet(gpa, &render_metadata.?);
+            render_journal = item.journal_index;
         }
-        const metadata = if (render_metadata) |*value| value else unreachable;
-        var annotation_owned = try metadata.get(gpa, info.number);
-        defer if (annotation_owned) |*entry| entry.deinit(gpa);
-        const annotation: ?*const annotations.Entry = if (annotation_owned) |*entry| entry else null;
+        const annotation = render_annotations.get(item.number);
         if (!historyEntryVisible(annotation, filters.items, pinned_only)) continue;
+
+        const info = try store.readInteraction(
+            gpa,
+            io,
+            root,
+            journal.name,
+            item.number,
+            store.listing_command_limit,
+        ) orelse continue;
+        defer info.deinit(gpa);
 
         var payload: std.ArrayList(u8) = .empty;
         defer payload.deinit(gpa);
@@ -1178,7 +1228,7 @@ fn listInteractions(
                 try out.writeByte(if (has_failure) '!' else ' ');
                 if (has_failure and color_enabled) try out.writeAll("\x1b[0m");
                 try out.writeByte(' ');
-                try writeHistoryReference(out, journal, selection, number_width, color_enabled);
+                try writeHistoryReference(out, journal, item, number_width, color_enabled);
                 try out.writeByte(' ');
                 try out.splatByteAll(' ', size_width - size_text.len);
                 if (color_enabled) try out.writeAll("\x1b[32m");
@@ -1296,6 +1346,11 @@ test "usage chart bars preserve small entries and avoid integer overflow" {
     try std.testing.expectEqual(@as(usize, 4), usageBarWidth(1, 3, 10));
     try std.testing.expectEqual(@as(usize, 80), usageBarWidth(std.math.maxInt(u64), std.math.maxInt(u64), 80));
 }
+
+/// The widest string `formatEntrySize` can produce. `formatHumanSize` divides
+/// while `bytes >= unit * 1024`, so the whole part always stays below 1024:
+/// the widest results are `1023b` below the first unit and `1023k` above it.
+pub const max_entry_size_width = 5;
 
 fn formatEntrySize(info: store.InteractionInfo, buf: *[24]u8) []const u8 {
     if (!info.out_present) return "-";
@@ -1561,6 +1616,23 @@ test "long listing formats human sizes and ls-style UTC dates" {
     try std.testing.expectEqualStrings("1.5k", formatHumanSize(1536, &size_buf));
     try std.testing.expectEqualStrings("18k", formatHumanSize(18 * 1024, &size_buf));
     try std.testing.expectEqualStrings("6.1M", formatHumanSize(6 * 1024 * 1024 + 1024 * 1024 / 10, &size_buf));
+
+    // The history size column is a fixed width, so the formatter must never
+    // exceed it. Probe every unit boundary and the extremes rather than trust
+    // the reasoning in the constant's comment.
+    var widest: usize = 0;
+    var unit: u64 = 1;
+    for (0..7) |_| {
+        for ([_]u64{ 0, 1, 9, 10, 999, 1000, 1023, 1024, 1025 }) |offset| {
+            const bytes = unit *| offset;
+            var probe_buf: [24]u8 = undefined;
+            widest = @max(widest, formatHumanSize(bytes, &probe_buf).len);
+        }
+        unit *|= 1024;
+    }
+    var extreme_buf: [24]u8 = undefined;
+    widest = @max(widest, formatHumanSize(std.math.maxInt(u64), &extreme_buf).len);
+    try std.testing.expectEqual(max_entry_size_width, widest);
 
     const current = store.parseTimestamp("2026-08-29T10:14:00.000Z").?;
     const now = store.parseTimestamp("2026-12-01T00:00:00.000Z").?;
@@ -2385,11 +2457,7 @@ fn removeJournal(
     const journal = try store.findUniqueJournal(gpa, io, root, selector);
     defer gpa.free(journal);
 
-    const interactions = try store.listInteractions(gpa, io, root, journal);
-    defer {
-        for (interactions) |info| info.deinit(gpa);
-        gpa.free(interactions);
-    }
+    const entries = try store.countInteractions(gpa, io, root, journal);
     if (!force) {
         var metadata = try annotations.openRead(gpa, io, root, journal);
         defer metadata.deinit(gpa);
@@ -2401,8 +2469,8 @@ fn removeJournal(
         if (!sys.isTty(0)) return error.ConfirmationRequired;
         try out.print("Remove journal {s} with {d} {s}? [y/N] ", .{
             journal,
-            interactions.len,
-            if (interactions.len == 1) "entry" else "entries",
+            entries,
+            if (entries == 1) "entry" else "entries",
         });
         try out.flush();
         var answer_buf: [32]u8 = undefined;

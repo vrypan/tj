@@ -888,52 +888,141 @@ fn directoryLogicalBytes(gpa: std.mem.Allocator, io: Io, dir: Dir) !u64 {
     return total;
 }
 
-/// Interactions of one journal, in numeric order.
+/// Reads one entry's listing facts. Returns null when the directory is gone,
+/// which a concurrent removal can produce between listing numbers and reading
+/// one of them.
+///
+/// Listings render only `firstLine` of a command, truncated to a terminal
+/// width, so reading a whole heredoc to print eighty columns of it is waste.
+/// `command_limit` lets a listing ask for a bounded prefix while `tj cat` and
+/// anything else needing the real command reads it in full elsewhere.
+pub fn readInteraction(
+    gpa: std.mem.Allocator,
+    io: Io,
+    root: Dir,
+    journal: []const u8,
+    number: u32,
+    command_limit: usize,
+) !?InteractionInfo {
+    var path_buf: [64]u8 = undefined;
+    const path = std.fmt.bufPrint(&path_buf, "{s}/{d}", .{ journal, number }) catch return null;
+    var interaction = root.openDir(io, path, .{}) catch |err| switch (err) {
+        error.FileNotFound, error.NotDir => return null,
+        else => |other| return other,
+    };
+    defer interaction.close(io);
+
+    const command = if (command_limit == 0)
+        try gpa.dupe(u8, "")
+    else
+        interaction.readFileAlloc(io, "cmd", gpa, .limited(command_limit)) catch
+            try gpa.dupe(u8, "");
+    errdefer gpa.free(command);
+
+    var out_bytes: u64 = 0;
+    var out_present = false;
+    if (interaction.openFile(io, "out", .{})) |file| {
+        defer file.close(io);
+        out_present = true;
+        out_bytes = file.length(io) catch 0;
+    } else |_| {}
+
+    return .{
+        .number = number,
+        .exit_code = readExitCode(io, interaction),
+        .command = command,
+        .out_bytes = out_bytes,
+        .out_present = out_present,
+    };
+}
+
+/// The whole command, for callers that render more than a listing line.
+pub const full_command_limit = 64 * 1024;
+
+/// Enough to hold the first line of a command at any realistic terminal width.
+/// A longer first line is truncated in listings only.
+pub const listing_command_limit = 4 * 1024;
+
+/// For callers that need an entry's numbers and status but never its command.
+pub const no_command = 0;
+
+/// Yields one interaction at a time in numeric order. Only the entry numbers
+/// stay resident, so peak memory does not grow with a journal's recorded
+/// command sizes. The caller owns each yielded value.
+pub const InteractionIterator = struct {
+    gpa: std.mem.Allocator,
+    io: Io,
+    root: Dir,
+    journal: []const u8,
+    numbers: []u32,
+    index: usize = 0,
+    command_limit: usize,
+
+    pub fn deinit(self: *InteractionIterator) void {
+        self.gpa.free(self.numbers);
+        self.* = undefined;
+    }
+
+    pub fn count(self: *const InteractionIterator) usize {
+        return self.numbers.len;
+    }
+
+    pub fn next(self: *InteractionIterator) !?InteractionInfo {
+        while (self.index < self.numbers.len) {
+            const number = self.numbers[self.index];
+            self.index += 1;
+            if (try readInteraction(
+                self.gpa,
+                self.io,
+                self.root,
+                self.journal,
+                number,
+                self.command_limit,
+            )) |info| return info;
+        }
+        return null;
+    }
+};
+
+pub fn iterateInteractions(
+    gpa: std.mem.Allocator,
+    io: Io,
+    root: Dir,
+    journal: []const u8,
+    command_limit: usize,
+) !InteractionIterator {
+    return .{
+        .gpa = gpa,
+        .io = io,
+        .root = root,
+        .journal = journal,
+        .numbers = try listNumbers(gpa, io, root, journal),
+        .command_limit = command_limit,
+    };
+}
+
+/// How many entries a journal still holds, without reading any of them.
+pub fn countInteractions(gpa: std.mem.Allocator, io: Io, root: Dir, journal: []const u8) !usize {
+    const numbers = try listNumbers(gpa, io, root, journal);
+    defer gpa.free(numbers);
+    return numbers.len;
+}
+
+/// Interactions of one journal, in numeric order. Prefer `iterateInteractions`
+/// unless the whole set genuinely has to be resident at once.
 pub fn listInteractions(gpa: std.mem.Allocator, io: Io, root: Dir, journal: []const u8) ![]InteractionInfo {
-    var dir = try root.openDir(io, journal, .{ .iterate = true });
-    defer dir.close(io);
+    var it = try iterateInteractions(gpa, io, root, journal, full_command_limit);
+    defer it.deinit();
 
     var found: std.ArrayList(InteractionInfo) = .empty;
     errdefer {
         for (found.items) |info| info.deinit(gpa);
         found.deinit(gpa);
     }
-
-    var it = dir.iterate();
-    while (try it.next(io)) |entry| {
-        if (entry.kind != .directory) continue;
-        const number = parseInteractionDirName(entry.name) orelse continue;
-
-        var interaction = try dir.openDir(io, entry.name, .{});
-        defer interaction.close(io);
-
-        const command = interaction.readFileAlloc(io, "cmd", gpa, .limited(64 * 1024)) catch
-            try gpa.dupe(u8, "");
-        errdefer gpa.free(command);
-
-        var out_bytes: u64 = 0;
-        var out_present = false;
-        if (interaction.openFile(io, "out", .{})) |file| {
-            defer file.close(io);
-            out_present = true;
-            out_bytes = file.length(io) catch 0;
-        } else |_| {}
-
-        try found.append(gpa, .{
-            .number = number,
-            .exit_code = readExitCode(io, interaction),
-            .command = command,
-            .out_bytes = out_bytes,
-            .out_present = out_present,
-        });
+    while (try it.next()) |info| {
+        errdefer info.deinit(gpa);
+        try found.append(gpa, info);
     }
-
-    std.mem.sort(InteractionInfo, found.items, {}, struct {
-        fn byNumber(_: void, a: InteractionInfo, b: InteractionInfo) bool {
-            return a.number < b.number;
-        }
-    }.byNumber);
-
     return found.toOwnedSlice(gpa);
 }
 
@@ -956,18 +1045,23 @@ pub fn highestEntryNumber(io: Io, root: Dir, journal: []const u8) !?u32 {
 /// The highest interaction that actually completed. `@-` resolves to this, so
 /// a command reading `@-/out` never picks up the one running it.
 pub fn lastCompleted(gpa: std.mem.Allocator, io: Io, root: Dir, journal: []const u8) !?u32 {
-    const interactions = try listInteractions(gpa, io, root, journal);
-    defer {
-        for (interactions) |info| info.deinit(gpa);
-        gpa.free(interactions);
-    }
+    const numbers = try listNumbers(gpa, io, root, journal);
+    defer gpa.free(numbers);
 
-    var highest: ?u32 = null;
-    for (interactions) |info| {
-        if (info.exit_code == null) continue;
-        if (highest == null or info.number > highest.?) highest = info.number;
+    // The shell integration resolves `@-` for every command line mentioning
+    // it, so walk down from the newest and stop at the first entry that has an
+    // exit code rather than reading the whole journal to sort it.
+    var index = numbers.len;
+    while (index > 0) {
+        index -= 1;
+        const number = numbers[index];
+        var path_buf: [64]u8 = undefined;
+        const path = std.fmt.bufPrint(&path_buf, "{s}/{d}", .{ journal, number }) catch continue;
+        var interaction = root.openDir(io, path, .{}) catch continue;
+        defer interaction.close(io);
+        if (readExitCode(io, interaction) != null) return number;
     }
-    return highest;
+    return null;
 }
 
 fn readExitCode(io: Io, dir: Dir) ?u8 {
