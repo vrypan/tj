@@ -2777,6 +2777,16 @@ test "zsh completion keeps special resource names as one inert argument" {
         return error.CompletionPromptMissing;
     }
 
+    // Expose the exact editable buffer after completion without accepting it.
+    from = out.items.len;
+    try child.write(
+        "_tj_test_buffer() { zle -M \"TJ_BUFFER=${(qqq)BUFFER} CURSOR=$CURSOR\"; }; " ++
+            "zle -N _tj_test_buffer; " ++
+            "bindkey -M emacs '^X^T' _tj_test_buffer; " ++
+            "bindkey -M viins '^X^T' _tj_test_buffer\n",
+    );
+    try std.testing.expect(try child.readUntilFrom(gpa, &out, from, test_prompt, timeout_ms));
+
     // Zecli's generated script owns static command and option completion.
     from = out.items.len;
     try child.write("tj journa");
@@ -2790,21 +2800,31 @@ test "zsh completion keeps special resource names as one inert argument" {
     try std.testing.expect(try child.readUntilFrom(gpa, &out, from, "--tag", timeout_ms));
     try cancelZleLine(gpa, child, &out);
 
+    // A generated command completer must report success after adding matches.
+    // Otherwise zsh retries it for every matcher and prints duplicate groups.
+    from = out.items.len;
+    try child.write(
+        "zstyle ':completion:*' matcher-list '' " ++
+            "'m:{a-zA-Z}={A-Za-z}' 'r:|[._-]=* r:|=*' 'l:|=* r:|=*'\n",
+    );
+    try std.testing.expect(try child.readUntilFrom(gpa, &out, from, test_prompt, timeout_ms));
+    from = out.items.len;
+    try child.write("tj grep -\t\x18\x14");
+    try std.testing.expect(try child.readUntilFrom(gpa, &out, from, "TJ_BUFFER=", timeout_ms));
+    try std.testing.expectEqual(
+        @as(usize, 1),
+        std.mem.count(u8, out.items[from..], "Search every journal"),
+    );
+    try cancelZleLine(gpa, child, &out);
+
     from = out.items.len;
     try child.write("command \"$TJ\" name @1 build-failure\n");
     try std.testing.expect(try child.readUntilFrom(gpa, &out, from, test_prompt, timeout_ms));
 
-    // Expose the two boundaries that matter when this test fails in CI. The
-    // ZLE widget reports the exact editable buffer without accepting it, and
-    // the preexec hook reports the exact command zsh accepted. Keeping these
-    // probes inside the PTY fixture also exercises the runner's real zsh.
+    // Expose preexec's exact command without changing the ZLE probe above.
     from = out.items.len;
     try child.write(
-        "_tj_test_buffer() { zle -M \"TJ_BUFFER=${(qqq)BUFFER} CURSOR=$CURSOR\"; }; " ++
-            "zle -N _tj_test_buffer; " ++
-            "bindkey -M emacs '^X^T' _tj_test_buffer; " ++
-            "bindkey -M viins '^X^T' _tj_test_buffer; " ++
-            "_tj_test_preexec() { print -r -- \"TJ_PREEXEC=${(qqq)1}\" > /dev/tty; }; " ++
+        "_tj_test_preexec() { print -r -- \"TJ_PREEXEC=${(qqq)1}\" > /dev/tty; }; " ++
             "add-zsh-hook preexec _tj_test_preexec\n",
     );
     try std.testing.expect(try child.readUntilFrom(gpa, &out, from, test_prompt, timeout_ms));
