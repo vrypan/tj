@@ -29,6 +29,11 @@ const root_flags = [_]zecli.FlagSpec{
 
 const hist_flags = [_]zecli.FlagSpec{
     .{
+        .name = "pinned",
+        .aliases = &.{"pin"},
+        .description = "Show only pinned entries",
+    },
+    .{
         .name = "tag",
         .value = .string,
         .value_name = "TAG",

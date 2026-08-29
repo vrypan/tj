@@ -592,7 +592,26 @@ Tags are 1-63 ASCII bytes and normalize to lowercase. Their first and last
 bytes are alphanumeric; interior bytes may additionally be `.`, `_`, or `-`.
 Adding an existing tag and removing a missing tag are successful no-ops. Tags
 are stored uniquely and sorted. `tj hist --tag TAG` is repeatable and multiple
-filters use AND semantics.
+filters use AND semantics. `tj hist --pinned`, with `--pin` as an alias,
+restricts history to pinned entries and combines with every tag filter using
+AND semantics.
+
+History renders each entry as:
+
+```text
+[pin] [number] command @name [tags] [rc=N]
+```
+
+The pin and right-aligned number form the left prefix. Name and tags are
+optional suffix metadata, with tags space-separated inside brackets. A nonzero
+exit status follows as `[rc=N]`; status zero and a missing status are omitted.
+On a capable terminal, names and tags are dimmed and a nonzero status is red;
+`NO_COLOR`, `TERM=dumb`, and non-terminal output disable styling.
+
+For terminal output, TJ obtains the width with `TIOCGWINSZ`, reserves the left
+prefix, and word-wraps the command and suffix in the remaining columns.
+Oversized words are hard-wrapped. Continuation lines align with the command.
+Non-terminal output remains one physical line per entry with no ANSI sequences.
 
 A pin is an idempotent boolean annotation. It appears as `*` beside the
 entry number in history. Pins protect entries and their output

@@ -147,14 +147,14 @@ Everything inside behaves as it always did. Check that recording works:
 
 ```sh
 echo hello
-tj hist                   # 1  0  6  -  -  echo hello
+tj hist                   # list journal entries
 tj cat @1                 # hello
 ```
 
 Each command becomes a numbered entry:
 
 ```sh
-tj hist                   # number/pin, status, size, name, tags, command
+tj hist                   # pin, number, command, name, tags, status
 tj journal list           # every journal, newest first
 tj current                # this journal's id
 tj last                   # the last entry that completed
@@ -256,8 +256,12 @@ arguments queries tagged entries in the interval; adding or removing
 tags and pinning or unpinning updates every existing entry atomically.
 
 `tj hist --tag bug --tag parser` shows entries having every requested
-tag. History marks a pin with `*` after the number and shows the name and
-comma-separated tags before the command.
+tag. `tj hist --pinned` (or `--pin`) shows only pinned entries; it combines
+with tag filters using AND semantics. History marks a pin with `*` in the
+left column, then shows the entry number and command. An optional name and
+space-separated tags follow the command as dimmed metadata on capable terminals.
+A nonzero exit status follows them as `[rc=N]`, in red when color is supported.
+Successful and unfinished entries show no status.
 
 Qualified references are read-only. You can read and complete
 `@pgsd.build-failure/out`, but names, tags, pins, and entry/output
@@ -434,8 +438,8 @@ $ pi what does this mean?
 The economics are the reason to read the index first: across one journal
 here, every command and status came to about 340 tokens, while every
 entry's output came to 69,000. The median entry is 185 bytes and
-a handful are 50K, which is what `tj hist`'s size column and `tj cat --tail`
-are for.
+a handful are 50K, which is why `tj hist` should identify the right entry
+before `tj cat --tail` fetches its output.
 
 What the journal cannot supply is intent. It records what happened, not what
 you were trying to do or what you already ruled out — so the prompt still

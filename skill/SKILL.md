@@ -32,13 +32,14 @@ tj hist
 ```
 
 ```
-    1   0      185  -                    -                     git status
-    2*  1      12K  @build-failure       bug,parser            go test ./...
-    3   -      53K  -                    -                     vi parser.go
+     1  git status
+*    2  go test ./... @build-failure [bug parser] [rc=1]
+     3  vi parser.go
 ```
 
-Columns: number (followed by `*` when pinned), exit status, output size,
-entry name, comma-separated tags, and first line of the command.
+Columns: pin, number, and the command followed by optional name, tags, and a
+nonzero exit status. Long commands wrap under the command column on a terminal.
+Names and tags are dimmed and failures are red when color is enabled.
 The whole index is a few hundred tokens even for a long journal. The output
 of a single entry can be 50K. **Read the index first and fetch
 deliberately.**
@@ -102,8 +103,9 @@ Do not do this blindly. If the question stands on its own, answer it. Fetch
 
 ## Reading exit status correctly
 
-- **A `-` in the status column means the entry never finished.** It is
-  in progress or was killed. Never read it as success.
+- `tj hist` shows only nonzero statuses, as `[rc=N]`. No status means either
+  success or an unfinished entry; inspect the entry's `rc` resource when that
+  distinction matters.
 - `rc` is the shell's status for the **whole line**. On a pipeline that is
   the last element, so `curl … | head` reports `0` when `curl` failed. Empty
   output with status `0` on a pipeline is a strong hint that something
@@ -150,6 +152,8 @@ still be an ordinary `@handle`.
 
 Names, tags, and pins are user annotations. Tags can be used to narrow the
 index with repeatable AND filters such as `tj hist --tag bug --tag parser`.
+Use `tj hist --pinned` (or `--pin`) to show only pinned entries; pin and tag
+filters combine with AND semantics.
 Pins imply no retention policy, but protect an entry and its output from
 `tj rm`. Removal ranges skip pinned entries; use `tj rm --force REF` only
 when overriding that protection is deliberate. Whole-journal removal likewise

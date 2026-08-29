@@ -204,6 +204,12 @@ pub fn env(name: [*:0]const u8) ?[]const u8 {
     return if (slice.len == 0) null else slice;
 }
 
+/// Unlike `env`, this distinguishes an empty value from an unset variable.
+/// NO_COLOR uses presence, not contents, as its opt-out signal.
+pub fn envPresent(name: [*:0]const u8) bool {
+    return c.getenv(name) != null;
+}
+
 pub fn setEnv(name: [*:0]const u8, value: [*:0]const u8) void {
     _ = setenv(name, value, 1);
 }

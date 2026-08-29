@@ -168,6 +168,8 @@ test "build-time completions expose only the static cli grammar" {
     try std.testing.expect(std.mem.indexOf(u8, zsh, "'hist:List entries in a journal'") != null);
     try std.testing.expect(std.mem.indexOf(u8, zsh, "_tj__cmd_hist()") != null);
     try std.testing.expect(std.mem.indexOf(u8, zsh, "--tag=[") != null);
+    try std.testing.expect(std.mem.indexOf(u8, zsh, "--pinned") != null);
+    try std.testing.expect(std.mem.indexOf(u8, zsh, "--pin") != null);
     try std.testing.expect(std.mem.indexOf(u8, zsh, "--no-replay[") != null);
     try std.testing.expect(std.mem.indexOf(u8, zsh, "WHEN:(never auto always)") != null);
     try std.testing.expect(std.mem.indexOf(u8, zsh, ":ACTION:(list rm)") != null);
@@ -973,7 +975,7 @@ test "names tags pins and tagged history use journal-local annotations" {
 
     var journal = try Journal.open(gpa);
     defer journal.close();
-    try recordJournal(gpa, &journal, &.{ "echo first-entry", "echo second-entry" });
+    try recordJournal(gpa, &journal, &.{ "echo first-entry", "false # second-entry" });
     try journal.enter(gpa);
     const home = try journal.homeArg(gpa);
     defer gpa.free(home);
@@ -985,6 +987,9 @@ test "names tags pins and tagged history use journal-local annotations" {
     var tagged = try run(gpa, &.{ "--home", home, "tag", "@1", "BUG", "parser", "bug" }, 24, 100);
     defer tagged.out.deinit(gpa);
     try std.testing.expectEqual(@as(u8, 0), tagged.code);
+    var second_tagged = try run(gpa, &.{ "--home", home, "tag", "@2", "bug" }, 24, 100);
+    defer second_tagged.out.deinit(gpa);
+    try std.testing.expectEqual(@as(u8, 0), second_tagged.code);
 
     var pinned = try run(gpa, &.{ "--home", home, "pin", "@1" }, 24, 100);
     defer pinned.out.deinit(gpa);
@@ -1016,6 +1021,23 @@ test "names tags pins and tagged history use journal-local annotations" {
     try std.testing.expect(std.mem.indexOf(u8, filtered.out.items, "first-entry") != null);
     try std.testing.expect(std.mem.indexOf(u8, filtered.out.items, "second-entry") == null);
     try std.testing.expect(std.mem.indexOf(u8, filtered.out.items, "@build-failure") != null);
+    try std.testing.expect(std.mem.indexOf(u8, filtered.out.items, "* 1  echo first-entry") != null);
+    try std.testing.expect(std.mem.indexOf(u8, filtered.out.items, "[bug parser]") != null);
+    try std.testing.expect(std.mem.indexOf(u8, filtered.out.items, "[rc=") == null);
+
+    var history = try run(gpa, &.{ "--home", home, "hist" }, 24, 120);
+    defer history.out.deinit(gpa);
+    try std.testing.expect(std.mem.indexOf(u8, history.out.items, "false # second-entry") != null);
+    try std.testing.expect(std.mem.indexOf(u8, history.out.items, "[rc=1]") != null);
+
+    var pinned_hist = try run(gpa, &.{ "--home", home, "hist", "--pinned" }, 24, 120);
+    defer pinned_hist.out.deinit(gpa);
+    try std.testing.expect(std.mem.indexOf(u8, pinned_hist.out.items, "first-entry") != null);
+    try std.testing.expect(std.mem.indexOf(u8, pinned_hist.out.items, "second-entry") == null);
+    var pin_alias = try run(gpa, &.{ "--home", home, "hist", "--pin", "--tag", "bug" }, 24, 120);
+    defer pin_alias.out.deinit(gpa);
+    try std.testing.expect(std.mem.indexOf(u8, pin_alias.out.items, "first-entry") != null);
+    try std.testing.expect(std.mem.indexOf(u8, pin_alias.out.items, "second-entry") == null);
 
     var duplicate = try run(gpa, &.{ "--home", home, "name", "@2", "build-failure" }, 24, 100);
     defer duplicate.out.deinit(gpa);
@@ -1027,6 +1049,40 @@ test "names tags pins and tagged history use journal-local annotations" {
     var unpin = try run(gpa, &.{ "--home", home, "pin", "--remove", "@1" }, 24, 100);
     defer unpin.out.deinit(gpa);
     try std.testing.expectEqual(@as(u8, 0), unpin.code);
+}
+
+test "history wraps to terminal width and pipes remain one entry per line" {
+    if (!haveZsh()) return error.SkipZigTest;
+    const gpa = std.testing.allocator;
+    const command = "echo one two three four five six seven eight nine ten eleven twelve";
+
+    var journal = try Journal.open(gpa);
+    defer journal.close();
+    try recordJournal(gpa, &journal, &.{command});
+    try journal.enter(gpa);
+    const home = try journal.homeArg(gpa);
+    defer gpa.free(home);
+
+    var wrapped = try run(gpa, &.{ "--home", home, "hist" }, 24, 48);
+    defer wrapped.out.deinit(gpa);
+    try std.testing.expectEqual(@as(u8, 0), wrapped.code);
+    // Removing the fixed status column gives the command seven more cells.
+    try std.testing.expect(std.mem.indexOf(u8, wrapped.out.items, "\r\n     eight") != null);
+    var physical_lines = std.mem.splitScalar(u8, wrapped.out.items, '\n');
+    while (physical_lines.next()) |raw_line| {
+        const line = std.mem.trimEnd(u8, raw_line, "\r");
+        if (line.len != 0) try std.testing.expect(line.len <= 48);
+    }
+
+    const id = try journal.journalName(gpa);
+    defer gpa.free(id);
+    const piped = try runNonTtyInJournal(gpa, &.{ "--home", home, "hist" }, id, "3");
+    defer gpa.free(piped.stdout);
+    defer gpa.free(piped.stderr);
+    try std.testing.expectEqual(@as(u8, 0), piped.term.exited);
+    try std.testing.expect(std.mem.indexOf(u8, piped.stdout, command) != null);
+    try std.testing.expect(std.mem.indexOfScalar(u8, piped.stdout, 0x1b) == null);
+    try std.testing.expectEqual(@as(usize, 2), std.mem.countScalar(u8, piped.stdout, '\n'));
 }
 
 test "tag pin and cat ranges are inclusive and skip numbering holes" {

@@ -415,6 +415,7 @@ fn listInteractions(
         if (!std.mem.eql(u8, flag.name, "tag")) continue;
         try filters.append(gpa, annotations.normalizeTag(gpa, flag.value.?) catch return error.InvalidTag);
     }
+    const pinned_only = parsed.present("pinned");
     const wanted = if (parsed.positionals.items.len == 1) parsed.positionals.items[0] else null;
 
     var journal_owned: ?[]u8 = null;
@@ -439,41 +440,253 @@ fn listInteractions(
         gpa.free(interactions);
     }
 
+    var number_width: usize = 1;
     for (interactions) |info| {
-        if (!manifest.hasAllTags(info.number, filters.items)) continue;
+        if (!historyEntryVisible(&manifest, info.number, filters.items, pinned_only)) continue;
+        number_width = @max(number_width, decimalWidth(info.number));
+    }
+
+    const columns = historyTerminalColumns();
+    const prefix_width = 1 + 1 + number_width + 2;
+    const payload_width: ?usize = if (columns) |value|
+        if (value > prefix_width)
+            value - prefix_width
+        else
+            1
+    else
+        null;
+    const color_enabled = historyColorEnabled();
+
+    for (interactions) |info| {
         const annotation = manifest.findConst(info.number);
-        // A missing status means the interaction never finished; it must not
-        // be shown as if it succeeded.
-        var status_buf: [8]u8 = undefined;
-        const status = if (info.exit_code) |code|
-            std.fmt.bufPrint(&status_buf, "{d}", .{code}) catch "?"
-        else
-            "-";
-        var size_buf: [8]u8 = undefined;
-        var name_buf: [80]u8 = undefined;
-        const name = if (annotation) |entry|
-            if (entry.name) |value| std.fmt.bufPrint(&name_buf, "@{s}", .{value}) catch "-" else "-"
-        else
-            "-";
-        var tags_text: std.ArrayList(u8) = .empty;
-        defer tags_text.deinit(gpa);
-        if (annotation) |entry| {
-            for (entry.tags.items, 0..) |tag, tag_i| {
-                if (tag_i != 0) try tags_text.append(gpa, ',');
-                try tags_text.appendSlice(gpa, tag);
+        if (!historyEntryVisible(&manifest, info.number, filters.items, pinned_only)) continue;
+
+        var payload: std.ArrayList(u8) = .empty;
+        defer payload.deinit(gpa);
+        try payload.appendSlice(gpa, firstLine(info.command));
+
+        var dim_start: ?usize = null;
+        var rc_start: ?usize = null;
+        const has_name = annotation != null and annotation.?.name != null;
+        const has_tags = annotation != null and annotation.?.tags.items.len != 0;
+        const has_failure = info.exit_code != null and info.exit_code.? != 0;
+        if (has_name or has_tags or has_failure) {
+            if (payload.items.len != 0) try payload.append(gpa, ' ');
+            if (has_name or has_tags) dim_start = payload.items.len;
+            if (has_name) {
+                try payload.append(gpa, '@');
+                try payload.appendSlice(gpa, annotation.?.name.?);
+            }
+            if (has_tags) {
+                if (has_name) try payload.append(gpa, ' ');
+                try payload.append(gpa, '[');
+                for (annotation.?.tags.items, 0..) |tag, tag_i| {
+                    if (tag_i != 0) try payload.append(gpa, ' ');
+                    try payload.appendSlice(gpa, tag);
+                }
+                try payload.append(gpa, ']');
+            }
+            if (has_failure) {
+                if (has_name or has_tags) try payload.append(gpa, ' ');
+                rc_start = payload.items.len;
+                try payload.print(gpa, "[rc={d}]", .{info.exit_code.?});
             }
         }
-        const tags = if (tags_text.items.len == 0) "-" else tags_text.items;
-        try out.print("{d: >5}{s}  {s: <3}  {s: >5}  {s: <20}  {s: <20}  {s}\n", .{
-            info.number,
-            if (annotation != null and annotation.?.pinned) "*" else " ",
-            status,
-            humanSize(info.out_bytes, &size_buf),
-            name,
-            tags,
-            firstLine(info.command),
-        });
+
+        var lines = try wrapHistoryText(gpa, payload.items, payload_width, prefix_width);
+        defer lines.deinit(gpa);
+
+        for (lines.items, 0..) |line, line_i| {
+            if (line_i == 0) {
+                try out.writeByte(if (annotation != null and annotation.?.pinned) '*' else ' ');
+                try out.writeByte(' ');
+                try out.splatByteAll(' ', number_width - decimalWidth(info.number));
+                try out.print("{d}  ", .{info.number});
+            } else {
+                try out.splatByteAll(' ', prefix_width);
+            }
+
+            try writeHistoryLine(out, payload.items, line, dim_start, rc_start, color_enabled);
+            try out.writeByte('\n');
+        }
     }
+}
+
+fn historyEntryVisible(
+    manifest: *const annotations.Manifest,
+    number: u32,
+    tags: []const []const u8,
+    pinned_only: bool,
+) bool {
+    const annotation = manifest.findConst(number);
+    if (pinned_only and (annotation == null or !annotation.?.pinned)) return false;
+    return manifest.hasAllTags(number, tags);
+}
+
+fn decimalWidth(number: u32) usize {
+    var value = number;
+    var width: usize = 1;
+    while (value >= 10) : (value /= 10) width += 1;
+    return width;
+}
+
+fn historyTerminalColumns() ?usize {
+    if (!sys.isTty(1)) return null;
+    if (sys.getWinsize(1)) |size| {
+        if (size.col != 0) return size.col;
+    } else |_| {}
+    if (sys.env("COLUMNS")) |text| {
+        const columns = std.fmt.parseInt(usize, text, 10) catch 0;
+        if (columns != 0) return columns;
+    }
+    return 80;
+}
+
+fn historyColorEnabled() bool {
+    if (!sys.isTty(1) or sys.envPresent("NO_COLOR")) return false;
+    const term = sys.env("TERM") orelse return false;
+    return !std.mem.eql(u8, term, "dumb");
+}
+
+const HistoryLine = struct { start: usize, end: usize };
+
+fn historyCell(text: []const u8, index: usize, column: usize) struct { bytes: usize, width: usize } {
+    const byte = text[index];
+    if (byte == '\t') return .{ .bytes = 1, .width = 8 - (column % 8) };
+    if (byte < 0x20 or byte == 0x7f) return .{ .bytes = 1, .width = 0 };
+    if (byte < 0x80) return .{ .bytes = 1, .width = 1 };
+    const sequence_len: usize = std.unicode.utf8ByteSequenceLength(byte) catch return .{ .bytes = 1, .width = 1 };
+    if (index + sequence_len > text.len) return .{ .bytes = 1, .width = 1 };
+    _ = std.unicode.utf8Decode(text[index .. index + sequence_len]) catch return .{ .bytes = 1, .width = 1 };
+    return .{ .bytes = sequence_len, .width = 1 };
+}
+
+fn wrapHistoryText(
+    gpa: std.mem.Allocator,
+    text: []const u8,
+    width: ?usize,
+    start_column: usize,
+) !std.ArrayList(HistoryLine) {
+    var lines: std.ArrayList(HistoryLine) = .empty;
+    errdefer lines.deinit(gpa);
+    if (text.len == 0 or width == null) {
+        try lines.append(gpa, .{ .start = 0, .end = text.len });
+        return lines;
+    }
+
+    const available = @max(width.?, 1);
+    var start: usize = 0;
+    while (start < text.len) {
+        var index = start;
+        var column = start_column;
+        var last_space: ?usize = null;
+        while (index < text.len) {
+            const cell = historyCell(text, index, column);
+            if (column + cell.width > start_column + available) {
+                if (text[index] == ' ' or text[index] == '\t') last_space = index;
+                break;
+            }
+            if (text[index] == ' ' or text[index] == '\t') last_space = index;
+            index += cell.bytes;
+            column += cell.width;
+        }
+
+        if (index == text.len) {
+            try lines.append(gpa, .{ .start = start, .end = text.len });
+            break;
+        }
+
+        var end: usize = undefined;
+        var next: usize = undefined;
+        if (last_space != null and last_space.? > start) {
+            end = last_space.?;
+            while (end > start and text[end - 1] == ' ') end -= 1;
+            next = last_space.? + 1;
+            while (next < text.len and (text[next] == ' ' or text[next] == '\t')) next += 1;
+        } else if (index > start) {
+            end = index;
+            next = index;
+        } else {
+            const cell = historyCell(text, start, start_column);
+            end = start + cell.bytes;
+            next = end;
+        }
+        try lines.append(gpa, .{ .start = start, .end = end });
+        start = next;
+    }
+    return lines;
+}
+
+fn writeHistoryLine(
+    out: *Io.Writer,
+    text: []const u8,
+    line: HistoryLine,
+    dim_start: ?usize,
+    rc_start: ?usize,
+    color_enabled: bool,
+) !void {
+    if (!color_enabled) return out.writeAll(text[line.start..line.end]);
+
+    var position = line.start;
+    if (dim_start) |start| {
+        const styled_start = @max(line.start, start);
+        const styled_end = @min(line.end, rc_start orelse line.end);
+        if (position < @min(styled_start, line.end)) {
+            try out.writeAll(text[position..@min(styled_start, line.end)]);
+            position = @min(styled_start, line.end);
+        }
+        if (styled_start < styled_end) {
+            try out.writeAll("\x1b[2m");
+            try out.writeAll(text[styled_start..styled_end]);
+            try out.writeAll("\x1b[0m");
+            position = styled_end;
+        }
+    }
+    if (rc_start) |start| {
+        const styled_start = @max(line.start, start);
+        if (position < @min(styled_start, line.end)) {
+            try out.writeAll(text[position..@min(styled_start, line.end)]);
+            position = @min(styled_start, line.end);
+        }
+        if (styled_start < line.end) {
+            try out.writeAll("\x1b[31m");
+            try out.writeAll(text[styled_start..line.end]);
+            try out.writeAll("\x1b[0m");
+            position = line.end;
+        }
+    }
+    if (position < line.end) try out.writeAll(text[position..line.end]);
+}
+
+test "history wrapping prefers words and hard-wraps oversized words" {
+    const gpa = std.testing.allocator;
+    var words = try wrapHistoryText(gpa, "alpha beta gamma", 10, 0);
+    defer words.deinit(gpa);
+    try std.testing.expectEqual(@as(usize, 2), words.items.len);
+    try std.testing.expectEqualStrings("alpha beta", "alpha beta gamma"[words.items[0].start..words.items[0].end]);
+    try std.testing.expectEqualStrings("gamma", "alpha beta gamma"[words.items[1].start..words.items[1].end]);
+
+    var hard = try wrapHistoryText(gpa, "abcdefgh", 3, 0);
+    defer hard.deinit(gpa);
+    try std.testing.expectEqual(@as(usize, 3), hard.items.len);
+    try std.testing.expectEqualStrings("abc", "abcdefgh"[hard.items[0].start..hard.items[0].end]);
+    try std.testing.expectEqualStrings("def", "abcdefgh"[hard.items[1].start..hard.items[1].end]);
+    try std.testing.expectEqualStrings("gh", "abcdefgh"[hard.items[2].start..hard.items[2].end]);
+}
+
+test "history dims annotations and renders failures in red" {
+    const gpa = std.testing.allocator;
+    const text = "false @build [bug] [rc=1]";
+    var bytes: std.ArrayList(u8) = .empty;
+    defer bytes.deinit(gpa);
+    var writer = Io.Writer.Allocating.fromArrayList(gpa, &bytes);
+    defer bytes = writer.toArrayList();
+
+    try writeHistoryLine(&writer.writer, text, .{ .start = 0, .end = text.len }, 6, 19, true);
+    try std.testing.expectEqualStrings(
+        "false \x1b[2m@build [bug] \x1b[0m\x1b[31m[rc=1]\x1b[0m",
+        writer.writer.buffered(),
+    );
 }
 
 fn printLast(gpa: std.mem.Allocator, io: Io, home: ?[]const u8, out: *Io.Writer) !void {
@@ -485,23 +698,6 @@ fn printLast(gpa: std.mem.Allocator, io: Io, home: ?[]const u8, out: *Io.Writer)
     const number = try store.lastCompleted(gpa, io, root, journal) orelse
         return error.NothingRecorded;
     try out.print("{d}\n", .{number});
-}
-
-/// Sizes are for judging at a glance whether an output is worth fetching, so
-/// three significant characters is plenty.
-fn humanSize(bytes: u64, buf: []u8) []const u8 {
-    if (bytes < 1024) return std.fmt.bufPrint(buf, "{d}", .{bytes}) catch "?";
-    if (bytes < 1024 * 1024) return std.fmt.bufPrint(buf, "{d}K", .{bytes / 1024}) catch "?";
-    return std.fmt.bufPrint(buf, "{d}M", .{bytes / (1024 * 1024)}) catch "?";
-}
-
-test "sizes read at a glance" {
-    var buf: [8]u8 = undefined;
-    try std.testing.expectEqualStrings("0", humanSize(0, &buf));
-    try std.testing.expectEqualStrings("185", humanSize(185, &buf));
-    try std.testing.expectEqualStrings("1K", humanSize(1024, &buf));
-    try std.testing.expectEqualStrings("53K", humanSize(54418, &buf));
-    try std.testing.expectEqualStrings("2M", humanSize(2 * 1024 * 1024, &buf));
 }
 
 /// Multi-line commands are real; a listing shows only the first line of one.
