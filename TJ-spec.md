@@ -664,6 +664,12 @@ Oversized words are hard-wrapped. When stdout is a terminal and a current
 journal exists, history lazily encloses the listing in one OSC 5107 noout
 region. No markers are emitted when filters select no entries. Redirected or
 piped history is one physical line per entry, with no styling or OSC markers.
+Before layout, recorded command text is sanitized as untrusted terminal input:
+escape sequences, unsafe control bytes, and encoded C1 controls are removed;
+horizontal tab and valid UTF-8 are preserved, and malformed UTF-8 is replaced.
+Width calculation, wrapping, and styling operate only on that safe text. ANSI
+sequences emitted by history itself are therefore the only terminal controls
+in the rendered listing.
 
 `tj usage` reports the current journal's total logical byte length, formatted
 with the same base-1024 `b`, `k`, `M`, `G`, and larger suffixes as history.
@@ -854,7 +860,10 @@ cross a newline. Each matching source line is emitted once even if it contains
 the literal more than once. Matching operates on original stored bytes. For
 presentation, a terminal line-ending carriage return and leading or trailing
 horizontal whitespace are omitted, while internal spaces and tabs collapse to
-one space. Other source bytes are preserved. Results use history's row grammar:
+one space. Stored escape sequences, C0/C1 controls, DEL, and malformed UTF-8
+are removed or replaced before output; other valid UTF-8 is preserved.
+Match highlighting is added after this boundary, so only TJ-generated SGR can
+reach the result stream. Results use history's row grammar:
 
 ``` text
 *@#! 42 < matching source line @name #tag !1

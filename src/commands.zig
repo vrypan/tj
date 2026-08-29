@@ -218,26 +218,32 @@ const GrepOutput = struct {
     reference_width: usize,
 };
 
-/// Grep is a discovery view rather than a byte-for-byte resource renderer.
-/// Normalize horizontal whitespace without buffering a source line: leading
-/// and trailing runs disappear, and an internal run is emitted lazily as one
-/// space when the next visible byte arrives. Terminal control sequences pass
-/// through and do not count as content.
+/// Stored commands and output are untrusted terminal input. Strip terminal
+/// controls before they reach a report while optionally normalizing horizontal
+/// whitespace for grep. TJ's own SGR styling bypasses this writer.
 const GrepNormalizeWriter = struct {
     downstream: *Io.Writer,
     interface: Io.Writer,
+    collapse_whitespace: bool,
     seen_content: bool = false,
     pending_space: bool = false,
-    escape: enum { normal, esc, csi, string, string_esc } = .normal,
+    escape: enum { normal, esc, csi, string, string_esc, charset } = .normal,
+    utf8: [4]u8 = undefined,
+    utf8_len: usize = 0,
+    utf8_expected: usize = 0,
 
-    fn init(downstream: *Io.Writer) GrepNormalizeWriter {
+    fn init(downstream: *Io.Writer, collapse_whitespace: bool) GrepNormalizeWriter {
         return .{
             .downstream = downstream,
+            .collapse_whitespace = collapse_whitespace,
             .interface = .{ .vtable = &.{ .drain = drain }, .buffer = &.{} },
         };
     }
 
-    fn finish(self: *GrepNormalizeWriter) void {
+    fn finish(self: *GrepNormalizeWriter) Io.Writer.Error!void {
+        if (self.utf8_expected != 0) try self.emitReplacement();
+        self.utf8_len = 0;
+        self.utf8_expected = 0;
         self.pending_space = false;
     }
 
@@ -255,50 +261,122 @@ const GrepNormalizeWriter = struct {
     }
 
     fn writeByte(self: *GrepNormalizeWriter, byte: u8) Io.Writer.Error!void {
+        if (self.utf8_expected != 0) return self.writeUtf8Continuation(byte);
         switch (self.escape) {
             .normal => {
                 if (byte == 0x1b) {
                     self.escape = .esc;
-                    return self.downstream.writeByte(byte);
-                }
-                if (byte == ' ' or byte == '\t') {
-                    if (self.seen_content) self.pending_space = true;
                     return;
                 }
-                if (byte >= 0x20 and byte != 0x7f) {
-                    if (self.pending_space) try self.downstream.writeByte(' ');
-                    self.pending_space = false;
-                    self.seen_content = true;
+                if (byte == ' ' or byte == '\t' or byte == '\r' or byte == 0x0b or byte == 0x0c) {
+                    try self.writeWhitespace(byte);
+                    return;
                 }
-                try self.downstream.writeByte(byte);
+                if (byte < 0x20 or byte == 0x7f) return;
+                if (byte >= 0x80) {
+                    try self.writeHighByte(byte);
+                    return;
+                }
+                try self.emitVisible(&.{byte});
             },
             .esc => {
-                try self.downstream.writeByte(byte);
                 self.escape = switch (byte) {
                     '[' => .csi,
-                    ']', 'P', '^', '_' => .string,
+                    ']', 'P', 'X', '^', '_' => .string,
+                    '(', ')', '*', '+' => .charset,
                     else => .normal,
                 };
             },
             .csi => {
-                try self.downstream.writeByte(byte);
                 if (byte >= 0x40 and byte <= 0x7e) self.escape = .normal;
             },
             .string => {
-                try self.downstream.writeByte(byte);
-                if (byte == 0x07) {
+                if (byte == 0x07 or byte == 0x9c) {
                     self.escape = .normal;
                 } else if (byte == 0x1b) {
                     self.escape = .string_esc;
                 }
             },
             .string_esc => {
-                try self.downstream.writeByte(byte);
                 self.escape = if (byte == '\\') .normal else if (byte == 0x1b) .string_esc else .string;
             },
+            .charset => self.escape = .normal,
         }
     }
+
+    fn writeWhitespace(self: *GrepNormalizeWriter, byte: u8) Io.Writer.Error!void {
+        if (self.collapse_whitespace) {
+            if (self.seen_content) self.pending_space = true;
+            return;
+        }
+        try self.downstream.writeByte(if (byte == ' ' or byte == '\t') byte else ' ');
+        self.seen_content = true;
+    }
+
+    fn writeHighByte(self: *GrepNormalizeWriter, byte: u8) Io.Writer.Error!void {
+        if (byte >= 0x80 and byte <= 0x9f) {
+            self.escape = switch (byte) {
+                0x90, 0x98, 0x9d, 0x9e, 0x9f => .string,
+                0x9b => .csi,
+                else => .normal,
+            };
+            return;
+        }
+        const expected: usize = std.unicode.utf8ByteSequenceLength(byte) catch {
+            try self.emitReplacement();
+            return;
+        };
+        self.utf8[0] = byte;
+        self.utf8_len = 1;
+        self.utf8_expected = expected;
+    }
+
+    fn writeUtf8Continuation(self: *GrepNormalizeWriter, byte: u8) Io.Writer.Error!void {
+        if (byte < 0x80 or byte > 0xbf) {
+            try self.emitReplacement();
+            self.utf8_len = 0;
+            self.utf8_expected = 0;
+            return self.writeByte(byte);
+        }
+        self.utf8[self.utf8_len] = byte;
+        self.utf8_len += 1;
+        if (self.utf8_len != self.utf8_expected) return;
+
+        const bytes = self.utf8[0..self.utf8_len];
+        const codepoint = std.unicode.utf8Decode(bytes) catch {
+            self.utf8_len = 0;
+            self.utf8_expected = 0;
+            try self.emitReplacement();
+            return;
+        };
+        self.utf8_len = 0;
+        self.utf8_expected = 0;
+        if (codepoint >= 0x80 and codepoint <= 0x9f) return;
+        try self.emitVisible(bytes);
+    }
+
+    fn emitVisible(self: *GrepNormalizeWriter, bytes: []const u8) Io.Writer.Error!void {
+        if (self.pending_space) try self.downstream.writeByte(' ');
+        self.pending_space = false;
+        self.seen_content = true;
+        try self.downstream.writeAll(bytes);
+    }
+
+    fn emitReplacement(self: *GrepNormalizeWriter) Io.Writer.Error!void {
+        try self.emitVisible("\xef\xbf\xbd");
+    }
 };
+
+fn sanitizeDisplayText(gpa: std.mem.Allocator, text: []const u8) ![]u8 {
+    var bytes: std.ArrayList(u8) = .empty;
+    errdefer bytes.deinit(gpa);
+    var downstream = Io.Writer.Allocating.fromArrayList(gpa, &bytes);
+    defer bytes = downstream.toArrayList();
+    var sanitized = GrepNormalizeWriter.init(&downstream.writer, false);
+    try sanitized.interface.writeAll(text);
+    try sanitized.finish();
+    return downstream.toOwnedSlice();
+}
 
 const GrepWindow = struct {
     start: u64,
@@ -451,7 +529,7 @@ const GrepLineSink = struct {
             }
         }
         if (window.leading_ellipsis) try writer.writeAll("…");
-        var normalized = GrepNormalizeWriter.init(writer);
+        var normalized = GrepNormalizeWriter.init(writer, true);
         try search.copyHighlightedSpan(
             self.output.io,
             file,
@@ -459,9 +537,10 @@ const GrepLineSink = struct {
             window.end,
             self.matcher,
             self.output.match_sgr,
+            writer,
             &normalized.interface,
         );
-        normalized.finish();
+        try normalized.finish();
 
         if (window.trailing_ellipsis) try writer.writeAll("…");
         try self.writeMetadata(writer);
@@ -571,20 +650,36 @@ test "terminal grep emits one width-bounded row containing the match" {
     try std.testing.expectEqualStrings("     1 < …89MATCHab…\n", writer.writer.buffered());
 }
 
-test "grep display normalizes horizontal whitespace without touching control sequences" {
+test "grep display normalizes whitespace and strips terminal controls" {
     const gpa = std.testing.allocator;
-    var bytes: std.ArrayList(u8) = .empty;
-    defer bytes.deinit(gpa);
-    var downstream = Io.Writer.Allocating.fromArrayList(gpa, &bytes);
-    defer bytes = downstream.toArrayList();
-    var normalized = GrepNormalizeWriter.init(&downstream.writer);
+    const input = " \talpha   beta\t \x1b[31mgamma\x1b[0m\rdelta " ++
+        "\x1b]0;PWNED\x07tail\x01 \xf0\x9f\x98\x80 \x9b2J";
+    for ([_]usize{ 1, 2, 3, 64 }) |chunk_size| {
+        var bytes: std.ArrayList(u8) = .empty;
+        defer bytes.deinit(gpa);
+        var downstream = Io.Writer.Allocating.fromArrayList(gpa, &bytes);
+        defer bytes = downstream.toArrayList();
+        var normalized = GrepNormalizeWriter.init(&downstream.writer, true);
 
-    try normalized.interface.writeAll(" \talpha   beta\t \x1b[31mgamma   \x1b[0m");
-    normalized.finish();
-    try std.testing.expectEqualStrings(
-        "alpha beta\x1b[31m gamma\x1b[0m",
-        downstream.writer.buffered(),
-    );
+        var offset: usize = 0;
+        while (offset < input.len) {
+            const end = @min(offset + chunk_size, input.len);
+            try normalized.interface.writeAll(input[offset..end]);
+            offset = end;
+        }
+        try normalized.finish();
+        try std.testing.expectEqualStrings(
+            "alpha beta gamma delta tail \xf0\x9f\x98\x80",
+            downstream.writer.buffered(),
+        );
+    }
+}
+
+test "history display sanitization preserves ordinary spacing" {
+    const gpa = std.testing.allocator;
+    const sanitized = try sanitizeDisplayText(gpa, "echo\tbefore\x1b[2Jafter\rnext\x01");
+    defer gpa.free(sanitized);
+    try std.testing.expectEqualStrings("echo\tbeforeafter next", sanitized);
 }
 
 fn journalDisplaySuffix(journal: []const u8) []const u8 {
@@ -1034,7 +1129,9 @@ fn listInteractions(
 
         var payload: std.ArrayList(u8) = .empty;
         defer payload.deinit(gpa);
-        try payload.appendSlice(gpa, firstLine(info.command));
+        const command = try sanitizeDisplayText(gpa, firstLine(info.command));
+        defer gpa.free(command);
+        try payload.appendSlice(gpa, command);
 
         var metadata_start: ?usize = null;
         var rc_start: ?usize = null;

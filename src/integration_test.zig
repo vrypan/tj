@@ -3167,6 +3167,59 @@ test "native grep all qualifies journal suffixes and orders newest first" {
     try std.testing.expectEqualStrings(expected, result.stdout);
 }
 
+test "history and grep never replay stored terminal controls" {
+    const gpa = std.testing.allocator;
+    const io = std.testing.io;
+    var scratch = try Scratch.open();
+    defer scratch.close();
+
+    const id = ulid.encode(48, .{8} ** 10);
+    try scratch.makeJournal(id, &.{"1"});
+    var journal = try scratch.tmp.dir.openDir(io, &id, .{});
+    defer journal.close(io);
+    const dangerous = "needle before\x1b[2J\x1b[Hneedle after\rneedle title\x1b]0;PWNED\x07 tail\x01";
+    try journal.writeFile(io, .{ .sub_path = "1/cmd", .data = dangerous });
+    try journal.writeFile(io, .{ .sub_path = "1/out", .data = dangerous ++ "\n" });
+    try journal.writeFile(io, .{ .sub_path = "1/rc", .data = "0\n" });
+
+    const history = try runNonTtyInJournal(gpa, &.{ "--home", scratch.path(), "hist" }, &id, "3");
+    defer gpa.free(history.stdout);
+    defer gpa.free(history.stderr);
+    try std.testing.expectEqual(@as(u8, 0), history.term.exited);
+    try expectSafeStoredReport(history.stdout);
+    try std.testing.expect(std.mem.indexOf(u8, history.stdout, "needle beforeneedle after needle title tail") != null);
+
+    const grep = try runNonTtyInJournal(gpa, &.{ "--home", scratch.path(), "grep", "needle" }, &id, "3");
+    defer gpa.free(grep.stdout);
+    defer gpa.free(grep.stderr);
+    try std.testing.expectEqual(@as(u8, 0), grep.term.exited);
+    try expectSafeStoredReport(grep.stdout);
+    try std.testing.expect(std.mem.indexOf(u8, grep.stdout, "needle beforeneedle after needle title tail") != null);
+
+    const colored = try runNonTtyInJournal(
+        gpa,
+        &.{ "--home", scratch.path(), "grep", "--color", "always", "needle" },
+        &id,
+        "3",
+    );
+    defer gpa.free(colored.stdout);
+    defer gpa.free(colored.stderr);
+    try std.testing.expectEqual(@as(u8, 0), colored.term.exited);
+    try std.testing.expect(std.mem.indexOf(u8, colored.stdout, "\x1b[01;31mneedle\x1b[m") != null);
+    try std.testing.expect(std.mem.indexOf(u8, colored.stdout, "\x1b[2J") == null);
+    try std.testing.expect(std.mem.indexOf(u8, colored.stdout, "\x1b]0;") == null);
+    try std.testing.expect(std.mem.indexOf(u8, colored.stdout, "PWNED") == null);
+}
+
+fn expectSafeStoredReport(bytes: []const u8) !void {
+    try std.testing.expect(std.mem.indexOfScalar(u8, bytes, 0x1b) == null);
+    try std.testing.expect(std.mem.indexOfScalar(u8, bytes, '\r') == null);
+    try std.testing.expect(std.mem.indexOfScalar(u8, bytes, 0x01) == null);
+    try std.testing.expect(std.mem.indexOfScalar(u8, bytes, 0x7f) == null);
+    try std.testing.expect(std.mem.indexOfScalar(u8, bytes, 0x9b) == null);
+    try std.testing.expect(std.mem.indexOf(u8, bytes, "PWNED") == null);
+}
+
 test "terminal native grep omits its results while redirected output stays plain" {
     if (!haveZsh()) return error.SkipZigTest;
     const gpa = std.testing.allocator;

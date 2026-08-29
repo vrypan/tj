@@ -152,8 +152,10 @@ pub fn copySpan(io: Io, file: Io.File, start: u64, end: u64, out: *Io.Writer) !v
 }
 
 /// Copies a matching line while surrounding every non-overlapping match with
-/// SGR sequences. The line is rescanned positionally, so memory remains fixed
-/// even when one source line is very large.
+/// SGR sequences. Source bytes go to `content_out`, while trusted highlighting
+/// goes directly to `out`, allowing callers to sanitize stored content without
+/// stripping their own styling. The line is rescanned positionally, so memory
+/// remains fixed even when one source line is very large.
 pub fn copyHighlightedSpan(
     io: Io,
     file: Io.File,
@@ -162,9 +164,10 @@ pub fn copyHighlightedSpan(
     matcher: *const Matcher,
     sgr: []const u8,
     out: *Io.Writer,
+    content_out: *Io.Writer,
 ) !void {
     if (end < start) return error.InvalidOffset;
-    if (sgr.len == 0) return copySpan(io, file, start, end, out);
+    if (sgr.len == 0) return copySpan(io, file, start, end, content_out);
 
     var buffer: [chunk_size]u8 = undefined;
     var read_offset = start;
@@ -185,11 +188,11 @@ pub fn copyHighlightedSpan(
 
             const match_end = try std.math.add(u64, read_offset, i + 1);
             const match_start = try std.math.sub(u64, match_end, matcher.pattern.len);
-            try copySpan(io, file, emitted_until, match_start, out);
+            try copySpan(io, file, emitted_until, match_start, content_out);
             try out.writeAll("\x1b[");
             try out.writeAll(sgr);
             try out.writeAll("m");
-            try copySpan(io, file, match_start, match_end, out);
+            try copySpan(io, file, match_start, match_end, content_out);
             try out.writeAll("\x1b[m");
             emitted_until = match_end;
             // GNU grep reports non-overlapping matches.
@@ -197,7 +200,7 @@ pub fn copyHighlightedSpan(
         }
         read_offset = try std.math.add(u64, read_offset, n);
     }
-    try copySpan(io, file, emitted_until, end, out);
+    try copySpan(io, file, emitted_until, end, content_out);
 }
 
 fn fold(byte: u8, ignore_case: bool) u8 {
@@ -327,7 +330,7 @@ test "highlighted copying finds non-overlapping matches across chunk boundaries"
     defer matcher.deinit();
     var bytes: std.ArrayList(u8) = .empty;
     var writer = Io.Writer.Allocating.fromArrayList(gpa, &bytes);
-    try copyHighlightedSpan(io, file, 0, text.len, &matcher, "4;31", &writer.writer);
+    try copyHighlightedSpan(io, file, 0, text.len, &matcher, "4;31", &writer.writer, &writer.writer);
     bytes = writer.toArrayList();
     defer bytes.deinit(gpa);
     const highlighted = "\x1b[4;31mNeedle\x1b[m \x1b[4;31mneedle\x1b[m aaa";
@@ -338,7 +341,16 @@ test "highlighted copying finds non-overlapping matches across chunk boundaries"
     defer overlap_matcher.deinit();
     var overlap: std.ArrayList(u8) = .empty;
     var overlap_writer = Io.Writer.Allocating.fromArrayList(gpa, &overlap);
-    try copyHighlightedSpan(io, file, text.len - 3, text.len, &overlap_matcher, "1", &overlap_writer.writer);
+    try copyHighlightedSpan(
+        io,
+        file,
+        text.len - 3,
+        text.len,
+        &overlap_matcher,
+        "1",
+        &overlap_writer.writer,
+        &overlap_writer.writer,
+    );
     overlap = overlap_writer.toArrayList();
     defer overlap.deinit(gpa);
     try std.testing.expectEqualStrings("\x1b[1maa\x1b[ma", overlap.items);
