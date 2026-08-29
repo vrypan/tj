@@ -256,7 +256,7 @@ pub const Store = struct {
         if (self.current != null) self.finish(null);
 
         const number = self.next_number orelse {
-            self.warn("journal has no interaction numbers left", .{});
+            self.warn("journal has no entry numbers left", .{});
             self.disabled = true;
             return;
         };
@@ -266,7 +266,7 @@ pub const Store = struct {
 
         const prompt = if (self.prompt_state == .ready) self.pending_prompt.items else null;
         self.beginFallible(number, name, cmd, expanded, prompt) catch |err| {
-            self.warn("cannot start interaction {s}: {t}", .{ name, err });
+            self.warn("cannot start entry {s}: {t}", .{ name, err });
             self.disable();
         };
     }
@@ -376,7 +376,7 @@ pub const Store = struct {
         if (self.disabled) return;
         const current = &(self.current orelse {
             // Printed by precmd, or by something outside any command.
-            self.warn("resource {s} published with no interaction open", .{path});
+            self.warn("resource {s} published with no entry open", .{path});
             return;
         });
 
@@ -498,7 +498,7 @@ pub const Store = struct {
     pub fn beginNoout(self: *Store) void {
         if (self.disabled) return;
         const current = &(self.current orelse {
-            self.warn("noout region opened with no interaction open", .{});
+            self.warn("noout region opened with no entry open", .{});
             return;
         });
         if (current.open_region != null) {
@@ -1341,7 +1341,7 @@ fn writeJsonAtomic(
     renamed = true;
 }
 
-pub fn removeJournal(io: Io, root: Dir, journal: []const u8) !void {
+pub fn removeJournal(gpa: std.mem.Allocator, io: Io, root: Dir, journal: []const u8, force: bool) !void {
     const lock = acquireJournalLock(io, root, journal) catch |err| switch (err) {
         error.JournalLocked => return error.ActiveJournal,
         else => return err,
@@ -1351,6 +1351,12 @@ pub fn removeJournal(io: Io, root: Dir, journal: []const u8) !void {
     const mutation_lock = try annotations.acquireMutationLock(io, root, journal);
     var mutation_lock_open = true;
     defer if (mutation_lock_open) mutation_lock.close(io);
+
+    if (!force) {
+        var manifest = try annotations.load(gpa, io, root, journal);
+        defer manifest.deinit(gpa);
+        if (manifest.hasPins()) return error.PinnedInteraction;
+    }
 
     var journal_dir = try root.openDir(io, journal, .{ .follow_symlinks = false });
     journal_dir.close(io);
@@ -1548,7 +1554,7 @@ test "tj's bookkeeping files are not part of the namespace" {
     try std.testing.expect(!isPrivate("files"));
 }
 
-test "a rendered prompt belongs to the next interaction" {
+test "a rendered prompt belongs to the next entry" {
     const io = std.testing.io;
     const gpa = std.testing.allocator;
     var tmp = std.testing.tmpDir(.{});
@@ -1693,7 +1699,7 @@ test "region nesting is refused and the first open region wins" {
     store.close();
 }
 
-test "an unfinished noout region is reset at the interaction boundary" {
+test "an unfinished noout region is reset at the entry boundary" {
     const io = std.testing.io;
     const gpa = std.testing.allocator;
     var tmp = std.testing.tmpDir(.{});
@@ -1949,7 +1955,7 @@ test "metadata preserves every accepted resource beyond eight kibibytes" {
     }
 }
 
-test "output removal redacts out and published resources but keeps the interaction" {
+test "output removal redacts out and published resources but keeps the entry" {
     const io = std.testing.io;
     const gpa = std.testing.allocator;
     var tmp = std.testing.tmpDir(.{ .iterate = true });
@@ -2038,7 +2044,7 @@ test "output removal refuses resource paths that traverse symlinks" {
     try std.testing.expectEqualStrings("must survive", outside);
 }
 
-test "staged interaction removal leaves a numbering hole" {
+test "staged entry removal leaves a numbering hole" {
     const io = std.testing.io;
     const gpa = std.testing.allocator;
     var tmp = std.testing.tmpDir(.{ .iterate = true });

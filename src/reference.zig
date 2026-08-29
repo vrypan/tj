@@ -134,7 +134,7 @@ pub fn looksLikeReference(word: []const u8) bool {
 
 // --- tests -----------------------------------------------------------------
 
-test "plain interaction references" {
+test "plain entry references" {
     const ref = try parse("@42");
     try std.testing.expectEqual(@as(u32, 42), ref.body.current.number);
     try std.testing.expectEqualStrings("", ref.subpath);
@@ -154,7 +154,7 @@ test "a trailing slash is distinguishable from none" {
     try std.testing.expect(!(try parse("@42")).trailing_slash);
 }
 
-test "the previous interaction" {
+test "the previous entry" {
     try std.testing.expect((try parse("@-")).body == .previous);
     try std.testing.expectEqualStrings("out", (try parse("@-/out")).subpath);
 }
@@ -170,7 +170,7 @@ test "journal-qualified references" {
     try std.testing.expectEqual(@as(u32, 7), full.body.qualified.target.number);
 }
 
-test "interaction names share the reference namespace" {
+test "entry names share the reference namespace" {
     const current = try parse("@build-failure/out");
     try std.testing.expectEqualStrings("build-failure", current.body.current.name);
     try std.testing.expectEqualStrings("out", current.subpath);
@@ -210,7 +210,7 @@ test "references that are shaped right but invalid are reported" {
     try std.testing.expectError(error.Malformed, parse("@pgsd."));
 }
 
-test "subpaths cannot escape the interaction directory" {
+test "subpaths cannot escape the entry directory" {
     try std.testing.expectError(error.Malformed, parse("@42//etc/passwd"));
     try std.testing.expectError(error.Malformed, parse("@42/../../etc/passwd"));
     try std.testing.expectError(error.Malformed, parse("@42/files/../../../etc/passwd"));

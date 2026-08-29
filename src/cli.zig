@@ -13,7 +13,7 @@ pub const CommandName = enum {
     @"continue",
     noout,
     hist,
-    journals,
+    journal,
     current,
     last,
     cat,
@@ -146,17 +146,6 @@ pub fn preflightCommandArgs(which: CommandName, args: []const [:0]const u8) Pars
                 if (std.mem.eql(u8, arg, "--")) break;
                 if (std.mem.eql(u8, arg, "--remove") and i != 0) return error.InvalidCommandArguments;
             }
-        },
-        .rm => {
-            var selectors: usize = 0;
-            for (args) |arg| {
-                if (std.mem.eql(u8, arg, "--")) break;
-                if (!std.mem.startsWith(u8, arg, "--")) continue;
-                const body = arg[2..];
-                const end = std.mem.indexOfScalar(u8, body, '=') orelse body.len;
-                if (std.mem.eql(u8, body[0..end], "journal")) selectors += 1;
-            }
-            if (selectors > 1) return error.InvalidCommandArguments;
         },
         else => {},
     }
@@ -324,19 +313,15 @@ test "noout requires its explicit child boundary but permits command help" {
 
 test "mutation preflights preserve mode position and destructive target safety" {
     try preflightCommandArgs(.name, &.{ "--remove", "old-name" });
-    try preflightCommandArgs(.rm, &.{ "--journal", "one", "--force" });
+    try preflightCommandArgs(.rm, &.{ "--force", "@2" });
     try std.testing.expectError(
         error.InvalidCommandArguments,
         preflightCommandArgs(.tag, &.{ "@1", "--remove", "bug" }),
     );
-    try std.testing.expectError(
-        error.InvalidCommandArguments,
-        preflightCommandArgs(.rm, &.{ "--journal=one", "--journal", "two" }),
-    );
 }
 
 test "root errors and actions remain distinct" {
-    try std.testing.expect(try parse(std.testing.allocator, &.{ "-V", "journals" }) == .version);
+    try std.testing.expect(try parse(std.testing.allocator, &.{ "-V", "journal", "list" }) == .version);
     try std.testing.expect(try parse(std.testing.allocator, &.{"--help"}) == .help);
     try std.testing.expectError(error.UnknownFlag, parse(std.testing.allocator, &.{"--nope"}));
     try std.testing.expectError(error.UnknownSubcommand, parse(std.testing.allocator, &.{"run"}));

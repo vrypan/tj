@@ -44,6 +44,11 @@ pub const Manifest = struct {
         return null;
     }
 
+    pub fn hasPins(self: *const Manifest) bool {
+        for (self.entries.items) |entry| if (entry.pinned) return true;
+        return false;
+    }
+
     pub fn numberForName(self: *const Manifest, name: []const u8) ?u32 {
         for (self.entries.items) |entry| {
             if (entry.name) |candidate| {

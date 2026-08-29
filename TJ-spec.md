@@ -1,6 +1,6 @@
 # Terminal Journal (TJ)
 
-*A proposal for making terminal interactions persistent, addressable,
+*A proposal for making terminal entries persistent, addressable,
 and reusable.*
 
 ------------------------------------------------------------------------
@@ -24,17 +24,16 @@ Once output scrolls away, it becomes difficult to reference, reuse, or
 discuss. Users resort to screenshots, copy/paste, temporary files, or
 rerunning commands.
 
-A **Terminal Journal** treats every command interaction as a first-class
-object.
+A **Terminal Journal** treats every command as a first-class journal entry.
 
 Rather than viewing the terminal as a stream of characters, TJ models it
-as an append-numbered journal of computational interactions. Numbers are never
+as an append-numbered journal of computational entries. Numbers are never
 reassigned; explicit removal may leave holes.
 
-Each interaction receives an identifier. Journal references use `@N`;
-`@-` refers to the immediately preceding interaction.
+Each entry receives an identifier. Journal references use `@N`;
+`@-` refers to the immediately preceding entry.
 
-Every interaction exposes core resources:
+Every entry exposes core resources:
 
 ``` text
 @42/
@@ -122,7 +121,7 @@ or
 diff @42/out @87/out
 ```
 
-Interactions become stable references rather than anonymous text.
+Entries become stable references rather than anonymous text.
 
 ## Computational objects
 
@@ -274,7 +273,7 @@ The proxy:
 
 1.  Allocates the pseudo-terminal.
 2.  Transparently forwards terminal traffic.
-3.  Records interactions.
+3.  Records entries.
 
 A PTY carries a single byte stream: the program's stdout and stderr are
 already merged by the time TJ sees them. TJ therefore does not attempt
@@ -304,8 +303,8 @@ so their terminal replies cannot become input to the fresh child. The replay
 bypasses the new writer's scanner and is not recorded again. `--no-replay`
 suppresses this startup replay.
 
-Interactions start at 1. Every later writer starts at one greater than the
-highest valid numeric interaction directory. A missing `rc` means unfinished,
+Entries start at 1. Every later writer starts at one greater than the
+highest valid numeric entry directory. A missing `rc` means unfinished,
 but that directory still consumes its number. Gaps are never filled and old
 entries are never overwritten.
 
@@ -320,7 +319,7 @@ The lifecycle CLI is explicit:
 ``` text
 tj new [--keep-osc] [-- command ...]
 tj continue [--keep-osc] [--no-replay] <id-or-suffix> [-- command ...]
-tj journals
+tj journal list
 ```
 
 All public commands are first-class subcommands in one validated command
@@ -345,22 +344,22 @@ matches.
 
 The writer exports `TJ_JOURNAL`, `TJ_NEXT`, `TJ_HOME`, and `TJ`. The zsh
 integration derives `TJ_JOURNAL_SHORT` and `TJ_REF`. These variables describe
-the selected durable journal and its next unused interaction; they are not a
+the selected durable journal and its next unused entry; they are not a
 snapshot of prior process state.
 
-Within the current journal, `@42` refers to interaction 42. To refer to
-an interaction in another journal (for example, another terminal pane,
+Within the current journal, `@42` refers to entry 42. To refer to
+an entry in another journal (for example, another terminal pane,
 or a journal that has already ended), the reference is qualified with
 the journal ULID or any suffix of it:
 
 ``` text
-@42/out                                  interaction 42, current journal
-@build-failure/out                       named interaction, current journal
-@01knxf1n5ffvk9jsm8wve1pgsd.42/out       interaction 42, full journal id
+@42/out                                  entry 42, current journal
+@build-failure/out                       named entry, current journal
+@01knxf1n5ffvk9jsm8wve1pgsd.42/out       entry 42, full journal id
 @wve1pgsd.42/out                         same, using a suffix
 @pgsd.42/out                             same, using a shorter suffix
-@pgsd.build-failure/out                  named interaction in that journal
-@-/out                                   previous interaction, current journal
+@pgsd.build-failure/out                  named entry in that journal
+@-/out                                   previous entry, current journal
 ```
 
 Suffixes rather than prefixes, because the timestamp prefix is shared
@@ -380,10 +379,10 @@ Because the ULID is time-ordered, journals sort chronologically in
 An all-digit reference (`@42`) always means the current journal and is
 never interpreted as a suffix.
 
-An interaction name begins with lowercase ASCII, contains only lowercase
+An entry name begins with lowercase ASCII, contains only lowercase
 ASCII, digits, and internal hyphens, ends with lowercase ASCII or a digit, and
 is at most 63 bytes. It is therefore disjoint from numbers and `@-`. A dot
-separates a journal selector from a numeric or named interaction selector.
+separates a journal selector from a numeric or named entry selector.
 Names are resolved from the selected journal's annotations. An unassigned
 name is unresolved.
 
@@ -397,7 +396,7 @@ A small zsh plugin provides two functions:
 ### Command boundaries
 
 The plugin uses `preexec`, `precmd`, and a composable `zle-line-init` hook,
-augmented by OSC 133 shell integration, to tell TJ when an interaction starts
+augmented by OSC 133 shell integration, to tell TJ when an entry starts
 and finishes. `precmd` emits `OSC 133;A ST` immediately before zsh renders a
 prompt. Once zsh has painted `PROMPT` and `RPROMPT`, `zle-line-init` emits
 `OSC 133;B ST`. TJ retains the intervening terminal bytes as the prompt for
@@ -412,7 +411,7 @@ exceeding that limit omits the resource and records a journal warning. The
 `zle-line-init` callback is registered through `add-zle-hook-widget`, preserving
 existing callbacks and avoiding duplicate registration.
 
-Each completed interaction becomes a journal entry:
+Each completed entry becomes a journal entry:
 
 ``` text
 @42/
@@ -435,7 +434,7 @@ TJ references are shell-neutral identifiers accepted by TJ commands:
 ```
 
 The canonical zsh filesystem namespace uses dynamic named directories. The
-name inside the brackets identifies an interaction directory; resource paths
+name inside the brackets identifies an entry directory; resource paths
 are ordinary filesystem suffixes:
 
 ``` text
@@ -478,7 +477,7 @@ This is zsh named-directory expansion rather than a parallel emulation:
 
 ``` text
 ~name/path       static named filesystem location
-~[@N]/path       dynamic named journal interaction
+~[@N]/path       dynamic named journal entry
 ```
 
 For interactive convenience, an accept-line widget canonicalizes valid,
@@ -502,8 +501,8 @@ terminal accepts and zsh history stores.
 The plugin registers its handler by appending it once to
 `zsh_directory_name_functions`; it does not replace the special
 `zsh_directory_name` function or other array handlers. In `n` mode it accepts
-an `@` name, calls `tj resolve` for that interaction reference, and returns the
-interaction directory as the single global `reply` element. `d` mode is not
+an `@` name, calls `tj resolve` for that entry reference, and returns the
+entry directory as the single global `reply` element. `d` mode is not
 implemented and returns failure, so paths are not abbreviated back to names.
 
 `preexec` runs before dynamic named-directory expansion. Its first argument is
@@ -517,7 +516,7 @@ actual process.
 
 ### Completion
 
-Dynamic-directory `c` mode completes interaction names inside `~[...]` and
+Dynamic-directory `c` mode completes entry names inside `~[...]` and
 appends the closing bracket:
 
 ``` sh
@@ -525,7 +524,7 @@ cat ~[@<TAB>
 ```
 
 Once the bracket is closed, ordinary zsh filesystem completion operates on
-the resolved interaction directory. For example:
+the resolved entry directory. For example:
 
 ``` sh
 cat ~[@10]/<TAB>
@@ -550,7 +549,7 @@ completion runs before that fallback so dynamic named-directory and ordinary
 filesystem completion retain their native behavior.
 
 Numeric and assigned-name candidates are offered in both completion paths.
-Resources below a named interaction complete exactly as resources below its
+Resources below a named entry complete exactly as resources below its
 numeric identity.
 
 The suffix after `~[@REF]` has ordinary filesystem semantics, including `.`
@@ -561,10 +560,10 @@ This makes the journal namespace behave like a filesystem from the
 user's perspective while allowing TJ to change its underlying storage
 implementation later.
 
-## Interaction annotations
+## Entry annotations
 
-Names, tags, and pins are user annotations on one interaction in one journal.
-They are not recording-time metadata and are never stored in an interaction's
+Names, tags, and pins are user annotations on one entry in one journal.
+They are not recording-time metadata and are never stored in an entry's
 `meta.json`.
 
 ``` text
@@ -576,15 +575,17 @@ tj name
 tj tag @42 bug parser
 tj tag --remove @42 parser
 tj tag @42
+tj tag @40..@45 bug
 tj tag
 
 tj pin @42
 tj pin --remove @42
+tj pin @40..@45
 tj pin
 ```
 
-One interaction has at most one name. Assigning another name renames it; a
-name already owned by another interaction in the same journal is rejected.
+One entry has at most one name. Assigning another name renames it; a
+name already owned by another entry in the same journal is rejected.
 The same name may exist independently in another journal.
 
 Tags are 1-63 ASCII bytes and normalize to lowercase. Their first and last
@@ -594,8 +595,18 @@ are stored uniquely and sorted. `tj hist --tag TAG` is repeatable and multiple
 filters use AND semantics.
 
 A pin is an idempotent boolean annotation. It appears as `*` beside the
-interaction number in history. Pins have no retention or deletion-protection
-semantics.
+entry number in history. Pins protect entries and their output
+from entry-level removal unless `--force` is present. They have no
+retention semantics. Whole-journal removal is refused while pins remain unless
+`--force` is present.
+
+`@N..@M` selects the inclusive numeric interval in the current journal for
+`tag` and `pin`. Endpoints are unqualified numeric references with `N <= M`;
+names, `@-`, resources, and qualified journals are invalid. Missing numbers
+inside the interval are skipped. Tagging, untagging, pinning, and unpinning
+load and save the annotation manifest once, so the selected existing
+entries change atomically. `tj tag @N..@M` queries tagged entries in
+numeric order.
 
 Targeted name and tag queries may read qualified references. Every annotation
 write is restricted to the journal whose full id is in `TJ_JOURNAL`.
@@ -618,15 +629,31 @@ Annotations are held in the journal root:
 }
 ```
 
-Absent fields are omitted and an interaction with no annotations has no map
+The on-disk key remains `"interactions"` for compatibility with existing
+journals; its members are entries in the current terminology.
+
+Absent fields are omitted and an entry with no annotations has no map
 entry. The manifest is bounded to 4 MiB, validated strictly, serialized in
 numeric/tag order, and replaced by same-directory sync-and-rename. A malformed
 or unsupported manifest fails closed and is never overwritten.
 
 The lifetime writer lock does not serialize child commands. Therefore one
 blocking advisory lock at `.locks/<journal-ulid>.mutation` covers every
-annotation read-modify-write and interaction/output removal. The manifest is
-reloaded after acquiring it. No per-interaction or high-water lock exists.
+annotation read-modify-write and entry/output removal. The manifest is
+reloaded after acquiring it. No per-entry or high-water lock exists.
+
+## Entry ranges for reading
+
+`tj cat @N..@M` concatenates the default `out` resource of every existing
+entry in the inclusive current-journal interval, in numeric order and
+without inserting separators. Numbering holes are skipped. A head or tail
+window is applied independently to each selected output, matching the existing
+behavior for multiple explicit references.
+
+Cat ranges have the same conservative grammar as annotation and removal
+ranges: unqualified numeric endpoints only, with no resource suffix. A range
+that contains the entry running `cat` is refused before output begins,
+preventing its output from feeding back into the file it is reading.
 
 ## Explicit removal
 
@@ -634,42 +661,52 @@ reloaded after acquiring it. No per-interaction or high-water lock exists.
 tj rm @42
 tj rm @42/out
 tj rm @2..@10
-tj rm --journal <id-or-suffix> [--force]
+tj rm --force @42
+tj journal rm <id-or-suffix> [--force]
 ```
 
-Interaction and output removal require a current journal and may target only
+Entry and output removal require a current journal and may target only
 that journal. The target number must be lower than the highest numeric
-interaction present while the mutation lock is held. In normal use the
-removal command itself has already become that newer interaction, which both
+entry present while the mutation lock is held. In normal use the
+removal command itself has already become that newer entry, which both
 refuses the running command and preserves monotonic numbering without a
-high-water manifest. Removed interactions leave holes; remaining interactions
+high-water manifest. Removed entries leave holes; remaining entries
 are never renumbered.
 
-`tj rm @N..@M` removes every existing whole interaction in the inclusive
+An entry pin protects both whole-entry and output-only removal.
+A pinned single target is skipped successfully with a diagnostic. Range
+removal skips each pinned member while removing the unpinned members. Passing
+`--force` overrides this protection. Pin checks happen after acquiring the
+mutation lock and before staging any protected entry or output.
+
+`tj rm @N..@M` removes every existing whole entry in the inclusive
 numeric interval. Both endpoints must be unqualified current-journal numeric
 references with `N <= M`; names, `@-`, resource suffixes, and qualified
-cross-journal endpoints are rejected. Existing holes are skipped. The command
-validates that the interval does not contain the protected highest interaction
-before staging any removal.
+cross-journal endpoints are rejected. Existing holes and, without `--force`,
+pinned entries are skipped. The command validates that the interval does
+not contain the protected highest entry before staging any removal.
 
-Removing an interaction first renames its directory into private journal
+Removing an entry first renames its directory into private journal
 trash, removes its annotation entry atomically, and deletes the staged tree.
 Readers ignore stale annotations whose numeric directory is absent, so a crash
-after the rename cannot restore the interaction or reserve its old name.
+after the rename cannot restore the entry or reserve its old name.
 
 `tj rm @42/out` removes `out` and every published resource named by
 `meta.json.resources`. Before the first rename it creates `out.removed`; this
 marker is a one-way deletion boundary. It then preserves unknown metadata,
 removes the resource map, and sets `out_removed` to true. `cmd`, `rc`, the
-interaction, and user annotations remain. Removing an individual resource is
+entry, and user annotations remain. Removing an individual resource is
 unsupported because it would not redact that resource's bytes from `out`.
 
 Whole-journal removal is a lifecycle operation available only when
 `TJ_JOURNAL` is unset. It selects one journal unambiguously, prompts on a TTY
 unless `--force` is present, acquires the existing writer lock nonblockingly,
-then takes the journal mutation lock, and refuses an active journal. Successful
-removal renames the ULID directory to root-private trash before recursive deletion. `--force` skips confirmation
-only; it never bypasses selection, locking, or validation.
+then takes the journal mutation lock, and refuses an active journal. Without
+`--force`, it also refuses a journal containing pinned entries; the pin
+check is repeated while holding the mutation lock. Successful removal renames
+the ULID directory to root-private trash before recursive deletion. `--force`
+skips confirmation and overrides pin protection only; it never bypasses
+selection, locking, or other validation.
 
 ## Native journal search
 
@@ -689,7 +726,7 @@ The current journal is searched by default and `TJ_JOURNAL` is required in
 that mode. `--all` searches every persisted journal and works outside a
 writer. Both `cmd` and `out` are selected initially. The first `--cmd` or
 `--out` clears that default pair and selects its resource; later selectors
-form a union, so `--cmd --out` selects both. No other interaction files,
+form a union, so `--cmd --out` selects both. No other entry files,
 published resources, annotations, private trash, or lock data are searched.
 A missing `out` is skipped.
 
@@ -705,7 +742,7 @@ later selected-match value winning; an empty selected-match value disables
 match styling. TJ does not style its reference prefix.
 
 Iteration uses the storage model rather than recursive filesystem traversal:
-journals are newest first, interactions are numeric ascending, resources are
+journals are newest first, entries are numeric ascending, resources are
 `cmd` then `out`, and matching lines retain source order. Matching does not
 cross a newline. Each matching source line is emitted once even if it contains
 the literal more than once. Its bytes, excluding the terminating newline but
@@ -721,10 +758,10 @@ Current-journal results are unqualified. Every `--all` result uses the full
 journal ULID, including results from the writer's current journal. A final
 unterminated source line is still searchable.
 
-When `TJ_JOURNAL` is set and decimal `TJ_NEXT` is greater than one, interaction
+When `TJ_JOURNAL` is set and decimal `TJ_NEXT` is greater than one, entry
 `TJ_NEXT - 1` in that exact journal is treated as the command currently
 executing and excluded. A missing or malformed counter does not cause another
-interaction to be guessed or excluded.
+entry to be guessed or excluded.
 
 Search streams each resource in fixed-size chunks with matcher state carried
 across reads and reset at line boundaries. Matching-line spans are copied by
@@ -770,7 +807,7 @@ OSC 5107 ; tj ; end ST
 ```
 
 TJ removes both markers before forwarding output. On `noout`, it writes the
-fixed text `<tj:noout>` once to the interaction's `out`, without displaying
+fixed text `<tj:noout>` once to the entry's `out`, without displaying
 that text. Bytes inside the region are forwarded to the terminal but are not
 written to `out` or to a published resource. Normal recording resumes after
 the generic `end` marker.
@@ -826,9 +863,9 @@ The v1 protocol has deliberately simple rules:
     contents
 -   OSC markers are control metadata and are not part of `@N/out`
 -   `ST` (`ESC \`) terminates the OSC sequence
--   an unfinished resource is closed and marked truncated at the interaction
+-   an unfinished resource is closed and marked truncated at the entry
     boundary; an unfinished noout region is cleared without metadata so it
-    cannot affect the next interaction
+    cannot affect the next entry
 -   noout payload sizes or flags are not stored in `meta.json`
 
 By default, TJ strips OSC 5107 sequences from the stream before
@@ -845,7 +882,7 @@ markers to that terminal, executes the supplied argv directly without a shell,
 and otherwise inherits the caller's cwd, environment, standard streams,
 terminal, and process group. Its result is the child's exit status, or
 `128 + signal` when the child dies from a signal. The wrapper makes a best
-effort to emit `end` after it has emitted `noout`; interaction-boundary reset
+effort to emit `end` after it has emitted `noout`; entry-boundary reset
 handles cases where the wrapper itself dies before it can do so.
 
 Noout is explicit and is not inferred from the PTY ECHO flag. Input typed with
@@ -878,7 +915,7 @@ A proof of concept does not require a database.
 ```
 
 Existing ULID directories require no migration. A newly created journal that
-records no interaction or log may be removed as noise. A continued journal is
+records no entry or log may be removed as noise. A continued journal is
 never deleted by an empty writer run.
 
 This immediately enables shell completion.

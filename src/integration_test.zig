@@ -32,6 +32,7 @@ fn isolateJournal() void {
     // Inherited from the developer's environment otherwise, which would make
     // `@N` resolve against whatever journal they happen to be writing.
     sys.setEnv("TJ_JOURNAL", "");
+    sys.setEnv("TJ_NEXT", "");
 }
 
 /// Tests share one process, so a test that selected a journal leaves
@@ -119,7 +120,7 @@ test "application and every command expose generated help" {
     }
 
     const command_names = [_][]const u8{
-        "new",  "continue", "noout",  "hist",    "journals", "current",
+        "new",  "continue", "noout",  "hist",    "journal",  "current",
         "last", "cat",      "replay", "resolve", "complete", "name",
         "tag",  "pin",      "rm",     "grep",
     };
@@ -164,18 +165,20 @@ test "build-time completions expose only the static cli grammar" {
     const zsh = try Dir.cwd().readFileAlloc(io, options.zsh_completion, gpa, .limited(1 << 20));
     defer gpa.free(zsh);
     try std.testing.expect(std.mem.startsWith(u8, zsh, "#compdef tj\n"));
-    try std.testing.expect(std.mem.indexOf(u8, zsh, "'hist:List interactions in a journal'") != null);
+    try std.testing.expect(std.mem.indexOf(u8, zsh, "'hist:List entries in a journal'") != null);
     try std.testing.expect(std.mem.indexOf(u8, zsh, "_tj__cmd_hist()") != null);
     try std.testing.expect(std.mem.indexOf(u8, zsh, "--tag=[") != null);
     try std.testing.expect(std.mem.indexOf(u8, zsh, "--no-replay[") != null);
     try std.testing.expect(std.mem.indexOf(u8, zsh, "WHEN:(never auto always)") != null);
+    try std.testing.expect(std.mem.indexOf(u8, zsh, ":ACTION:(list rm)") != null);
 
     const fish = try Dir.cwd().readFileAlloc(io, options.fish_completion, gpa, .limited(1 << 20));
     defer gpa.free(fish);
     try std.testing.expect(std.mem.startsWith(u8, fish, "# fish completion for tj\n"));
-    try std.testing.expect(std.mem.indexOf(u8, fish, "-a 'hist' -d 'List interactions in a journal'") != null);
+    try std.testing.expect(std.mem.indexOf(u8, fish, "-a 'hist' -d 'List entries in a journal'") != null);
     try std.testing.expect(std.mem.indexOf(u8, fish, "__tj_using_command hist history") != null);
     try std.testing.expect(std.mem.indexOf(u8, fish, "__tj_vals_cmd_grep_f_color") != null);
+    try std.testing.expect(std.mem.indexOf(u8, fish, "__tj_vals_cmd_journal_a_ACTION") != null);
 
     // Runtime references remain the existing `tj complete`/plugin concern;
     // no generated script invokes that command as an external completer.
@@ -193,7 +196,8 @@ test "schema errors use status two and command help" {
         diagnostic: []const u8,
         usage: []const u8,
     }{
-        .{ .args = &.{ "journals", "extra" }, .diagnostic = "too many arguments", .usage = "Usage: tj journals" },
+        .{ .args = &.{ "journal", "list", "extra" }, .diagnostic = "invalid arguments", .usage = "Usage: tj journal" },
+        .{ .args = &.{ "rm", "--journal", "abcd" }, .diagnostic = "unknown option", .usage = "Usage: tj rm" },
         .{ .args = &.{ "grep", "--unknown", "x" }, .diagnostic = "unknown option", .usage = "Usage: tj grep" },
         .{ .args = &.{ "cat", "--head" }, .diagnostic = "requires <N>", .usage = "Usage: tj cat" },
         .{ .args = &.{"resolve"}, .diagnostic = "missing required argument", .usage = "Usage: tj resolve" },
@@ -590,7 +594,7 @@ test "commands are recorded as cmd, out and rc" {
     try std.testing.expectEqualStrings("1\n", second_rc);
 }
 
-test "each interaction records the fully rendered zsh prompt" {
+test "each entry records the fully rendered zsh prompt" {
     if (!haveZsh()) return error.SkipZigTest;
     const gpa = std.testing.allocator;
 
@@ -679,7 +683,7 @@ test "continue appends to the same journal at its next unused number" {
 
     const home = try journal.homeArg(gpa);
     defer gpa.free(home);
-    var listed = try run(gpa, &.{ "--home", home, "journals" }, 24, 80);
+    var listed = try run(gpa, &.{ "--home", home, "journal", "list" }, 24, 80);
     defer listed.out.deinit(gpa);
     try std.testing.expectEqual(@as(u8, 0), listed.code);
     try std.testing.expect(std.mem.indexOf(u8, listed.out.items, name) != null);
@@ -775,7 +779,7 @@ test "a command line with shell metacharacters survives the round trip" {
     try std.testing.expectEqualStrings(tricky, recorded);
 }
 
-test "an interrupted writer leaves the interaction without an rc" {
+test "an interrupted writer leaves the entry without an rc" {
     if (!haveZsh()) return error.SkipZigTest;
     const gpa = std.testing.allocator;
 
@@ -1025,7 +1029,82 @@ test "names tags pins and tagged history use journal-local annotations" {
     try std.testing.expectEqual(@as(u8, 0), unpin.code);
 }
 
-test "interaction mutations reject qualified journals while reads still work" {
+test "tag pin and cat ranges are inclusive and skip numbering holes" {
+    if (!haveZsh()) return error.SkipZigTest;
+    const gpa = std.testing.allocator;
+
+    var journal = try Journal.open(gpa);
+    defer journal.close();
+    try recordJournal(gpa, &journal, &.{
+        "echo RANGE_ONE",
+        "echo RANGE_TWO",
+        "echo RANGE_THREE",
+        "echo RANGE_FOUR",
+        "echo RANGE_FIVE",
+    });
+    try journal.enter(gpa);
+    const home = try journal.homeArg(gpa);
+    defer gpa.free(home);
+
+    var hole = try run(gpa, &.{ "--home", home, "rm", "@3" }, 24, 100);
+    defer hole.out.deinit(gpa);
+    try std.testing.expectEqual(@as(u8, 0), hole.code);
+
+    var tagged = try run(gpa, &.{ "--home", home, "tag", "@2..@4", "BATCH", "extra" }, 24, 100);
+    defer tagged.out.deinit(gpa);
+    try std.testing.expectEqual(@as(u8, 0), tagged.code);
+    var queried = try run(gpa, &.{ "--home", home, "tag", "@2..@4" }, 24, 100);
+    defer queried.out.deinit(gpa);
+    try std.testing.expect(std.mem.indexOf(u8, queried.out.items, "@2  batch  extra") != null);
+    try std.testing.expect(std.mem.indexOf(u8, queried.out.items, "@4  batch  extra") != null);
+    try std.testing.expect(std.mem.indexOf(u8, queried.out.items, "@3") == null);
+
+    var untagged = try run(gpa, &.{ "--home", home, "tag", "--remove", "@3..@4", "extra" }, 24, 100);
+    defer untagged.out.deinit(gpa);
+    try std.testing.expectEqual(@as(u8, 0), untagged.code);
+    var fourth_tags = try run(gpa, &.{ "--home", home, "tag", "@4" }, 24, 100);
+    defer fourth_tags.out.deinit(gpa);
+    try std.testing.expect(std.mem.indexOf(u8, fourth_tags.out.items, "@4  batch") != null);
+    try std.testing.expect(std.mem.indexOf(u8, fourth_tags.out.items, "extra") == null);
+
+    var pinned = try run(gpa, &.{ "--home", home, "pin", "@1..@4" }, 24, 100);
+    defer pinned.out.deinit(gpa);
+    try std.testing.expectEqual(@as(u8, 0), pinned.code);
+    var unpinned = try run(gpa, &.{ "--home", home, "pin", "--remove", "@2..@3" }, 24, 100);
+    defer unpinned.out.deinit(gpa);
+    try std.testing.expectEqual(@as(u8, 0), unpinned.code);
+    var pins = try run(gpa, &.{ "--home", home, "pin" }, 24, 100);
+    defer pins.out.deinit(gpa);
+    try std.testing.expect(std.mem.indexOf(u8, pins.out.items, "@1\r\n") != null);
+    try std.testing.expect(std.mem.indexOf(u8, pins.out.items, "@4\r\n") != null);
+    try std.testing.expect(std.mem.indexOf(u8, pins.out.items, "@2\r\n") == null);
+    try std.testing.expect(std.mem.indexOf(u8, pins.out.items, "@3\r\n") == null);
+
+    var concatenated = try run(gpa, &.{ "--home", home, "cat", "--plain", "@2..@4" }, 24, 100);
+    defer concatenated.out.deinit(gpa);
+    try std.testing.expectEqual(@as(u8, 0), concatenated.code);
+    const second = std.mem.indexOf(u8, concatenated.out.items, "RANGE_TWO") orelse return error.TestUnexpectedResult;
+    const fourth = std.mem.indexOf(u8, concatenated.out.items, "RANGE_FOUR") orelse return error.TestUnexpectedResult;
+    try std.testing.expect(second < fourth);
+    try std.testing.expect(std.mem.indexOf(u8, concatenated.out.items, "RANGE_THREE") == null);
+
+    var empty = try run(gpa, &.{ "--home", home, "tag", "@20..@30", "missing" }, 24, 100);
+    defer empty.out.deinit(gpa);
+    try std.testing.expectEqual(@as(u8, 2), empty.code);
+
+    // A broad cat range inside the writer would otherwise read and append to
+    // its own `out` indefinitely. Reject it before any resource is emitted.
+    const id = try journal.journalName(gpa);
+    defer gpa.free(id);
+    const recursive = try runNonTtyInJournal(gpa, &.{ "--home", home, "cat", "@1..@999" }, id, "7");
+    defer gpa.free(recursive.stdout);
+    defer gpa.free(recursive.stderr);
+    try std.testing.expectEqual(@as(u8, 1), recursive.term.exited);
+    try std.testing.expectEqualStrings("", recursive.stdout);
+    try std.testing.expect(std.mem.indexOf(u8, recursive.stderr, "currently running entry") != null);
+}
+
+test "entry mutations reject qualified journals while reads still work" {
     if (!haveZsh()) return error.SkipZigTest;
     const gpa = std.testing.allocator;
     const io = std.testing.io;
@@ -1082,7 +1161,7 @@ test "interaction mutations reject qualified journals while reads still work" {
     still_there.close(io);
 }
 
-test "output and interaction removal clean data without reusing numbers" {
+test "output and entry removal clean data without reusing numbers" {
     if (!haveZsh()) return error.SkipZigTest;
     const gpa = std.testing.allocator;
     const io = std.testing.io;
@@ -1097,9 +1176,38 @@ test "output and interaction removal clean data without reusing numbers" {
         &.{ "name", "@1", "kept-name" },
         &.{ "name", "@2", "removed-name" },
         &.{ "tag", "@2", "old" },
+        &.{ "pin", "@1" },
         &.{ "pin", "@2" },
-        &.{ "rm", "@1/out" },
-        &.{ "rm", "@2" },
+    }) |command_args| {
+        var argv: std.ArrayList([]const u8) = .empty;
+        defer argv.deinit(gpa);
+        try argv.appendSlice(gpa, &.{ "--home", home });
+        try argv.appendSlice(gpa, command_args);
+        var result = try run(gpa, argv.items, 24, 100);
+        defer result.out.deinit(gpa);
+        try std.testing.expectEqual(@as(u8, 0), result.code);
+    }
+
+    // Pins protect both the complete interaction and output-only removal.
+    var skipped_out = try run(gpa, &.{ "--home", home, "rm", "@1/out" }, 24, 100);
+    defer skipped_out.out.deinit(gpa);
+    try std.testing.expectEqual(@as(u8, 0), skipped_out.code);
+    try std.testing.expect(std.mem.indexOf(u8, skipped_out.out.items, "skipped pinned entry @1") != null);
+    var skipped_interaction = try run(gpa, &.{ "--home", home, "rm", "@2" }, 24, 100);
+    defer skipped_interaction.out.deinit(gpa);
+    try std.testing.expectEqual(@as(u8, 0), skipped_interaction.code);
+    try std.testing.expect(std.mem.indexOf(u8, skipped_interaction.out.items, "skipped pinned entry @2") != null);
+
+    var protected_dir = try journal.journalDir();
+    var protected_out = try protected_dir.openFile(io, "1/out", .{});
+    protected_out.close(io);
+    var protected_two = try protected_dir.openDir(io, "2", .{});
+    protected_two.close(io);
+    protected_dir.close(io);
+
+    for ([_][]const []const u8{
+        &.{ "rm", "--force", "@1/out" },
+        &.{ "rm", "--force", "@2" },
     }) |command_args| {
         var argv: std.ArrayList([]const u8) = .empty;
         defer argv.deinit(gpa);
@@ -1142,7 +1250,7 @@ test "output and interaction removal clean data without reusing numbers" {
     try std.testing.expectEqualStrings("echo after-hole", next_cmd);
 }
 
-test "interaction ranges remove existing entries across holes and reject the running boundary" {
+test "entry ranges remove existing entries across holes and reject the running boundary" {
     if (!haveZsh()) return error.SkipZigTest;
     const gpa = std.testing.allocator;
     const io = std.testing.io;
@@ -1190,7 +1298,8 @@ test "interaction ranges remove existing entries across holes and reject the run
     try std.testing.expectEqual(@as(u8, 0), hole.code);
 
     // Drive the range through real zsh: its shorthand canonicalizer must leave
-    // the range word intact for the rm-specific parser.
+    // the range word intact for the rm-specific parser. @4 is pinned, so the
+    // ordinary range leaves it in place while removing the other members.
     const id = try journal.journalName(gpa);
     defer gpa.free(id);
     const child = try spawnContinuedJournalZsh(gpa, &journal, id);
@@ -1205,10 +1314,10 @@ test "interaction ranges remove existing entries across holes and reject the run
 
     var dir = try journal.journalDir();
     defer dir.close(io);
-    for ([_][]const u8{ "2", "3", "4", "5" }) |number| {
+    for ([_][]const u8{ "2", "3", "5" }) |number| {
         try std.testing.expectError(error.FileNotFound, dir.openDir(io, number, .{}));
     }
-    for ([_][]const u8{ "1", "6", "7" }) |number| {
+    for ([_][]const u8{ "1", "4", "6", "7" }) |number| {
         var kept = try dir.openDir(io, number, .{});
         kept.close(io);
     }
@@ -1220,7 +1329,14 @@ test "interaction ranges remove existing entries across holes and reject the run
     defer gpa.free(annotation_text);
     try std.testing.expect(std.mem.indexOf(u8, annotation_text, "range-name") == null);
     try std.testing.expect(std.mem.indexOf(u8, annotation_text, "range-tag") == null);
-    try std.testing.expect(std.mem.indexOf(u8, annotation_text, "\"4\"") == null);
+    var remaining_pins = try run(gpa, &.{ "--home", home, "pin" }, 24, 100);
+    defer remaining_pins.out.deinit(gpa);
+    try std.testing.expect(std.mem.indexOf(u8, remaining_pins.out.items, "@4") != null);
+
+    var forced = try run(gpa, &.{ "--home", home, "rm", "--force", "@4" }, 24, 100);
+    defer forced.out.deinit(gpa);
+    try std.testing.expectEqual(@as(u8, 0), forced.code);
+    try std.testing.expectError(error.FileNotFound, dir.openDir(io, "4", .{}));
 }
 
 test "concurrent annotation commands preserve every update" {
@@ -1278,15 +1394,19 @@ test "whole-journal removal is outside-writer only and refuses active journals" 
     // A journal environment, even without an active writer in this test
     // process, is sufficient to reject the lifecycle operation.
     try journal.enter(gpa);
-    var inside = try run(gpa, &.{ "--home", home, "rm", "--journal", id, "--force" }, 24, 100);
+    var pinned = try run(gpa, &.{ "--home", home, "pin", "@1" }, 24, 100);
+    defer pinned.out.deinit(gpa);
+    try std.testing.expectEqual(@as(u8, 0), pinned.code);
+    var inside = try run(gpa, &.{ "--home", home, "journal", "rm", id, "--force" }, 24, 100);
     defer inside.out.deinit(gpa);
     try std.testing.expectEqual(@as(u8, 1), inside.code);
 
     leaveJournal();
-    const non_tty = try runNonTty(gpa, &.{ "--home", home, "rm", "--journal", id });
+    const non_tty = try runNonTty(gpa, &.{ "--home", home, "journal", "rm", id });
     defer gpa.free(non_tty.stdout);
     defer gpa.free(non_tty.stderr);
     try std.testing.expectEqual(@as(u8, 1), non_tty.term.exited);
+    try std.testing.expect(std.mem.indexOf(u8, non_tty.stderr, "pinned entry protected") != null);
     try std.testing.expect(std.mem.indexOf(u8, non_tty.stderr, "use --force") != null);
 
     const writer = try spawnTj(gpa, &.{ tj, "--home", home, "continue", id, "--", "/bin/sh", "-c", "echo READY; sleep 30" }, 24, 80);
@@ -1294,14 +1414,14 @@ test "whole-journal removal is outside-writer only and refuses active journals" 
     defer writer_out.deinit(gpa);
     try std.testing.expect(try writer.readUntil(gpa, &writer_out, "READY", timeout_ms));
 
-    var active = try run(gpa, &.{ "--home", home, "rm", "--journal", id, "--force" }, 24, 100);
+    var active = try run(gpa, &.{ "--home", home, "journal", "rm", id, "--force" }, 24, 100);
     defer active.out.deinit(gpa);
     try std.testing.expectEqual(@as(u8, 1), active.code);
     try std.testing.expect(std.mem.indexOf(u8, active.out.items, "while it is being written") != null);
     _ = std.c.kill(writer.pid, posix.SIG.TERM);
     _ = try writer.finish(gpa, &writer_out, timeout_ms);
 
-    var removed = try run(gpa, &.{ "--home", home, "rm", "--journal", id, "--force" }, 24, 100);
+    var removed = try run(gpa, &.{ "--home", home, "journal", "rm", id, "--force" }, 24, 100);
     defer removed.out.deinit(gpa);
     try std.testing.expectEqual(@as(u8, 0), removed.code);
     var root = try journal.tmp.dir.openDir(std.testing.io, journal_dir, .{});
@@ -1342,7 +1462,7 @@ test "named shorthand expands only after a name is assigned" {
     try std.testing.expect(std.mem.indexOf(u8, typed, "@build-failure/out") != null);
 }
 
-test "a reference cannot escape its interaction directory" {
+test "a reference cannot escape its entry directory" {
     if (!haveZsh()) return error.SkipZigTest;
     const gpa = std.testing.allocator;
 
@@ -1923,7 +2043,7 @@ test "continue rejects missing ambiguous and full journals before exec" {
     var exhausted = try run(gpa, &.{ "--home", scratch.path(), "continue", &full, "--", "/bin/sh", "-c", "echo CHILD-RAN" }, 24, 80);
     defer exhausted.out.deinit(gpa);
     try std.testing.expectEqual(@as(u8, 1), exhausted.code);
-    try std.testing.expect(std.mem.indexOf(u8, exhausted.out.items, "no interaction numbers left") != null);
+    try std.testing.expect(std.mem.indexOf(u8, exhausted.out.items, "no entry numbers left") != null);
     try std.testing.expect(std.mem.indexOf(u8, exhausted.out.items, "CHILD-RAN") == null);
 }
 
@@ -2107,7 +2227,7 @@ test "a noout OSC region stays visible but is replaced in out" {
     try std.testing.expect(std.mem.indexOf(u8, meta, "VISIBLE-BUT-OMITTED") == null);
 }
 
-test "an unfinished noout OSC region cannot suppress the next interaction" {
+test "an unfinished noout OSC region cannot suppress the next entry" {
     if (!haveZsh()) return error.SkipZigTest;
     const gpa = std.testing.allocator;
 
@@ -2468,7 +2588,7 @@ test "a program can publish parts of its output as named resources" {
     try std.testing.expect(std.mem.indexOf(u8, meta, "\"truncated\":false") != null);
 }
 
-test "a resource name cannot escape the interaction or overwrite tj's own files" {
+test "a resource name cannot escape the entry or overwrite tj's own files" {
     if (!haveZsh()) return error.SkipZigTest;
     const gpa = std.testing.allocator;
 
@@ -2605,7 +2725,7 @@ test "zsh completion keeps special resource names as one inert argument" {
     from = out.items.len;
     try child.write("tj journa");
     try child.write("\t");
-    try std.testing.expect(try child.readUntilFrom(gpa, &out, from, "journals", timeout_ms));
+    try std.testing.expect(try child.readUntilFrom(gpa, &out, from, "journal", timeout_ms));
     try cancelZleLine(gpa, child, &out);
 
     from = out.items.len;
@@ -2864,7 +2984,7 @@ test "a journal replays the commands and output it recorded" {
     try std.testing.expect(std.mem.indexOf(u8, r.out.items, "% ") != null);
 }
 
-test "replay can be narrowed to a range of interactions" {
+test "replay can be narrowed to a range of entries" {
     if (!haveZsh()) return error.SkipZigTest;
     const gpa = std.testing.allocator;
 

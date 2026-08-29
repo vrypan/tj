@@ -262,7 +262,7 @@ test "a program killed inside the alternate screen records nothing of it" {
     try std.testing.expectEqual(@as(u32, 1), r.regions);
 }
 
-test "several full-screen programs in one interaction" {
+test "several full-screen programs in one entry" {
     const gpa = std.testing.allocator;
     const input = "a\x1b[?1049hx\x1b[?1049lb\x1b[?1049hy\x1b[?1049lc";
     const r = try filterAll(gpa, input, 5);

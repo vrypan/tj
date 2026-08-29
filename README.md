@@ -5,7 +5,7 @@
 >
 > This project is under heavy development and many things will change.
 
-Makes terminal interactions persistent, addressable, and reusable. See
+Makes terminal entries persistent, addressable, and reusable. See
 [TJ-spec.md](TJ-spec.md) for the design.
 
 ## Install
@@ -151,27 +151,27 @@ tj hist                   # 1  0  6  -  -  echo hello
 tj cat @1                 # hello
 ```
 
-Each command becomes a numbered interaction:
+Each command becomes a numbered entry:
 
 ```sh
 tj hist                   # number/pin, status, size, name, tags, command
-tj journals               # every journal, newest first
+tj journal list           # every journal, newest first
 tj current                # this journal's id
-tj last                   # the last interaction that completed
+tj last                   # the last entry that completed
 ```
 
 ## References
 
-Interactions have names, the way files do. TJ's shell-neutral reference form
+Entries have names, the way files do. TJ's shell-neutral reference form
 is `@REF`; commands such as `tj cat` and `tj resolve` accept it directly. In
 zsh, the canonical filesystem namespace uses dynamic named directories:
 
 ```sh
-~[@42]/out                 # interaction 42 of this journal
-~[@build-failure]/out      # a named interaction in this journal
-~[@-]/out                  # the last completed interaction
-~[@pgsd.42]/out            # interaction 42 of another journal
-~[@pgsd.build-failure]/out # a named interaction in another journal
+~[@42]/out                 # entry 42 of this journal
+~[@build-failure]/out      # a named entry in this journal
+~[@-]/out                  # the last completed entry
+~[@pgsd.42]/out            # entry 42 of another journal
+~[@pgsd.build-failure]/out # a named entry in another journal
 ```
 
 For interactive use, `@REF` remains shorthand. When a shorthand reference is
@@ -189,7 +189,7 @@ zsh then performs its normal named-directory and filesystem expansion while
 parsing the command, so ordinary programs receive full paths:
 
 ```sh
-curl -s https://example.com/data.json     # interaction 41
+curl -s https://example.com/data.json     # entry 41
 jq .items @41/out                         # read what it printed, without rerunning
 diff @41/out @43/out
 cat @-/cmd                                # the last command that completed
@@ -197,18 +197,18 @@ cat @-/cmd                                # the last command that completed
 
 | TJ reference | Canonical zsh name | Names |
 |---|---|---|
-| `@42` | `~[@42]` | interaction 42 of this journal |
-| `@build-failure` | `~[@build-failure]` | the interaction with that journal-local name |
-| `@-` | `~[@-]` | the last interaction that *completed*, never the one running |
-| `@pgsd.42` | `~[@pgsd.42]` | interaction 42 of another journal, by a suffix of its id |
-| `@pgsd.build-failure` | `~[@pgsd.build-failure]` | a named interaction in another journal |
+| `@42` | `~[@42]` | entry 42 of this journal |
+| `@build-failure` | `~[@build-failure]` | the entry with that journal-local name |
+| `@-` | `~[@-]` | the last entry that *completed*, never the one running |
+| `@pgsd.42` | `~[@pgsd.42]` | entry 42 of another journal, by a suffix of its id |
+| `@pgsd.build-failure` | `~[@pgsd.build-failure]` | a named entry in another journal |
 
 Suffixes rather than prefixes, because every journal started in the same
 millisecond shares the ULID's timestamp prefix and only the tail tells them
 apart. The most recent match wins, so short suffixes are for interactive
 use; anything that must stay valid should use the full id.
 
-`~[@<TAB>` completes dynamic interaction names and appends `]`.
+`~[@<TAB>` completes dynamic entry names and appends `]`.
 `~[@42]/<TAB>` uses ordinary filesystem completion for `cmd`, `out`, `prompt`,
 `rc`, `files/`, and published resources. The shorthand `@42/<TAB>` remains
 available, including beneath assigned names. An unresolved name such as
@@ -222,7 +222,7 @@ with the resolved filesystem path.
 
 ## Names, tags, and pins
 
-Annotations belong to interactions in one journal:
+Annotations belong to entries in one journal:
 
 ```sh
 tj name @42 build-failure       # assign or replace the one name
@@ -233,54 +233,67 @@ tj name                         # list names in this journal
 tj tag @42 bug parser           # add normalized tags
 tj tag --remove @42 parser
 tj tag @42                      # query tags
-tj tag                          # list tagged interactions
+tj tag @40..@45 bug             # tag every existing entry in the range
+tj tag                          # list tagged entries
 
 tj pin @42
 tj pin --remove @42
+tj pin @40..@45                 # pin every existing entry in the range
 tj pin                          # list pins
 ```
 
 Names are lowercase words made from letters, digits, and internal hyphens;
-they begin with a letter and are unique within their journal. One interaction
+they begin with a letter and are unique within their journal. One entry
 has at most one name. Tags are normalized to lowercase, may also contain `.`,
-`_`, and `-`, and are idempotent. Pins are idempotent markers only: they do not
-protect data from explicit deletion and do not define retention.
+`_`, and `-`, and are idempotent. Pins are idempotent markers and protect an
+entry, including its output, from ordinary entry removal. They do
+not define retention. Whole-journal removal is refused while any pins remain
+unless `--force` is present.
 
-`tj hist --tag bug --tag parser` shows interactions having every requested
+Tag and pin ranges use two unqualified numeric references in the current
+journal. They are inclusive and skip numbering holes. A tag range with no tag
+arguments queries tagged entries in the interval; adding or removing
+tags and pinning or unpinning updates every existing entry atomically.
+
+`tj hist --tag bug --tag parser` shows entries having every requested
 tag. History marks a pin with `*` after the number and shows the name and
 comma-separated tags before the command.
 
 Qualified references are read-only. You can read and complete
-`@pgsd.build-failure/out`, but names, tags, pins, and interaction/output
+`@pgsd.build-failure/out`, but names, tags, pins, and entry/output
 deletion may modify only `$TJ_JOURNAL`. Continue that journal first if it needs
 changing; the mutation command is then recorded there like any other command.
 
 ## Removing recorded data
 
 ```sh
-tj rm @42                    # the entire interaction
+tj rm @42                    # the entire entry
 tj rm @42/out                # output and resources derived from it
-tj rm @2..@10                # every existing interaction in this inclusive range
-tj rm --journal pgsd         # prompt before removing an inactive journal
-tj rm --journal pgsd --force # non-interactive journal removal
+tj rm @2..@10                # every existing entry in this inclusive range
+tj rm --force @42            # override a pin
+tj journal rm pgsd           # prompt before removing an inactive journal
+tj journal rm pgsd --force   # override pins and skip confirmation
 ```
 
-Interaction and output removal are current-journal-only, do not prompt, and
-refuse the currently running interaction. Removing an interaction also removes
-its annotations and resources. Removing only `out` preserves `cmd`, `rc`, the
-interaction annotations, and other recording metadata, but removes every
-published resource derived from that output. Individual published resources
-cannot be removed because their bytes would still remain in `out`.
+Entry and output removal are current-journal-only, do not prompt, and
+refuse the currently running entry. A pinned target is skipped unless
+`--force` is present. Removing an entry also removes its annotations and
+resources. Removing only `out` preserves `cmd`, `rc`, the entry
+annotations, and other recording metadata, but removes every published
+resource derived from that output. Individual published resources cannot be
+removed because their bytes would still remain in `out`.
 
 Ranges use two unqualified numeric references, are inclusive, and remove whole
-interactions only. Existing numbering holes inside a range are skipped. A
-range that includes the currently running interaction is refused before any
-interaction is removed.
+entries only. Existing numbering holes and pinned entries inside a
+range are skipped; `--force` includes pinned entries. A range that
+includes the currently running entry is refused before any entry
+is removed.
 
-An interaction removal leaves a numbering hole. The removal command itself is
-already a newer interaction in the same journal, so later numbers continue
+An entry removal leaves a numbering hole. The removal command itself is
+already a newer entry in the same journal, so later numbers continue
 upward and the hole is never reused. Whole-journal removal is allowed only
-outside a tj writer, requires a unique selector, and refuses an active journal.
+outside a tj writer, requires a unique selector, and refuses an active journal
+or, without `--force`, a journal containing pinned entries.
 
 ## Showing the reference in your prompt
 
@@ -410,7 +423,7 @@ canonicalizes `@42/out` as `~[@42]/out`, then zsh supplies a plain path before
 pi sees the word.
 
 With it loaded, a reference is optional. `@-` is the last *completed*
-interaction, and the agent's own invocation is still running, so it reliably
+entry, and the agent's own invocation is still running, so it reliably
 names the command you just ran:
 
 ```sh
@@ -420,7 +433,7 @@ $ pi what does this mean?
 
 The economics are the reason to read the index first: across one journal
 here, every command and status came to about 340 tokens, while every
-interaction's output came to 69,000. The median interaction is 185 bytes and
+entry's output came to 69,000. The median entry is 185 bytes and
 a handful are 50K, which is what `tj hist`'s size column and `tj cat --tail`
 are for.
 
@@ -497,7 +510,7 @@ to bold red and honor the `mt` or `ms` selected-match capability in
 `GREP_COLORS`.
 
 When results go directly to a terminal inside a journal writer, TJ wraps them
-in a noout region: they remain visible but the current interaction records
+in a noout region: they remain visible but the current entry records
 only `<tj:noout>`, so one search does not feed the next. Redirected and piped
 results are ordinary marker-free bytes.
 
@@ -511,8 +524,9 @@ options, use the optional `tj-grep` companion. It requires `rg`; native
 from bash, from a script, or from a shell that is not running under tj:
 
 ```sh
-tj cat @42                # what interaction 42 printed
+tj cat @42                # what entry 42 printed
 tj cat @42/cmd            # the command line
+tj cat @40..@45           # concatenate existing outputs in numeric order
 tj cat --tail 20 @42      # just the end, where errors are
 tj cat --head 5 @42       # just the beginning
 tj cat @41 @43 | diff - -
@@ -521,6 +535,13 @@ tj cat @41 @43 | diff - -
 `--head` and `--tail` count lines of what you would have seen. When they hide
 something, tj says so on stderr, so a fragment is never mistaken for the
 whole.
+
+Cat ranges use the same inclusive, unqualified numeric syntax and skip holes.
+Each selected entry contributes its default `out`, with no added
+separator; `--head` and `--tail` apply to each output independently. A range
+containing the currently running entry is refused, since reading and
+simultaneously appending to that entry's `out` would feed back forever.
+Resource-qualified and cross-journal ranges are not supported.
 
 Piped, it renders the recording as text a person would have read: escape
 sequences removed, and a progress meter that rewrote its line thirty times
@@ -578,7 +599,7 @@ printf '\033]5107;tj;end\033\\'
 
 Resource and noout regions share the same non-nesting OSC 5107 state. The
 generic `end` closes whichever kind is open, and an unfinished noout region is
-discarded when the interaction ends so it cannot suppress the next command.
+discarded when the entry ends so it cannot suppress the next command.
 `--keep-osc` forwards TJ's markers for protocol debugging, but they are still
 never written to `out`.
 
@@ -592,7 +613,7 @@ results should not feed later searches.
 
 A program can mark spans of its own output as named files. The output still
 appears on the terminal exactly as it would; tj additionally exposes the
-marked spans under the interaction.
+marked spans under the entry.
 
 ```sh
 printf '\033]5107;tj;begin;files/data.csv;text/csv\033\\'
@@ -600,7 +621,7 @@ printf 'date,amount\n2026-08-01,12.50\n'
 printf '\033]5107;tj;end\033\\'
 ```
 
-That interaction then holds `@42/files/data.csv`, addressable and
+That entry then holds `@42/files/data.csv`, addressable and
 completable like any other resource, and usable by anything:
 
 ```sh
@@ -617,7 +638,7 @@ while either kind is already open is refused; the first region remains open
 until the next generic end marker.
 
 Names are the program's choice, so they are checked: a name cannot escape
-its interaction directory, and cannot be `cmd`, `out`, `prompt`, `rc`, `meta.json` or
+its entry directory, and cannot be `cmd`, `out`, `prompt`, `rc`, `meta.json` or
 TJ's private removal bookkeeping. Refusals are recorded in the journal log. `files/` is a convention,
 not a rule — `err` is a resource too.
 
@@ -637,7 +658,7 @@ mess of it, exactly as they would without tj.
 
 `tj replay` plays a recording back into the terminal — the prompt, the command
 typing itself out, then the output as it was captured, colours and all. With
-the zsh plugin, each interaction keeps the exact prompt bytes zsh rendered
+the zsh plugin, each entry keeps the exact prompt bytes zsh rendered
 before it: prompt substitutions, Starship output, colours, multiple lines, and
 the right prompt are replayed rather than evaluated again. Older journals use
 `$ ` as a fallback. Non-visual background-colour and cursor-position queries
@@ -657,7 +678,7 @@ plausible-looking entry, so nothing tells you. So exit the writer first, or
 replay from another pane. With no journal named, the most recent one plays.
 
 Nothing is re-executed. What cannot be reconstructed is *when* each byte
-arrived, since only the start and end of each interaction were recorded — so
+arrived, since only the start and end of each entry were recorded — so
 output appears at once, and the pacing comes from the real command durations
 and the real gaps between commands. Those gaps get capped (`--max-pause`,
 default 2s), because a journal where you stared at the screen for a minute
@@ -705,7 +726,7 @@ Journal-local user annotations are separate from recording metadata:
 ~/.tj/<journal-ulid>/annotations.json
 ```
 
-The versioned file maps interaction numbers to their optional name, sorted
+The versioned file maps entry numbers to their optional name, sorted
 tags, and pin. It is replaced atomically under one short-lived journal mutation
 lock, so concurrent annotation child processes cannot lose one another's
 updates. Copying or deleting a journal carries its annotations with it.
@@ -719,8 +740,8 @@ appeared on your terminal, so treat it like shell history.
 
 Journals outlive every writer process attached to them — that is the point, and
 `@pgsd.42/out` is meant to keep working after the pane it belonged to is
-gone. Interaction numbering resumes at one greater than the highest existing
-numeric directory. An unfinished interaction has no `rc`, but still consumes
+gone. Entry numbering resumes at one greater than the highest existing
+numeric directory. An unfinished entry has no `rc`, but still consumes
 its number; gaps are never filled.
 
 A journal newly created by `tj new` may be removed when that writer records

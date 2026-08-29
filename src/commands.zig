@@ -77,7 +77,7 @@ pub fn run(
             return result.exit_code;
         },
         .current => try out.print("{s}\n", .{try currentJournal()}),
-        .journals => try listJournals(gpa, io, home, out),
+        .journal => try journalCommand(gpa, io, home, parsed, out),
         .hist => try listInteractions(gpa, io, home, parsed, out),
         .last => try printLast(gpa, io, home, out),
         .resolve => try resolveReference(gpa, io, home, parsed, out),
@@ -387,11 +387,11 @@ fn listJournals(gpa: std.mem.Allocator, io: Io, home: ?[]const u8, out: *Io.Writ
             gpa.free(interactions);
         }
         const marker = if (current != null and std.mem.eql(u8, current.?, name)) "*" else " ";
-        try out.print("{s} {s}  {d} interaction{s}\n", .{
+        try out.print("{s} {s}  {d} {s}\n", .{
             marker,
             name,
             interactions.len,
-            if (interactions.len == 1) "" else "s",
+            if (interactions.len == 1) "entry" else "entries",
         });
     }
 }
@@ -918,6 +918,9 @@ fn tagCommand(
             }
         },
         .query => |ref| {
+            if (try parseInteractionRange(ref)) |range| {
+                return queryTagsRange(gpa, io, home, range, out);
+            }
             var root = try store.openRoot(io, home);
             defer root.close(io);
             const target = try locateCommandTarget(gpa, io, root, ref);
@@ -944,6 +947,9 @@ fn updateTags(
     tags: []const []const u8,
     removing: bool,
 ) !void {
+    if (try parseInteractionRange(ref)) |range| {
+        return updateTagsRange(gpa, io, home, range, tags, removing);
+    }
     const target = blk: {
         var root = try store.openRoot(io, home);
         defer root.close(io);
@@ -964,6 +970,63 @@ fn updateTags(
             try manifest.removeTag(gpa, target.number, tag);
         } else {
             try manifest.addTag(gpa, target.number, tag);
+        }
+    }
+    try annotations.save(gpa, io, mutation.root, mutation.journal, &manifest);
+}
+
+fn queryTagsRange(
+    gpa: std.mem.Allocator,
+    io: Io,
+    home: ?[]const u8,
+    range: InteractionRange,
+    out: *Io.Writer,
+) !void {
+    const current = try currentJournal();
+    var root = try store.openRoot(io, home);
+    defer root.close(io);
+    const numbers = try store.listNumbers(gpa, io, root, current);
+    defer gpa.free(numbers);
+    if (!rangeSelectsAny(numbers, range)) return error.NoSuchInteraction;
+
+    var manifest = try annotations.load(gpa, io, root, current);
+    defer manifest.deinit(gpa);
+    for (numbers) |number| {
+        if (!range.contains(number)) continue;
+        const entry = manifest.findConst(number) orelse continue;
+        if (entry.tags.items.len == 0) continue;
+        try out.print("@{d}", .{number});
+        for (entry.tags.items) |tag| try out.print("  {s}", .{tag});
+        try out.writeAll("\n");
+    }
+}
+
+fn updateTagsRange(
+    gpa: std.mem.Allocator,
+    io: Io,
+    home: ?[]const u8,
+    range: InteractionRange,
+    tags: []const []const u8,
+    removing: bool,
+) !void {
+    var mutation = try openCurrentMutation(gpa, io, home);
+    defer mutation.lock.close(io);
+    defer mutation.root.close(io);
+    const numbers = try store.listNumbers(gpa, io, mutation.root, mutation.journal);
+    defer gpa.free(numbers);
+    if (!rangeSelectsAny(numbers, range)) return error.NoSuchInteraction;
+
+    var manifest = try annotations.load(gpa, io, mutation.root, mutation.journal);
+    defer manifest.deinit(gpa);
+    pruneMissingAnnotations(gpa, io, mutation.root, mutation.journal, &manifest);
+    for (numbers) |number| {
+        if (!range.contains(number)) continue;
+        for (tags) |tag| {
+            if (removing) {
+                try manifest.removeTag(gpa, number, tag);
+            } else {
+                try manifest.addTag(gpa, number, tag);
+            }
         }
     }
     try annotations.save(gpa, io, mutation.root, mutation.journal, &manifest);
@@ -1014,6 +1077,9 @@ fn pinCommand(
 }
 
 fn updatePin(gpa: std.mem.Allocator, io: Io, home: ?[]const u8, ref: []const u8, pinned: bool) !void {
+    if (try parseInteractionRange(ref)) |range| {
+        return updatePinRange(gpa, io, home, range, pinned);
+    }
     const target = blk: {
         var root = try store.openRoot(io, home);
         defer root.close(io);
@@ -1033,25 +1099,54 @@ fn updatePin(gpa: std.mem.Allocator, io: Io, home: ?[]const u8, ref: []const u8,
     try annotations.save(gpa, io, mutation.root, mutation.journal, &manifest);
 }
 
-const RemoveRequest = union(enum) {
-    interaction: []const u8,
-    journal: struct { selector: []const u8, force: bool },
+fn updatePinRange(
+    gpa: std.mem.Allocator,
+    io: Io,
+    home: ?[]const u8,
+    range: InteractionRange,
+    pinned: bool,
+) !void {
+    var mutation = try openCurrentMutation(gpa, io, home);
+    defer mutation.lock.close(io);
+    defer mutation.root.close(io);
+    const numbers = try store.listNumbers(gpa, io, mutation.root, mutation.journal);
+    defer gpa.free(numbers);
+    if (!rangeSelectsAny(numbers, range)) return error.NoSuchInteraction;
+
+    var manifest = try annotations.load(gpa, io, mutation.root, mutation.journal);
+    defer manifest.deinit(gpa);
+    pruneMissingAnnotations(gpa, io, mutation.root, mutation.journal, &manifest);
+    for (numbers) |number| {
+        if (range.contains(number)) try manifest.setPinned(gpa, number, pinned);
+    }
+    try annotations.save(gpa, io, mutation.root, mutation.journal, &manifest);
+}
+
+const RemoveRequest = struct {
+    target: []const u8,
+    force: bool,
 };
 
 fn removeRequest(parsed: *const zecli.Parsed) !RemoveRequest {
-    const journal_selector = parsed.last("journal");
-    const force = parsed.present("force");
-    const interaction = if (parsed.positionals.items.len == 1) parsed.positionals.items[0] else null;
-    if (journal_selector) |selector| {
-        if (interaction != null) return error.BadArguments;
-        return .{ .journal = .{ .selector = selector, .force = force } };
+    if (parsed.positionals.items.len != 1) return error.BadArguments;
+    return .{ .target = parsed.positionals.items[0], .force = parsed.present("force") };
+}
+
+const JournalRequest = union(enum) {
+    list,
+    remove: struct { selector: []const u8, force: bool },
+};
+
+fn journalRequest(parsed: *const zecli.Parsed) !JournalRequest {
+    const args = parsed.positionals.items;
+    if (args.len == 1 and std.mem.eql(u8, args[0], "list")) {
+        if (parsed.present("force")) return error.BadArguments;
+        return .list;
     }
-    if (interaction) |target| {
-        if (force) return error.BadArguments;
-        return .{ .interaction = target };
+    if (args.len == 2 and std.mem.eql(u8, args[0], "rm")) {
+        return .{ .remove = .{ .selector = args[1], .force = parsed.present("force") } };
     }
-    if (force) return error.BadArguments;
-    return error.MissingArgument;
+    return error.BadArguments;
 }
 
 test "annotation and removal requests select one semantic mode" {
@@ -1082,16 +1177,31 @@ test "annotation and removal requests select one semantic mode" {
         try std.testing.expectEqualStrings("@2", (try pinRequest(&parsed)).set);
     }
     {
-        var parsed = try parseTestCommand(.rm, &.{ "--journal", "abcd", "--force" });
+        var parsed = try parseTestCommand(.journal, &.{ "rm", "abcd", "--force" });
         defer parsed.deinit(gpa);
-        const request = (try removeRequest(&parsed)).journal;
+        const request = (try journalRequest(&parsed)).remove;
         try std.testing.expectEqualStrings("abcd", request.selector);
         try std.testing.expect(request.force);
     }
     {
         var parsed = try parseTestCommand(.rm, &.{ "--force", "@2" });
         defer parsed.deinit(gpa);
-        try std.testing.expectError(error.BadArguments, removeRequest(&parsed));
+        const request = try removeRequest(&parsed);
+        try std.testing.expectEqualStrings("@2", request.target);
+        try std.testing.expect(request.force);
+    }
+}
+
+fn journalCommand(
+    gpa: std.mem.Allocator,
+    io: Io,
+    home: ?[]const u8,
+    parsed: *const zecli.Parsed,
+    out: *Io.Writer,
+) !void {
+    switch (try journalRequest(parsed)) {
+        .list => try listJournals(gpa, io, home, out),
+        .remove => |request| try removeJournal(gpa, io, home, request.selector, request.force, out),
     }
 }
 
@@ -1102,10 +1212,9 @@ fn removeCommand(
     parsed: *const zecli.Parsed,
     out: *Io.Writer,
 ) !void {
-    switch (try removeRequest(parsed)) {
-        .journal => |request| return removeJournal(gpa, io, home, request.selector, request.force, out),
-        .interaction => |target| return removeInteraction(gpa, io, home, target),
-    }
+    _ = out;
+    const request = try removeRequest(parsed);
+    return removeInteraction(gpa, io, home, request.target, request.force);
 }
 
 fn removeJournal(
@@ -1128,11 +1237,14 @@ fn removeJournal(
         gpa.free(interactions);
     }
     if (!force) {
+        var manifest = try annotations.load(gpa, io, root, journal);
+        defer manifest.deinit(gpa);
+        if (manifest.hasPins()) return error.PinnedInteraction;
         if (!sys.isTty(0)) return error.ConfirmationRequired;
-        try out.print("Remove journal {s} with {d} interaction{s}? [y/N] ", .{
+        try out.print("Remove journal {s} with {d} {s}? [y/N] ", .{
             journal,
             interactions.len,
-            if (interactions.len == 1) "" else "s",
+            if (interactions.len == 1) "entry" else "entries",
         });
         try out.flush();
         var answer_buf: [32]u8 = undefined;
@@ -1142,15 +1254,21 @@ fn removeJournal(
             return error.Cancelled;
         }
     }
-    return store.removeJournal(io, root, journal) catch |err| switch (err) {
+    return store.removeJournal(gpa, io, root, journal, force) catch |err| switch (err) {
         error.ActiveJournal => error.ActiveJournal,
         else => return err,
     };
 }
 
-fn removeInteraction(gpa: std.mem.Allocator, io: Io, home: ?[]const u8, interaction: []const u8) !void {
-    if (try parseRemovalRange(interaction)) |range| {
-        return removeInteractionRange(gpa, io, home, range);
+fn removeInteraction(
+    gpa: std.mem.Allocator,
+    io: Io,
+    home: ?[]const u8,
+    interaction: []const u8,
+    force: bool,
+) !void {
+    if (try parseInteractionRange(interaction)) |range| {
+        return removeInteractionRange(gpa, io, home, range, force);
     }
     const target = blk: {
         var root = try store.openRoot(io, home);
@@ -1173,6 +1291,10 @@ fn removeInteraction(gpa: std.mem.Allocator, io: Io, home: ?[]const u8, interact
     var manifest = try annotations.load(gpa, io, mutation.root, mutation.journal);
     defer manifest.deinit(gpa);
     pruneMissingAnnotations(gpa, io, mutation.root, mutation.journal, &manifest);
+    if (!force and interactionPinned(&manifest, target.number)) {
+        note("tj: skipped pinned entry @{d}; use --force to remove it\n", .{target.number});
+        return;
+    }
 
     if (output_only) {
         return store.removeOutput(gpa, io, mutation.root, mutation.journal, target.number) catch |err| switch (err) {
@@ -1188,24 +1310,30 @@ fn removeInteraction(gpa: std.mem.Allocator, io: Io, home: ?[]const u8, interact
     try store.finishStagedRemoval(io, mutation.root, staged);
 }
 
-const RemovalRange = struct {
+const InteractionRange = struct {
     first: u32,
     last: u32,
+
+    fn contains(self: InteractionRange, number: u32) bool {
+        return self.first <= number and number <= self.last;
+    }
 };
 
-/// `rm` owns this small grammar extension; ranges are not references accepted
-/// by readers, zsh expansion, or other mutation commands.
-fn parseRemovalRange(text: []const u8) !?RemovalRange {
+/// Ranges are a small command-level grammar extension, not references resolved
+/// by zsh. They deliberately select numeric interactions in the current
+/// journal; names, resources, `@-`, and qualified journals are not ranges.
+fn parseInteractionRange(text: []const u8) !?InteractionRange {
+    if (text.len == 0 or text[0] != '@') return null;
     const cut = std.mem.indexOf(u8, text, "..") orelse return null;
     if (std.mem.indexOf(u8, text[cut + 2 ..], "..") != null) return error.InvalidRange;
 
-    const first = try parseRemovalRangeEndpoint(text[0..cut]);
-    const last = try parseRemovalRangeEndpoint(text[cut + 2 ..]);
+    const first = try parseInteractionRangeEndpoint(text[0..cut]);
+    const last = try parseInteractionRangeEndpoint(text[cut + 2 ..]);
     if (first > last) return error.InvalidRange;
     return .{ .first = first, .last = last };
 }
 
-fn parseRemovalRangeEndpoint(text: []const u8) !u32 {
+fn parseInteractionRangeEndpoint(text: []const u8) !u32 {
     const parsed = reference.parse(text) catch return error.InvalidRange;
     if (parsed.subpath.len != 0 or parsed.trailing_slash) return error.InvalidRange;
     return switch (parsed.body) {
@@ -1218,11 +1346,22 @@ fn parseRemovalRangeEndpoint(text: []const u8) !u32 {
     };
 }
 
+fn rangeSelectsAny(numbers: []const u32, range: InteractionRange) bool {
+    for (numbers) |number| if (range.contains(number)) return true;
+    return false;
+}
+
+fn interactionPinned(manifest: *const annotations.Manifest, number: u32) bool {
+    const entry = manifest.findConst(number) orelse return false;
+    return entry.pinned;
+}
+
 fn removeInteractionRange(
     gpa: std.mem.Allocator,
     io: Io,
     home: ?[]const u8,
-    range: RemovalRange,
+    range: InteractionRange,
+    force: bool,
 ) !void {
     var mutation = try openCurrentMutation(gpa, io, home);
     defer mutation.lock.close(io);
@@ -1236,11 +1375,11 @@ fn removeInteractionRange(
     // an unfinished boundary left by the last writer. Validate this before
     // staging any directory so a protected range cannot partially apply.
     const highest = numbers[numbers.len - 1];
-    if (range.first <= highest and highest <= range.last) return error.CurrentInteraction;
+    if (range.contains(highest)) return error.CurrentInteraction;
 
     var selected: usize = 0;
     for (numbers) |number| {
-        if (range.first <= number and number <= range.last) selected += 1;
+        if (range.contains(number)) selected += 1;
     }
     if (selected == 0) return error.NoSuchInteraction;
 
@@ -1255,26 +1394,41 @@ fn removeInteractionRange(
     }
     try staged_paths.ensureTotalCapacity(gpa, selected);
 
+    var skipped_pinned: usize = 0;
     for (numbers) |number| {
         if (number < range.first or number > range.last) continue;
+        if (!force and interactionPinned(&manifest, number)) {
+            skipped_pinned += 1;
+            continue;
+        }
         const staged = try store.stageInteractionRemoval(gpa, io, mutation.root, mutation.journal, number);
         staged_paths.appendAssumeCapacity(staged);
         manifest.removeInteraction(gpa, number);
     }
 
-    try annotations.save(gpa, io, mutation.root, mutation.journal, &manifest);
+    if (staged_paths.items.len != 0) {
+        try annotations.save(gpa, io, mutation.root, mutation.journal, &manifest);
+    }
     for (staged_paths.items) |path| try store.finishStagedRemoval(io, mutation.root, path);
+    if (skipped_pinned != 0) {
+        note("tj: skipped {d} pinned {s}; use --force to remove {s}\n", .{
+            skipped_pinned,
+            if (skipped_pinned == 1) "entry" else "entries",
+            if (skipped_pinned == 1) "it" else "them",
+        });
+    }
 }
 
-test "interaction removal ranges are inclusive numeric current-journal references" {
-    const range = (try parseRemovalRange("@2..@10")).?;
+test "entry ranges are inclusive numeric current-journal references" {
+    const range = (try parseInteractionRange("@2..@10")).?;
     try std.testing.expectEqual(@as(u32, 2), range.first);
     try std.testing.expectEqual(@as(u32, 10), range.last);
-    try std.testing.expect((try parseRemovalRange("@2")) == null);
-    try std.testing.expectError(error.InvalidRange, parseRemovalRange("@10..@2"));
-    try std.testing.expectError(error.InvalidRange, parseRemovalRange("@two..@ten"));
-    try std.testing.expectError(error.InvalidRange, parseRemovalRange("@2/out..@10/out"));
-    try std.testing.expectError(error.CrossJournalMutation, parseRemovalRange("@abcd.2..@abcd.10"));
+    try std.testing.expect((try parseInteractionRange("@2")) == null);
+    try std.testing.expect((try parseInteractionRange("/tmp/a..b")) == null);
+    try std.testing.expectError(error.InvalidRange, parseInteractionRange("@10..@2"));
+    try std.testing.expectError(error.InvalidRange, parseInteractionRange("@two..@ten"));
+    try std.testing.expectError(error.InvalidRange, parseInteractionRange("@2/out..@10/out"));
+    try std.testing.expectError(error.CrossJournalMutation, parseInteractionRange("@abcd.2..@abcd.10"));
 }
 
 // --- reading resources ------------------------------------------------------
@@ -1325,30 +1479,80 @@ fn catResource(
     defer root.close(io);
 
     for (request.refs) |text| {
-        var file = try openTarget(gpa, io, root, text);
-        defer file.close(io);
-
-        // Rendering feeds the same window as raw bytes, so line counts always
-        // describe what the caller sees rather than terminal control traffic.
-        var sink = WindowSink.init(gpa, request.window, out);
-        defer sink.deinit();
-        if (request.as_written) {
-            try copyFile(io, file, &sink);
+        const maybe_range = parseInteractionRange(text) catch |err| switch (err) {
+            // Cat ranges are deliberately current-journal-only, but this is a
+            // syntax limitation rather than an attempted cross-journal write.
+            error.CrossJournalMutation => return error.InvalidRange,
+            else => |other| return other,
+        };
+        if (maybe_range) |range| {
+            try catRange(gpa, io, root, request, range, out);
         } else {
-            try renderFile(gpa, io, file, &sink);
+            try catOne(gpa, io, root, request, text, out);
         }
-        try sink.finish();
+    }
+}
 
-        // Silence about what was left out would let a reader - a person or an
-        // agent - take a fragment for the whole thing. It goes to stderr so
-        // that stdout stays exactly what was asked for.
-        if (sink.shownLines() < sink.totalLines()) {
-            note("tj: {s}: showing {d} of {d} lines\n", .{
-                text,
-                sink.shownLines(),
-                sink.totalLines(),
-            });
+fn catRange(
+    gpa: std.mem.Allocator,
+    io: Io,
+    root: store.Dir,
+    request: CatRequest,
+    range: InteractionRange,
+    out: *Io.Writer,
+) !void {
+    const current = try currentJournal();
+    const numbers = try store.listNumbers(gpa, io, root, current);
+    defer gpa.free(numbers);
+    if (!rangeSelectsAny(numbers, range)) return error.NoSuchInteraction;
+
+    // Reading the `out` currently being produced would feed cat's own output
+    // back into the same file. Refuse the whole range before emitting a byte.
+    if (activeInteraction()) |active| {
+        if (std.mem.eql(u8, active.journal, current) and range.contains(active.number)) {
+            return error.CurrentInteraction;
         }
+    }
+
+    for (numbers) |number| {
+        if (!range.contains(number)) continue;
+        var ref_buf: [16]u8 = undefined;
+        const ref = try std.fmt.bufPrint(&ref_buf, "@{d}", .{number});
+        try catOne(gpa, io, root, request, ref, out);
+    }
+}
+
+fn catOne(
+    gpa: std.mem.Allocator,
+    io: Io,
+    root: store.Dir,
+    request: CatRequest,
+    text: []const u8,
+    out: *Io.Writer,
+) !void {
+    var file = try openTarget(gpa, io, root, text);
+    defer file.close(io);
+
+    // Rendering feeds the same window as raw bytes, so line counts always
+    // describe what the caller sees rather than terminal control traffic.
+    var sink = WindowSink.init(gpa, request.window, out);
+    defer sink.deinit();
+    if (request.as_written) {
+        try copyFile(io, file, &sink);
+    } else {
+        try renderFile(gpa, io, file, &sink);
+    }
+    try sink.finish();
+
+    // Silence about what was left out would let a reader - a person or an
+    // agent - take a fragment for the whole thing. It goes to stderr so that
+    // stdout stays exactly what was asked for.
+    if (sink.shownLines() < sink.totalLines()) {
+        note("tj: {s}: showing {d} of {d} lines\n", .{
+            text,
+            sink.shownLines(),
+            sink.totalLines(),
+        });
     }
 }
 
@@ -1695,7 +1899,7 @@ fn parseReplaySpeed(text: []const u8) !f64 {
     return speed;
 }
 
-test "replay interaction ranges parse directly into u32" {
+test "replay entry ranges parse directly into u32" {
     const minimum = try replayRequestFromArgs(&.{ "--from", "1", "--to=4294967295" });
     try std.testing.expectEqual(@as(u32, 1), minimum.replay.from);
     try std.testing.expectEqual(std.math.maxInt(u32), minimum.replay.to);

@@ -5,7 +5,7 @@ description: Read the terminal journal to find out what actually happened in thi
 
 # Terminal Journal
 
-The user's terminal is recording. Every command is an **interaction** with a
+The user's terminal is recording. Every command is an **entry** with a
 number, and you can read what it ran, what it printed, and how it ended -
 without asking them to paste anything and without running it again.
 
@@ -13,7 +13,7 @@ without asking them to paste anything and without running it again.
 
 `$TJ_JOURNAL` is set while the current shell is writing a journal. If it is
 empty, there is no current journal context: answer from what you were told.
-Persisted journals may still exist and are listed by `tj journals`.
+Persisted journals may still exist and are listed by `tj journal list`.
 
 Run **`tj`** by its plain name, one command per call, with no pipe and no
 `;`. Not `"$TJ"`, not `tj ... | tail`. A wrapper may grant permission to run
@@ -38,12 +38,12 @@ tj hist
 ```
 
 Columns: number (followed by `*` when pinned), exit status, output size,
-interaction name, comma-separated tags, and first line of the command.
+entry name, comma-separated tags, and first line of the command.
 The whole index is a few hundred tokens even for a long journal. The output
-of a single interaction can be 50K. **Read the index first and fetch
+of a single entry can be 50K. **Read the index first and fetch
 deliberately.**
 
-When the user gives a distinctive literal rather than an interaction number,
+When the user gives a distinctive literal rather than an entry number,
 search narrowly instead of opening many outputs:
 
 ```sh
@@ -54,13 +54,14 @@ tj grep --cmd 'docker compose'
 Native grep is fixed-string search; it does not interpret regular expressions.
 Use `tj hist` to browse, and use `tj grep --all LITERAL` only when evidence from
 other journals is relevant. Search results are deliberately omitted from the
-current interaction when displayed in its terminal, so they do not become the
+current entry when displayed in its terminal, so they do not become the
 next search's output matches.
 
 Then take only what you need:
 
 ```sh
-tj cat @2              # what interaction 2 printed
+tj cat @2              # what entry 2 printed
+tj cat @2..@5          # existing outputs 2 through 5, in numeric order
 tj cat --tail 20 @2    # just the end, where errors are
 tj cat --head 5 @2     # just the beginning
 tj cat @2/cmd          # the command line as it was typed
@@ -69,13 +70,17 @@ tj cat @2/cmd          # the command line as it was typed
 Use `--tail` and `--head` rather than piping to `tail` or `head`: a pipeline
 is a compound command, and a narrow permission rule will refuse it.
 
+Ranges are inclusive, current-journal numeric references and skip missing
+numbers. Use one only when several complete outputs are deliberately needed;
+it is refused if it includes the entry currently running `tj cat`.
+
 When a window hides something, `tj` says so on stderr: `showing 20 of 431
 lines`. If you see that, you are looking at a fragment - fetch more before
 concluding anything about what is not shown.
 
 ## Resolving "this" and "that"
 
-`@-` is the last **completed** interaction. Your own invocation is still
+`@-` is the last **completed** entry. Your own invocation is still
 running, so `@-` is reliably the command the user just ran, which is almost
 always what "this" means.
 
@@ -97,7 +102,7 @@ Do not do this blindly. If the question stands on its own, answer it. Fetch
 
 ## Reading exit status correctly
 
-- **A `-` in the status column means the interaction never finished.** It is
+- **A `-` in the status column means the entry never finished.** It is
   in progress or was killed. Never read it as success.
 - `rc` is the shell's status for the **whole line**. On a pipeline that is
   the last element, so `curl … | head` reports `0` when `curl` failed. Empty
@@ -111,7 +116,7 @@ as readable text when writing to a pipe, which is what you will get. Add
 `--raw` only if you specifically need the bytes, including colour codes.
 
 With the zsh integration, `prompt` contains the exact rendered prompt that
-preceded the interaction, including dynamic prompt-engine output. Use
+preceded the entry, including dynamic prompt-engine output. Use
 `tj cat '@42/prompt'` only when the prompt itself is relevant; it is absent in
 older journals and is not part of `out`.
 
@@ -123,7 +128,7 @@ Two things will look wrong and are not:
   a command, a status, and a near-empty output. `meta.json` says
   `"fullscreen"` when this happened. This is by design; do not report it as
   missing data.
-- **Prompt redraw** appears at the end of an interaction's output. It belongs
+- **Prompt redraw** appears at the end of an entry's output. It belongs
   to the shell, not the command.
 - **`<tj:noout>` means visible output was deliberately omitted.** `tj noout`
   and cooperating programs can show bytes in the terminal without retaining
@@ -135,9 +140,9 @@ Two things will look wrong and are not:
 
 `@42` means this journal. Another journal is named by a suffix of its id:
 `@pgsd.42/out`. `$TJ_JOURNAL_SHORT` holds the current one's suffix. `tj
-journals` lists them, newest first.
+journal list` lists them, newest first.
 
-An interaction may also have a journal-local name, such as
+An entry may also have a journal-local name, such as
 `@build-failure/out`; `@pgsd.build-failure/out` reads the same name from
 another journal. Names and numbers resolve through `tj cat` in the same way.
 An unresolved `@name` remains literal in an interactive command so it can
@@ -145,22 +150,26 @@ still be an ordinary `@handle`.
 
 Names, tags, and pins are user annotations. Tags can be used to narrow the
 index with repeatable AND filters such as `tj hist --tag bug --tag parser`.
-Pins are markers only and imply neither retention nor deletion protection.
+Pins imply no retention policy, but protect an entry and its output from
+`tj rm`. Removal ranges skip pinned entries; use `tj rm --force REF` only
+when overriding that protection is deliberate. Whole-journal removal likewise
+requires `--force` while any pins remain.
+
 Do not add, remove, or change annotations unless the user asks. Annotation
-writes and interaction/output deletion are current-journal-only; qualified
+writes and entry/output deletion are current-journal-only; qualified
 references are read-only.
 
 ## Published resources
 
 A program can mark part of its output as a named file, which then appears
-under the interaction:
+under the entry:
 
 ```sh
 tj cat @42/files/data.csv
 ```
 
 `tj hist` does not list these. Check `@42/meta.json` for a `resources` map,
-or run `tj complete '@42/'` to see what an interaction holds.
+or run `tj complete '@42/'` to see what an entry holds.
 
 ## Output the user may want to reuse
 
@@ -173,7 +182,7 @@ tag, and keep prose out of the fence:
     2026-08-01,12.50
     ```
 
-A wrapper may turn fenced blocks into files of this interaction, taking the
+A wrapper may turn fenced blocks into files of this entry, taking the
 mime type from that tag, which is why the tag is worth getting right. Whether
 such a wrapper is in the pipeline is not something you can see from here.
 
@@ -185,9 +194,9 @@ there.
 
 - **Use `tj cat`, never `cat @N/out`.** The second replays the whole
   recording to the terminal, which is slow, makes a mess of the screen, and
-  gets recorded again as a new interaction - a 50K one. This is the single
+  gets recorded again as a new entry - a 50K one. This is the single
   most expensive mistake available here.
-- **Do not fetch everything.** Fetching every interaction's output costs
+- **Do not fetch everything.** Fetching every entry's output costs
   hundreds of times what the index costs and is almost never worth it.
 - **Quote references** when passing them to `tj` from inside a journal writer:
   `tj cat '@1'`. The shell integration canonicalizes unquoted shorthand as
