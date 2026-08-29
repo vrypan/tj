@@ -224,6 +224,14 @@ test {
     _ = @import("store.zig");
     _ = @import("search.zig");
     _ = @import("report.zig");
+    _ = @import("context.zig");
+    _ = @import("cmd_grep.zig");
+    _ = @import("cmd_history.zig");
+    _ = @import("cmd_reference.zig");
+    _ = @import("cmd_annotate.zig");
+    _ = @import("cmd_remove.zig");
+    _ = @import("cmd_cat.zig");
+    _ = @import("cmd_replay.zig");
     _ = @import("sqlite.zig");
     _ = @import("mutation_lock.zig");
     _ = commands;
