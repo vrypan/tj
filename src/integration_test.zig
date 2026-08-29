@@ -121,9 +121,9 @@ test "application and every command expose generated help" {
     }
 
     const command_names = [_][]const u8{
-        "new",  "continue", "noout",  "hist",    "journal",  "current",
-        "last", "cat",      "replay", "resolve", "complete", "name",
-        "tag",  "pin",      "rm",     "grep",
+        "new",     "continue", "noout", "hist",   "usage",   "journal",
+        "current", "last",     "cat",   "replay", "resolve", "complete",
+        "name",    "tag",      "pin",   "rm",     "grep",
     };
     for (command_names) |name| {
         const result = try runNonTty(gpa, &.{ name, "--help" });
@@ -169,6 +169,9 @@ test "build-time completions expose cli grammar and journal references" {
     try std.testing.expect(std.mem.startsWith(u8, zsh, "#compdef tj\n"));
     try std.testing.expect(std.mem.indexOf(u8, zsh, "'hist:List entries with annotations, size, and date'") != null);
     try std.testing.expect(std.mem.indexOf(u8, zsh, "_tj__cmd_hist()") != null);
+    try std.testing.expect(std.mem.indexOf(u8, zsh, "_tj__cmd_usage()") != null);
+    try std.testing.expect(std.mem.indexOf(u8, zsh, "--chart[Show every entry") != null);
+    try std.testing.expect(std.mem.indexOf(u8, zsh, "--bytes[List exact entry bytes") != null);
     try std.testing.expect(std.mem.indexOf(u8, zsh, "_tj__cmd_ls()") == null);
     try std.testing.expect(std.mem.indexOf(u8, zsh, "--tag=[") != null);
     try std.testing.expect(std.mem.indexOf(u8, zsh, "--pinned") != null);
@@ -208,6 +211,7 @@ test "schema errors use status two and command help" {
         .{ .args = &.{ "cat", "--head" }, .diagnostic = "requires <N>", .usage = "Usage: tj cat" },
         .{ .args = &.{"resolve"}, .diagnostic = "missing required argument", .usage = "Usage: tj resolve" },
         .{ .args = &.{ "complete", "@1", "@2" }, .diagnostic = "too many arguments", .usage = "Usage: tj complete" },
+        .{ .args = &.{ "usage", "extra" }, .diagnostic = "too many arguments", .usage = "Usage: tj usage" },
         .{ .args = &.{ "grep", "--color=sometimes", "x" }, .diagnostic = "invalid value", .usage = "Usage: tj grep" },
     };
     for (cases) |case| {
@@ -2411,6 +2415,96 @@ const Scratch = struct {
         return count;
     }
 };
+
+test "usage sums logical journal bytes and charts every entry in number order" {
+    const gpa = std.testing.allocator;
+    const io = std.testing.io;
+    var scratch = try Scratch.open();
+    defer scratch.close();
+
+    const id = ulid.encode(39, .{1} ** 10);
+    try scratch.makeJournal(id, &.{ "1", "3", "10" });
+    var journal = try scratch.tmp.dir.openDir(io, &id, .{});
+    defer journal.close(io);
+
+    try journal.writeFile(io, .{ .sub_path = "annotations.json", .data = &([_]u8{'a'} ** 100) });
+    try journal.writeFile(io, .{ .sub_path = "log", .data = &([_]u8{'l'} ** 105) });
+
+    var one = try journal.openDir(io, "1", .{});
+    defer one.close(io);
+    try one.writeFile(io, .{ .sub_path = "cmd", .data = "cmd" });
+    try one.createDir(io, "files", @enumFromInt(0o700));
+    var files = try one.openDir(io, "files", .{});
+    defer files.close(io);
+    try files.writeFile(io, .{ .sub_path = "blob", .data = &([_]u8{'x'} ** 1021) });
+
+    var three = try journal.openDir(io, "3", .{});
+    defer three.close(io);
+    try three.writeFile(io, .{ .sub_path = "cmd", .data = "four" });
+    try three.writeFile(io, .{ .sub_path = "out", .data = &([_]u8{'y'} ** 2044) });
+
+    const total = try runNonTtyInJournal(gpa, &.{ "--home", scratch.path(), "usage" }, &id, "11");
+    defer gpa.free(total.stdout);
+    defer gpa.free(total.stderr);
+    try std.testing.expectEqual(@as(u8, 0), total.term.exited);
+    try std.testing.expectEqualStrings("3.2k\n", total.stdout);
+    try std.testing.expectEqualStrings("", total.stderr);
+
+    const bytes = try runNonTtyInJournal(gpa, &.{ "--home", scratch.path(), "usage", "--bytes" }, &id, "11");
+    defer gpa.free(bytes.stdout);
+    defer gpa.free(bytes.stderr);
+    try std.testing.expectEqual(@as(u8, 0), bytes.term.exited);
+    try std.testing.expectEqualStrings("@1 1024\n@3 2048\n@10 0\n", bytes.stdout);
+    try std.testing.expectEqualStrings("", bytes.stderr);
+
+    const chart = try runNonTtyInJournal(gpa, &.{ "--home", scratch.path(), "usage", "--chart" }, &id, "11");
+    defer gpa.free(chart.stdout);
+    defer gpa.free(chart.stderr);
+    try std.testing.expectEqual(@as(u8, 0), chart.term.exited);
+    try std.testing.expect(std.mem.startsWith(u8, chart.stdout, "Total 3.2k\n\nEntry Size Chart\n"));
+    const one_at = std.mem.indexOf(u8, chart.stdout, " @1 1.0k ") orelse return error.TestUnexpectedResult;
+    const three_at = std.mem.indexOf(u8, chart.stdout, " @3 2.0k ") orelse return error.TestUnexpectedResult;
+    const ten_at = std.mem.indexOf(u8, chart.stdout, "@10   0b\n") orelse return error.TestUnexpectedResult;
+    try std.testing.expect(one_at < three_at and three_at < ten_at);
+    try std.testing.expectEqual(@as(usize, 107), std.mem.count(u8, chart.stdout, "█"));
+    try std.testing.expect(std.mem.indexOfScalar(u8, chart.stdout, 0x1b) == null);
+    try std.testing.expectEqualStrings("", chart.stderr);
+
+    const exact_chart = try runNonTtyInJournal(
+        gpa,
+        &.{ "--home", scratch.path(), "usage", "--chart", "--bytes" },
+        &id,
+        "11",
+    );
+    defer gpa.free(exact_chart.stdout);
+    defer gpa.free(exact_chart.stderr);
+    try std.testing.expectEqual(@as(u8, 0), exact_chart.term.exited);
+    try std.testing.expect(std.mem.startsWith(u8, exact_chart.stdout, "Total 3277\n\nEntry Size Chart\n"));
+    try std.testing.expect(std.mem.indexOf(u8, exact_chart.stdout, " @1 1024 ") != null);
+    try std.testing.expect(std.mem.indexOf(u8, exact_chart.stdout, " @3 2048 ") != null);
+    try std.testing.expect(std.mem.indexOf(u8, exact_chart.stdout, "@10    0\n") != null);
+    try std.testing.expectEqual(@as(usize, 107), std.mem.count(u8, exact_chart.stdout, "█"));
+    try std.testing.expectEqualStrings("", exact_chart.stderr);
+
+    var id_buf: [id.len + 1]u8 = undefined;
+    @memcpy(id_buf[0..id.len], &id);
+    id_buf[id.len] = 0;
+    sys.setEnv("TJ_JOURNAL", id_buf[0..id.len :0]);
+    defer leaveJournal();
+    const terminal_child = try spawnTj(gpa, &.{
+        "/usr/bin/env", "-u",           "NO_COLOR", "TERM=xterm-256color", tj,
+        "--home",       scratch.path(), "usage",    "--chart",
+    }, 24, 40);
+    var terminal: std.ArrayList(u8) = .empty;
+    defer terminal.deinit(gpa);
+    try std.testing.expectEqual(@as(u8, 0), try terminal_child.finish(gpa, &terminal, timeout_ms));
+    try std.testing.expect(std.mem.indexOf(u8, terminal.items, noout.begin_marker) != null);
+    try std.testing.expect(std.mem.indexOf(u8, terminal.items, noout.end_marker) != null);
+    try std.testing.expect(std.mem.indexOf(u8, terminal.items, "\x1b[33m@1\x1b[0m") != null);
+    try std.testing.expect(std.mem.indexOf(u8, terminal.items, "\x1b[32m1.0k\x1b[0m") != null);
+    try std.testing.expect(std.mem.indexOf(u8, terminal.items, "\x1b[34m") == null);
+    try std.testing.expectEqual(@as(usize, 47), std.mem.count(u8, terminal.items, "█"));
+}
 
 test "a new journal that recorded nothing leaves nothing behind" {
     const gpa = std.testing.allocator;

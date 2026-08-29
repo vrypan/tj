@@ -794,6 +794,99 @@ pub const InteractionInfo = struct {
     }
 };
 
+pub const EntryUsage = struct {
+    number: u32,
+    bytes: u64,
+};
+
+pub const JournalUsage = struct {
+    total_bytes: u64,
+    entries: []EntryUsage,
+
+    pub fn deinit(self: JournalUsage, gpa: std.mem.Allocator) void {
+        gpa.free(self.entries);
+    }
+};
+
+/// Sums logical file lengths, not allocated filesystem blocks. Directories
+/// contribute no bytes of their own; symlinks contribute the length of the
+/// link itself and are never followed.
+pub fn measureJournalUsage(
+    gpa: std.mem.Allocator,
+    io: Io,
+    root: Dir,
+    journal: []const u8,
+) !JournalUsage {
+    var dir = try root.openDir(io, journal, .{ .iterate = true });
+    defer dir.close(io);
+
+    var entries: std.ArrayList(EntryUsage) = .empty;
+    errdefer entries.deinit(gpa);
+    var total: u64 = 0;
+
+    var it = dir.iterate();
+    while (try it.next(io)) |entry| {
+        var kind = entry.kind;
+        var file_size: ?u64 = null;
+        if (kind == .unknown) {
+            const stat = try dir.statFile(io, entry.name, .{ .follow_symlinks = false });
+            kind = stat.kind;
+            file_size = stat.size;
+        }
+
+        if (kind == .directory) {
+            var child = try dir.openDir(io, entry.name, .{ .iterate = true });
+            defer child.close(io);
+            const bytes = try directoryLogicalBytes(gpa, io, child);
+            total +|= bytes;
+            if (parseInteractionDirName(entry.name)) |number| {
+                try entries.append(gpa, .{ .number = number, .bytes = bytes });
+            }
+            continue;
+        }
+
+        const bytes = file_size orelse blk: {
+            const stat = try dir.statFile(io, entry.name, .{ .follow_symlinks = false });
+            break :blk stat.size;
+        };
+        total +|= bytes;
+    }
+
+    std.mem.sort(EntryUsage, entries.items, {}, struct {
+        fn byNumber(_: void, a: EntryUsage, b: EntryUsage) bool {
+            return a.number < b.number;
+        }
+    }.byNumber);
+
+    return .{ .total_bytes = total, .entries = try entries.toOwnedSlice(gpa) };
+}
+
+fn directoryLogicalBytes(gpa: std.mem.Allocator, io: Io, dir: Dir) !u64 {
+    var walker = try dir.walkSelectively(gpa);
+    defer walker.deinit();
+
+    var total: u64 = 0;
+    while (try walker.next(io)) |entry| {
+        var resolved = entry;
+        var file_size: ?u64 = null;
+        if (resolved.kind == .unknown) {
+            const stat = try resolved.dir.statFile(io, resolved.basename, .{ .follow_symlinks = false });
+            resolved.kind = stat.kind;
+            file_size = stat.size;
+        }
+        if (resolved.kind == .directory) {
+            try walker.enter(io, resolved);
+            continue;
+        }
+        const bytes = file_size orelse blk: {
+            const stat = try resolved.dir.statFile(io, resolved.basename, .{ .follow_symlinks = false });
+            break :blk stat.size;
+        };
+        total +|= bytes;
+    }
+    return total;
+}
+
 /// Interactions of one journal, in numeric order.
 pub fn listInteractions(gpa: std.mem.Allocator, io: Io, root: Dir, journal: []const u8) ![]InteractionInfo {
     var dir = try root.openDir(io, journal, .{ .iterate = true });

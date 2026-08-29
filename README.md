@@ -160,6 +160,10 @@ tj hist                   # flags, entry reference, output size, date, command m
 tj hist @242              # full details for one entry
 tj hist @2..@10 @15       # selected entries, inclusive ranges skip holes
 tj hist @8wpc.            # every entry in the journal ending in 8wpc
+tj usage                  # total logical storage used by this journal
+tj usage --bytes          # each entry reference and its exact byte count
+tj usage --chart          # total plus a terminal-width chart of every entry
+tj usage --chart --bytes  # chart with exact counts instead of compact sizes
 tj journal list           # every journal, newest first
 tj current                # this journal's id
 tj last                   # the last entry that completed
@@ -292,6 +296,30 @@ When history is written directly to a terminal inside a journal writer, TJ
 wraps the listing in a noout region. The listing remains visible, while the
 current entry records only `<tj:noout>` instead of copying the index into the
 journal. Piped and redirected history remains ordinary marker-free output.
+
+`tj usage` sums the logical lengths of all files in the current journal and
+prints the total in the same compact base-1024 units used by history. It does
+not report filesystem allocation blocks. `tj usage --chart` also shows every
+numeric entry in entry-number order, summing all files below each entry—not
+only `out`—and scales the longest bar to the available terminal width:
+
+```text
+Total 3.2M
+
+Entry Size Chart
+  @1 512k ██████████████
+ @10 1.0M ████████████████████████████
+ @12 256k ███████
+```
+
+Journal-level files such as annotations and the bounded warning log contribute
+to the total but do not receive entry rows. `--bytes` by itself prints one
+plain `@ENTRY BYTES` row per entry; with `--chart`, it changes the total and
+row sizes from compact units to exact byte counts while retaining the bars.
+Chart bars keep the terminal's default foreground color. Like terminal history
+and grep, terminal usage output is enclosed in a noout region so the report
+does not become its own recorded output. Redirected output contains no OSC
+markers.
 
 History uses an `ls -l`-shaped index:
 

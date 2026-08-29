@@ -13,6 +13,7 @@ pub const CommandName = enum {
     @"continue",
     noout,
     hist,
+    usage,
     journal,
     current,
     last,

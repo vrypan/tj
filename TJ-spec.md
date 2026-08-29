@@ -663,6 +663,28 @@ journal exists, history lazily encloses the listing in one OSC 5107 noout
 region. No markers are emitted when filters select no entries. Redirected or
 piped history is one physical line per entry, with no styling or OSC markers.
 
+`tj usage` reports the current journal's total logical byte length, formatted
+with the same base-1024 `b`, `k`, `M`, `G`, and larger suffixes as history.
+Logical length is the sum of file lengths, not allocated filesystem blocks;
+directory metadata is not counted, symlinks are not followed, and their link
+length is counted. The total includes journal-level files as well as entries.
+
+`tj usage --chart` prints that total followed by one row for every valid
+numeric entry directory, sorted by entry number. An entry row sums every file
+beneath that entry, including core and published resources. The largest entry
+fills the available terminal width; every nonempty smaller entry receives at
+least one full-block chart cell, and an empty entry has no bar. Journal-level
+files contribute only to the total. Terminal output uses a noout region and
+automatic color subject to `NO_COLOR`, except that bars retain the terminal's
+default foreground; redirected output has neither styling nor OSC markers and
+uses an 80-column chart width.
+
+`tj usage --bytes` without `--chart` emits one `@ENTRY BYTES` row per valid
+numeric entry, in entry order, using exact decimal logical byte counts and no
+total row. With `--chart`, `--bytes` preserves the chart layout and bars but
+formats both the journal total and every entry size as exact decimal bytes
+instead of compact human-readable units.
+
 A pin is an idempotent boolean annotation. It appears as `*` beside the
 entry number in history. Pins protect entries and their output
 from entry-level removal unless `--force` is present. They have no

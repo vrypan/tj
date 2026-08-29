@@ -47,6 +47,11 @@ const hist_flags = [_]zecli.FlagSpec{
     },
 };
 
+const usage_flags = [_]zecli.FlagSpec{
+    .{ .name = "chart", .description = "Show every entry's size as a terminal-width chart" },
+    .{ .name = "bytes", .description = "List exact entry bytes, or use exact values in the chart" },
+};
+
 const cat_flags = [_]zecli.FlagSpec{
     .{ .name = "raw", .short = 'r', .description = "Write recorded bytes without rendering", .repeatable = true },
     .{ .name = "plain", .short = 'p', .description = "Render terminal output as plain text", .repeatable = true },
@@ -139,6 +144,13 @@ const commands = [_]zecli.CommandSpec{
             .completion = reference_completion,
         }},
         .extra_help = "With no targets, list the current journal. A trailing dot selects an entire journal: @8wpc.\n",
+    },
+    .{
+        .name = "usage",
+        .description = "Show the current journal's logical storage size",
+        .usage = "tj usage [--chart] [--bytes]",
+        .flags = &usage_flags,
+        .extra_help = "Sizes sum file lengths, not filesystem allocation blocks. --bytes alone prints @ENTRY BYTES; with --chart it selects exact numeric sizes.\n",
     },
     .{
         .name = "journal",

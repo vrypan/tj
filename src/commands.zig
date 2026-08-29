@@ -79,6 +79,7 @@ pub fn run(
         .current => try out.print("{s}\n", .{try currentJournal()}),
         .journal => try journalCommand(gpa, io, home, parsed, out),
         .hist => try listInteractions(gpa, io, home, parsed, out),
+        .usage => try usageCommand(gpa, io, home, parsed, out),
         .last => try printLast(gpa, io, home, out),
         .resolve => try resolveReference(gpa, io, home, parsed, out),
         .complete => try completeReference(gpa, io, home, parsed, out),
@@ -1078,6 +1079,105 @@ fn listInteractions(
             try out.writeByte('\n');
         }
     }
+}
+
+fn usageCommand(
+    gpa: std.mem.Allocator,
+    io: Io,
+    home: ?[]const u8,
+    parsed: *const zecli.Parsed,
+    out: *Io.Writer,
+) !void {
+    var root = try store.openRoot(io, home);
+    defer root.close(io);
+
+    const journal = try currentJournal();
+    const measured = store.measureJournalUsage(gpa, io, root, journal) catch |err| switch (err) {
+        error.FileNotFound => return error.NoSuchJournal,
+        else => |other| return other,
+    };
+    defer measured.deinit(gpa);
+
+    var noout_region: NooutRegion = .{
+        .out = out,
+        .enabled = sys.isTty(1),
+    };
+    defer noout_region.finish();
+    try noout_region.begin();
+
+    var total_buf: [24]u8 = undefined;
+    const exact_bytes = parsed.present("bytes");
+    const total_text = formatUsageSize(measured.total_bytes, exact_bytes, &total_buf);
+    if (!parsed.present("chart") and !exact_bytes) {
+        try out.print("{s}\n", .{total_text});
+        return;
+    }
+    if (!parsed.present("chart")) {
+        for (measured.entries) |entry| try out.print("@{d} {d}\n", .{ entry.number, entry.bytes });
+        return;
+    }
+
+    const color_enabled = historyColorEnabled();
+    try out.writeAll("Total ");
+    if (color_enabled) try out.writeAll("\x1b[32m");
+    try out.writeAll(total_text);
+    if (color_enabled) try out.writeAll("\x1b[0m");
+    try out.writeAll("\n\nEntry Size Chart\n");
+
+    var reference_width: usize = 2;
+    var size_width: usize = 1;
+    var largest: u64 = 0;
+    for (measured.entries) |entry| {
+        reference_width = @max(reference_width, 1 + decimalWidth(entry.number));
+        var size_buf: [24]u8 = undefined;
+        size_width = @max(size_width, formatUsageSize(entry.bytes, exact_bytes, &size_buf).len);
+        largest = @max(largest, entry.bytes);
+    }
+    const prefix_width = reference_width + 1 + size_width + 1;
+    const columns = historyTerminalColumns() orelse 80;
+    const available = if (columns > prefix_width) columns - prefix_width else 1;
+
+    for (measured.entries) |entry| {
+        const actual_reference_width = 1 + decimalWidth(entry.number);
+        try out.splatByteAll(' ', reference_width - actual_reference_width);
+        if (color_enabled) try out.writeAll("\x1b[33m");
+        try out.print("@{d}", .{entry.number});
+        if (color_enabled) try out.writeAll("\x1b[0m");
+        try out.writeByte(' ');
+
+        var size_buf: [24]u8 = undefined;
+        const size_text = formatUsageSize(entry.bytes, exact_bytes, &size_buf);
+        try out.splatByteAll(' ', size_width - size_text.len);
+        if (color_enabled) try out.writeAll("\x1b[32m");
+        try out.writeAll(size_text);
+        if (color_enabled) try out.writeAll("\x1b[0m");
+
+        const width = usageBarWidth(entry.bytes, largest, available);
+        if (width != 0) {
+            try out.writeByte(' ');
+            try out.splatBytesAll("█", width);
+        }
+        try out.writeByte('\n');
+    }
+}
+
+fn formatUsageSize(bytes: u64, exact: bool, buf: *[24]u8) []const u8 {
+    if (!exact) return formatHumanSize(bytes, buf);
+    return std.fmt.bufPrint(buf, "{d}", .{bytes}) catch "?";
+}
+
+fn usageBarWidth(bytes: u64, largest: u64, available: usize) usize {
+    if (bytes == 0 or largest == 0 or available == 0) return 0;
+    const numerator = @as(u128, bytes) * available;
+    return @intCast((numerator + largest - 1) / largest);
+}
+
+test "usage chart bars preserve small entries and avoid integer overflow" {
+    try std.testing.expectEqual(@as(usize, 0), usageBarWidth(0, 10, 80));
+    try std.testing.expectEqual(@as(usize, 0), usageBarWidth(10, 0, 80));
+    try std.testing.expectEqual(@as(usize, 5), usageBarWidth(5, 10, 10));
+    try std.testing.expectEqual(@as(usize, 4), usageBarWidth(1, 3, 10));
+    try std.testing.expectEqual(@as(usize, 80), usageBarWidth(std.math.maxInt(u64), std.math.maxInt(u64), 80));
 }
 
 fn formatEntrySize(info: store.InteractionInfo, buf: *[24]u8) []const u8 {
