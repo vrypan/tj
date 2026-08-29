@@ -491,24 +491,32 @@ tj grep --all example.com        # every journal, newest first
 tj grep -- --starts-with-a-dash
 ```
 
-This is fixed-string search, not regular expressions. A matching line is
-printed once with a reusable reference:
+This is fixed-string search, not regular expressions. Each matching line uses
+the same visual grammar as `tj hist`:
 
 ```text
-@42/out: error: connection reset by peer
+*   42  [out] error: connection reset by peer @build-failure [network] [rc=1]
 ```
 
-Current-journal results use short `@N/resource` references. `--all` works
-outside a writer and uses full journal IDs, such as `@01K...XYZ.42/out`, so
-saved results remain unambiguous. Use `--cmd` and `--out` together to select
-both explicitly. Exit status 0 means at least one line matched, 1 means no
-match, and 2 means invalid grep arguments or no current journal without
-`--all`.
+The columns are pin, entry number, source resource, matching text, optional
+name and tags, and a nonzero status. Current-journal rows use a plain number;
+`--all` works outside a writer and qualifies it with the journal's four-byte
+suffix, such as `@8wpc.42`. Use `--cmd` and `--out` together to select both
+explicitly. Exit status 0 means at least one line matched, 1 means no match,
+and 2 means invalid grep arguments or no current journal without `--all`.
+
+Matching still uses the original stored bytes. For display, leading and
+trailing spaces or tabs are removed and internal horizontal-whitespace runs
+collapse to one space. Use `tj cat` when exact indentation or layout matters.
+
+Terminal rows wrap beneath the content column and use the same dimmed metadata
+and red failure styling as history. Piped and redirected rows keep the same
+fields but remain one physical line each and omit presentation styling.
 
 Highlighting uses GNU grep's three color modes and is off by default. `--color`
 (also `--colour`) requires `never`, `auto`, or `always`, supplied either as the
 next argument or with `=`. Auto enables match highlighting only when stdout is
-a terminal and `TERM` indicates color support. Always emits ANSI styling even
+a terminal and `TERM` indicates color support. Always emits match styling even
 through a pipe or redirect, while never disables it. Selected matches default
 to bold red and honor the `mt` or `ms` selected-match capability in
 `GREP_COLORS`.

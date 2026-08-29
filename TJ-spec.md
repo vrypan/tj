@@ -764,18 +764,28 @@ Iteration uses the storage model rather than recursive filesystem traversal:
 journals are newest first, entries are numeric ascending, resources are
 `cmd` then `out`, and matching lines retain source order. Matching does not
 cross a newline. Each matching source line is emitted once even if it contains
-the literal more than once. Its bytes, excluding the terminating newline but
-including a preceding carriage return or other control bytes, are preserved
-after a canonical prefix and followed by one newline:
+the literal more than once. Matching operates on original stored bytes. For
+presentation, a terminal line-ending carriage return and leading or trailing
+horizontal whitespace are omitted, while internal spaces and tabs collapse to
+one space. Other source bytes are preserved. Results use history's row grammar:
 
 ``` text
-@42/out: matching source line
-@01K...XYZ.42/out: matching source line under --all
+*   42  [out] matching source line @name [tag] [rc=1]
+  @8wpc.42  [out] matching source line under --all
 ```
 
-Current-journal results are unqualified. Every `--all` result uses the full
-journal ULID, including results from the writer's current journal. A final
-unterminated source line is still searchable.
+The leading pin, optional name and tags, and nonzero status come from the same
+journal-local annotations and entry metadata as history. Current-journal
+results use a plain right-aligned number. Every `--all` result qualifies the
+number with the last four bytes of its journal ULID, including results from the
+writer's current journal. A final unterminated source line is still searchable.
+
+On a terminal, TJ obtains the width with `TIOCGWINSZ` and hard-wraps rows under
+the content column without buffering the source line. The resource, name, and
+tags are dimmed and a nonzero status is red when terminal styling is supported.
+Piped and redirected results use the same fields without wrapping or
+presentation styling. Explicit `--color=always` still styles selected matches
+when redirected, as described above.
 
 When `TJ_JOURNAL` is set and decimal `TJ_NEXT` is greater than one, entry
 `TJ_NEXT - 1` in that exact journal is treated as the command currently

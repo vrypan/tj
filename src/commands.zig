@@ -189,6 +189,9 @@ const GrepOutput = struct {
     out: *Io.Writer,
     noout_enabled: bool,
     match_sgr: []const u8,
+    terminal_columns: ?usize,
+    layout_color: bool,
+    reference_width: usize,
     noout_started: bool = false,
 
     fn begin(self: *GrepOutput) !void {
@@ -204,6 +207,176 @@ const GrepOutput = struct {
     }
 };
 
+/// Adds hard terminal-width boundaries while forwarding source bytes and ANSI
+/// sequences unchanged. It deliberately buffers nothing: grep retains its
+/// fixed-memory behavior even for a very long matching source line.
+const GrepWrapWriter = struct {
+    downstream: *Io.Writer,
+    interface: Io.Writer,
+    columns: usize,
+    prefix_width: usize,
+    column: usize,
+    escape: enum { normal, esc, csi, string, string_esc } = .normal,
+
+    fn init(downstream: *Io.Writer, columns: usize, prefix_width: usize) GrepWrapWriter {
+        return .{
+            .downstream = downstream,
+            .interface = .{ .vtable = &.{ .drain = drain }, .buffer = &.{} },
+            .columns = columns,
+            .prefix_width = prefix_width,
+            .column = prefix_width,
+        };
+    }
+
+    fn drain(writer: *Io.Writer, data: []const []const u8, splat: usize) Io.Writer.Error!usize {
+        const self: *GrepWrapWriter = @alignCast(@fieldParentPtr("interface", writer));
+        for (data[0 .. data.len - 1]) |bytes| try self.writeBytes(bytes);
+        const pattern = data[data.len - 1];
+        for (0..splat) |_| try self.writeBytes(pattern);
+        writer.end = 0;
+        return Io.Writer.countSplat(data, splat);
+    }
+
+    fn writeBytes(self: *GrepWrapWriter, bytes: []const u8) Io.Writer.Error!void {
+        for (bytes) |byte| try self.writeByte(byte);
+    }
+
+    fn writeByte(self: *GrepWrapWriter, byte: u8) Io.Writer.Error!void {
+        switch (self.escape) {
+            .normal => {
+                if (byte == 0x1b) {
+                    self.escape = .esc;
+                    return self.downstream.writeByte(byte);
+                }
+                var width: usize = 0;
+                if (byte == '\t') {
+                    width = 8 - (self.column % 8);
+                } else if (byte >= 0x20 and byte != 0x7f and (byte & 0xc0) != 0x80) {
+                    // Match history's UTF-8 policy: one cell per scalar. Wide
+                    // glyphs remain the terminal's decision.
+                    width = 1;
+                } else if (byte == 0x08 and self.column > self.prefix_width) {
+                    self.column -= 1;
+                }
+                if (width != 0 and self.columns > self.prefix_width and self.column + width > self.columns) {
+                    try self.downstream.writeByte('\n');
+                    try self.downstream.splatByteAll(' ', self.prefix_width);
+                    self.column = self.prefix_width;
+                    if (byte == '\t') width = 8 - (self.column % 8);
+                }
+                try self.downstream.writeByte(byte);
+                self.column += width;
+            },
+            .esc => {
+                try self.downstream.writeByte(byte);
+                self.escape = switch (byte) {
+                    '[' => .csi,
+                    ']', 'P', '^', '_' => .string,
+                    else => .normal,
+                };
+            },
+            .csi => {
+                try self.downstream.writeByte(byte);
+                if (byte >= 0x40 and byte <= 0x7e) self.escape = .normal;
+            },
+            .string => {
+                try self.downstream.writeByte(byte);
+                if (byte == 0x07) {
+                    self.escape = .normal;
+                } else if (byte == 0x1b) {
+                    self.escape = .string_esc;
+                }
+            },
+            .string_esc => {
+                try self.downstream.writeByte(byte);
+                self.escape = if (byte == '\\') .normal else if (byte == 0x1b) .string_esc else .string;
+            },
+        }
+    }
+};
+
+/// Grep is a discovery view rather than a byte-for-byte resource renderer.
+/// Normalize horizontal whitespace without buffering a source line: leading
+/// and trailing runs disappear, and an internal run is emitted lazily as one
+/// space when the next visible byte arrives. Terminal control sequences pass
+/// through and do not count as content.
+const GrepNormalizeWriter = struct {
+    downstream: *Io.Writer,
+    interface: Io.Writer,
+    seen_content: bool = false,
+    pending_space: bool = false,
+    escape: enum { normal, esc, csi, string, string_esc } = .normal,
+
+    fn init(downstream: *Io.Writer) GrepNormalizeWriter {
+        return .{
+            .downstream = downstream,
+            .interface = .{ .vtable = &.{ .drain = drain }, .buffer = &.{} },
+        };
+    }
+
+    fn finish(self: *GrepNormalizeWriter) void {
+        self.pending_space = false;
+    }
+
+    fn drain(writer: *Io.Writer, data: []const []const u8, splat: usize) Io.Writer.Error!usize {
+        const self: *GrepNormalizeWriter = @alignCast(@fieldParentPtr("interface", writer));
+        for (data[0 .. data.len - 1]) |bytes| try self.writeBytes(bytes);
+        const pattern = data[data.len - 1];
+        for (0..splat) |_| try self.writeBytes(pattern);
+        writer.end = 0;
+        return Io.Writer.countSplat(data, splat);
+    }
+
+    fn writeBytes(self: *GrepNormalizeWriter, bytes: []const u8) Io.Writer.Error!void {
+        for (bytes) |byte| try self.writeByte(byte);
+    }
+
+    fn writeByte(self: *GrepNormalizeWriter, byte: u8) Io.Writer.Error!void {
+        switch (self.escape) {
+            .normal => {
+                if (byte == 0x1b) {
+                    self.escape = .esc;
+                    return self.downstream.writeByte(byte);
+                }
+                if (byte == ' ' or byte == '\t') {
+                    if (self.seen_content) self.pending_space = true;
+                    return;
+                }
+                if (byte >= 0x20 and byte != 0x7f) {
+                    if (self.pending_space) try self.downstream.writeByte(' ');
+                    self.pending_space = false;
+                    self.seen_content = true;
+                }
+                try self.downstream.writeByte(byte);
+            },
+            .esc => {
+                try self.downstream.writeByte(byte);
+                self.escape = switch (byte) {
+                    '[' => .csi,
+                    ']', 'P', '^', '_' => .string,
+                    else => .normal,
+                };
+            },
+            .csi => {
+                try self.downstream.writeByte(byte);
+                if (byte >= 0x40 and byte <= 0x7e) self.escape = .normal;
+            },
+            .string => {
+                try self.downstream.writeByte(byte);
+                if (byte == 0x07) {
+                    self.escape = .normal;
+                } else if (byte == 0x1b) {
+                    self.escape = .string_esc;
+                }
+            },
+            .string_esc => {
+                try self.downstream.writeByte(byte);
+                self.escape = if (byte == '\\') .normal else if (byte == 0x1b) .string_esc else .string;
+            },
+        }
+    }
+};
+
 const GrepLineSink = struct {
     output: *GrepOutput,
     journal: []const u8,
@@ -211,15 +384,47 @@ const GrepLineSink = struct {
     resource: []const u8,
     qualified: bool,
     matcher: *const search.Matcher,
+    annotation: ?*const annotations.Entry,
+    exit_code: ?u8,
 
     fn emit(context: *anyopaque, file: Io.File, start: u64, end: u64) !void {
         const self: *GrepLineSink = @ptrCast(@alignCast(context));
         try self.output.begin();
-        if (self.qualified) {
-            try self.output.out.print("@{s}.{d}/{s}: ", .{ self.journal, self.number, self.resource });
+
+        var reference_buf: [64]u8 = undefined;
+        const reference_text = if (self.qualified) blk: {
+            const suffix = journalDisplaySuffix(self.journal);
+            break :blk try std.fmt.bufPrint(&reference_buf, "@{s}.{d}", .{ suffix, self.number });
+        } else try std.fmt.bufPrint(&reference_buf, "{d}", .{self.number});
+        const prefix_width = 1 + 1 + self.output.reference_width + 2;
+        try self.output.out.writeByte(if (self.annotation != null and self.annotation.?.pinned) '*' else ' ');
+        try self.output.out.writeByte(' ');
+        try self.output.out.splatByteAll(' ', self.output.reference_width - reference_text.len);
+        try self.output.out.writeAll(reference_text);
+        try self.output.out.writeAll("  ");
+
+        if (self.output.terminal_columns) |columns| {
+            var wrapped = GrepWrapWriter.init(self.output.out, columns, prefix_width);
+            try self.writePayload(file, start, end, &wrapped.interface);
         } else {
-            try self.output.out.print("@{d}/{s}: ", .{ self.number, self.resource });
+            try self.writePayload(file, start, end, self.output.out);
         }
+        try self.output.out.writeAll("\n");
+    }
+
+    fn writePayload(self: *GrepLineSink, file: Io.File, start: u64, original_end: u64, writer: *Io.Writer) !void {
+        if (self.output.layout_color) try writer.writeAll("\x1b[2m");
+        try writer.print("[{s}]", .{self.resource});
+        if (self.output.layout_color) try writer.writeAll("\x1b[0m");
+        try writer.writeByte(' ');
+
+        var end = original_end;
+        if (end > start) {
+            var last: [1]u8 = undefined;
+            const n = try file.readPositional(self.output.io, &.{last[0..]}, end - 1);
+            if (n == 1 and last[0] == '\r') end -= 1;
+        }
+        var normalized = GrepNormalizeWriter.init(writer);
         try search.copyHighlightedSpan(
             self.output.io,
             file,
@@ -227,11 +432,88 @@ const GrepLineSink = struct {
             end,
             self.matcher,
             self.output.match_sgr,
-            self.output.out,
+            &normalized.interface,
         );
-        try self.output.out.writeAll("\n");
+        normalized.finish();
+
+        const has_name = self.annotation != null and self.annotation.?.name != null;
+        const has_tags = self.annotation != null and self.annotation.?.tags.items.len != 0;
+        const has_failure = self.exit_code != null and self.exit_code.? != 0;
+        if (!has_name and !has_tags and !has_failure) return;
+        try writer.writeByte(' ');
+
+        if (has_name or has_tags) {
+            if (self.output.layout_color) try writer.writeAll("\x1b[2m");
+            if (has_name) try writer.print("@{s}", .{self.annotation.?.name.?});
+            if (has_tags) {
+                if (has_name) try writer.writeByte(' ');
+                try writer.writeByte('[');
+                for (self.annotation.?.tags.items, 0..) |tag, i| {
+                    if (i != 0) try writer.writeByte(' ');
+                    try writer.writeAll(tag);
+                }
+                try writer.writeByte(']');
+            }
+            if (self.output.layout_color) try writer.writeAll("\x1b[0m");
+        }
+        if (has_failure) {
+            if (has_name or has_tags) try writer.writeByte(' ');
+            if (self.output.layout_color) try writer.writeAll("\x1b[31m");
+            try writer.print("[rc={d}]", .{self.exit_code.?});
+            if (self.output.layout_color) try writer.writeAll("\x1b[0m");
+        }
     }
 };
+
+test "grep wrapping ignores styling and aligns continuation rows" {
+    const gpa = std.testing.allocator;
+    var bytes: std.ArrayList(u8) = .empty;
+    defer bytes.deinit(gpa);
+    var downstream = Io.Writer.Allocating.fromArrayList(gpa, &bytes);
+    defer bytes = downstream.toArrayList();
+    var wrapped = GrepWrapWriter.init(&downstream.writer, 14, 5);
+
+    try wrapped.interface.writeAll("[out] \x1b[31mabcdefgh\x1b[0m");
+    try std.testing.expectEqualStrings(
+        "[out] \x1b[31mabc\n     defgh\x1b[0m",
+        downstream.writer.buffered(),
+    );
+}
+
+test "grep display normalizes horizontal whitespace without touching control sequences" {
+    const gpa = std.testing.allocator;
+    var bytes: std.ArrayList(u8) = .empty;
+    defer bytes.deinit(gpa);
+    var downstream = Io.Writer.Allocating.fromArrayList(gpa, &bytes);
+    defer bytes = downstream.toArrayList();
+    var normalized = GrepNormalizeWriter.init(&downstream.writer);
+
+    try normalized.interface.writeAll(" \talpha   beta\t \x1b[31mgamma   \x1b[0m");
+    normalized.finish();
+    try std.testing.expectEqualStrings(
+        "alpha beta\x1b[31m gamma\x1b[0m",
+        downstream.writer.buffered(),
+    );
+}
+
+fn journalDisplaySuffix(journal: []const u8) []const u8 {
+    const length = @min(journal.len, 4);
+    return journal[journal.len - length ..];
+}
+
+fn grepReferenceWidth(io: Io, root: store.Dir, journals: []const []const u8, qualified: bool) !usize {
+    var width: usize = 1;
+    for (journals) |journal| {
+        const highest = try store.highestEntryNumber(io, root, journal) orelse continue;
+        const number_width = decimalWidth(highest);
+        const candidate = if (qualified)
+            1 + journalDisplaySuffix(journal).len + 1 + number_width
+        else
+            number_width;
+        width = @max(width, candidate);
+    }
+    return width;
+}
 
 fn grepCommand(
     gpa: std.mem.Allocator,
@@ -252,11 +534,15 @@ fn grepCommand(
     defer root.close(io);
     var matcher = try search.Matcher.init(gpa, request.pattern, request.ignore_case);
     defer matcher.deinit();
+    const terminal_columns = historyTerminalColumns();
     var output: GrepOutput = .{
         .io = io,
         .out = out,
         .noout_enabled = current != null and current.?.len != 0 and sys.isTty(1),
         .match_sgr = if (colorEnabled(request.color)) selectedMatchSgr(sys.env("GREP_COLORS")) else "",
+        .terminal_columns = terminal_columns,
+        .layout_color = historyColorEnabled(),
+        .reference_width = 1,
     };
     defer output.finish();
     const active = activeInteraction();
@@ -268,10 +554,12 @@ fn grepCommand(
             for (journals) |journal| gpa.free(journal);
             gpa.free(journals);
         }
+        output.reference_width = try grepReferenceWidth(io, root, journals, true);
         for (journals) |journal| {
             try grepJournal(gpa, io, root, journal, request, active, &matcher, &output, &total);
         }
     } else {
+        output.reference_width = try grepReferenceWidth(io, root, &.{current.?}, false);
         try grepJournal(gpa, io, root, current.?, request, active, &matcher, &output, &total);
     }
     return if (total == 0) 1 else 0;
@@ -296,6 +584,11 @@ fn grepJournal(
         for (interactions) |info| info.deinit(gpa);
         gpa.free(interactions);
     }
+    var manifest = annotations.load(gpa, io, root, journal) catch |err| switch (err) {
+        error.InvalidAnnotations => return error.InvalidAnnotations,
+        else => return err,
+    };
+    defer manifest.deinit(gpa);
 
     for (interactions) |info| {
         if (active) |item| {
@@ -320,6 +613,8 @@ fn grepJournal(
                 .resource = resource.name,
                 .qualified = request.all,
                 .matcher = matcher,
+                .annotation = manifest.findConst(info.number),
+                .exit_code = info.exit_code,
             };
             const found = try search.scanFile(io, file, matcher, .{
                 .context = &line_sink,

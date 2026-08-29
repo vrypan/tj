@@ -829,6 +829,22 @@ pub fn listInteractions(gpa: std.mem.Allocator, io: Io, root: Dir, journal: []co
     return found.toOwnedSlice(gpa);
 }
 
+/// Reads only numeric directory names, for callers that need to align entry
+/// references without loading every command and output size first.
+pub fn highestEntryNumber(io: Io, root: Dir, journal: []const u8) !?u32 {
+    var dir = try root.openDir(io, journal, .{ .iterate = true });
+    defer dir.close(io);
+
+    var highest: ?u32 = null;
+    var it = dir.iterate();
+    while (try it.next(io)) |entry| {
+        if (entry.kind != .directory) continue;
+        const number = parseInteractionDirName(entry.name) orelse continue;
+        if (highest == null or number > highest.?) highest = number;
+    }
+    return highest;
+}
+
 /// The highest interaction that actually completed. `@-` resolves to this, so
 /// a command reading `@-/out` never picks up the one running it.
 pub fn lastCompleted(gpa: std.mem.Allocator, io: Io, root: Dir, journal: []const u8) !?u32 {

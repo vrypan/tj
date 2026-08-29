@@ -52,6 +52,12 @@ tj grep --out 'connection refused'
 tj grep --cmd 'docker compose'
 ```
 
+Results use history-like rows: pin, entry reference, `[cmd]` or `[out]`, the
+matching line, optional name and tags, and `[rc=N]` for failures. Redirected
+results keep the same fields without terminal wrapping or presentation color.
+Displayed matching lines collapse horizontal whitespace; use `tj cat` for the
+original indentation or layout.
+
 Native grep is fixed-string search; it does not interpret regular expressions.
 Use `tj hist` to browse, and use `tj grep --all LITERAL` only when evidence from
 other journals is relevant. Search results are deliberately omitted from the
