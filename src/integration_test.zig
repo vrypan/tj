@@ -596,7 +596,14 @@ test "each interaction records the fully rendered zsh prompt" {
 
     var journal = try Journal.open(gpa);
     defer journal.close();
-    const child = try spawnJournalZsh(gpa, &journal);
+    // GitHub Actions does not guarantee a useful inherited TERM. Start zsh
+    // with a known terminal description so this test exercises RPROMPT rather
+    // than legitimately having zsh omit it for a dumb terminal.
+    const home = try journal.homeArg(gpa);
+    defer gpa.free(home);
+    const child = try spawnTj(gpa, &.{
+        tj, "--home", home, "new", "--", "/usr/bin/env", "TERM=xterm-256color", "/bin/zsh", "-f", "-i",
+    }, 24, 80);
     var out: std.ArrayList(u8) = .empty;
     defer out.deinit(gpa);
     try setupJournalZsh(gpa, child, &out);
