@@ -1909,12 +1909,26 @@ fn printCanonical(out: *Io.Writer, current: ?[]const u8, journal: []const u8, nu
     try out.print("@{s}.{d}", .{ journal, number });
 }
 
+/// The current journal held open for mutation: its root, its name, and the
+/// lock that serializes writers against it.
+const Mutation = struct {
+    root: store.Dir,
+    journal: []const u8,
+    lock: Io.File,
+
+    fn deinit(self: *Mutation, io: Io) void {
+        self.lock.close(io);
+        self.root.close(io);
+        self.* = undefined;
+    }
+};
+
 fn openCurrentMutation(
     gpa: std.mem.Allocator,
     io: Io,
     home: ?[]const u8,
     mode: mutation_lock.Mode,
-) !struct { root: store.Dir, journal: []const u8, lock: Io.File } {
+) !Mutation {
     const journal = try currentJournal();
     var root = try store.openRoot(io, home);
     errdefer root.close(io);
@@ -1988,8 +2002,7 @@ fn nameCommand(
         },
         .remove => |name| {
             var mutation = try openCurrentMutation(gpa, io, home, .shared);
-            defer mutation.lock.close(io);
-            defer mutation.root.close(io);
+            defer mutation.deinit(io);
             var metadata = try annotations.openWrite(gpa, io, mutation.root, mutation.journal);
             defer metadata.deinit(gpa);
             var transaction = try metadata.begin();
@@ -2004,8 +2017,7 @@ fn nameCommand(
             defer target.deinit(gpa);
             try requireInteraction(target);
             var mutation = try openCurrentMutation(gpa, io, home, .shared);
-            defer mutation.lock.close(io);
-            defer mutation.root.close(io);
+            defer mutation.deinit(io);
             if (!store.interactionExists(io, mutation.root, mutation.journal, target.number)) return error.NoSuchInteraction;
             var metadata = try annotations.openWrite(gpa, io, mutation.root, mutation.journal);
             defer metadata.deinit(gpa);
@@ -2152,8 +2164,7 @@ fn updateTags(
     try requireInteraction(target);
 
     var mutation = try openCurrentMutation(gpa, io, home, .shared);
-    defer mutation.lock.close(io);
-    defer mutation.root.close(io);
+    defer mutation.deinit(io);
     if (!store.interactionExists(io, mutation.root, mutation.journal, target.number)) return error.NoSuchInteraction;
     const normalized = try normalizeTags(gpa, tags);
     defer freeTags(gpa, normalized);
@@ -2207,8 +2218,7 @@ fn updateTagsRange(
     removing: bool,
 ) !void {
     var mutation = try openCurrentMutation(gpa, io, home, .shared);
-    defer mutation.lock.close(io);
-    defer mutation.root.close(io);
+    defer mutation.deinit(io);
     const numbers = try store.listNumbers(gpa, io, mutation.root, mutation.journal);
     defer gpa.free(numbers);
     if (!rangeSelectsAny(numbers, range)) return error.NoSuchInteraction;
@@ -2306,8 +2316,7 @@ fn updatePin(gpa: std.mem.Allocator, io: Io, home: ?[]const u8, ref: []const u8,
     try requireInteraction(target);
 
     var mutation = try openCurrentMutation(gpa, io, home, .shared);
-    defer mutation.lock.close(io);
-    defer mutation.root.close(io);
+    defer mutation.deinit(io);
     if (!store.interactionExists(io, mutation.root, mutation.journal, target.number)) return error.NoSuchInteraction;
     var metadata = try annotations.openWrite(gpa, io, mutation.root, mutation.journal);
     defer metadata.deinit(gpa);
@@ -2325,8 +2334,7 @@ fn updatePinRange(
     pinned: bool,
 ) !void {
     var mutation = try openCurrentMutation(gpa, io, home, .shared);
-    defer mutation.lock.close(io);
-    defer mutation.root.close(io);
+    defer mutation.deinit(io);
     const numbers = try store.listNumbers(gpa, io, mutation.root, mutation.journal);
     defer gpa.free(numbers);
     if (!rangeSelectsAny(numbers, range)) return error.NoSuchInteraction;
@@ -2506,8 +2514,7 @@ fn removeInteraction(
     if (target.subpath.len != 0 and !output_only) return error.UnsupportedRemoval;
 
     var mutation = try openCurrentMutation(gpa, io, home, .exclusive);
-    defer mutation.lock.close(io);
-    defer mutation.root.close(io);
+    defer mutation.deinit(io);
     if (!std.mem.eql(u8, target.journal, mutation.journal)) return error.CrossJournalMutation;
     if (!store.interactionExists(io, mutation.root, mutation.journal, target.number)) return error.NoSuchInteraction;
     const highest = try store.highestNumber(gpa, io, mutation.root, mutation.journal) orelse
@@ -2588,8 +2595,7 @@ fn removeInteractionRange(
     force: bool,
 ) !void {
     var mutation = try openCurrentMutation(gpa, io, home, .exclusive);
-    defer mutation.lock.close(io);
-    defer mutation.root.close(io);
+    defer mutation.deinit(io);
 
     const numbers = try store.listNumbers(gpa, io, mutation.root, mutation.journal);
     defer gpa.free(numbers);
