@@ -223,6 +223,7 @@ test {
     _ = @import("plain.zig");
     _ = @import("store.zig");
     _ = @import("search.zig");
+    _ = @import("report.zig");
     _ = @import("sqlite.zig");
     _ = @import("mutation_lock.zig");
     _ = commands;

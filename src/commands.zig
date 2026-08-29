@@ -14,6 +14,7 @@ const annotations = @import("annotations.zig");
 const mutation_lock = @import("mutation_lock.zig");
 const search = @import("search.zig");
 const noout = @import("noout.zig");
+const report = @import("report.zig");
 const replay_engine = @import("replay.zig");
 
 pub const Error = error{
@@ -190,193 +191,15 @@ fn validSgr(text: []const u8) bool {
     return true;
 }
 
-const NooutRegion = struct {
-    out: *Io.Writer,
-    enabled: bool,
-    started: bool = false,
-
-    fn begin(self: *NooutRegion) !void {
-        if (self.enabled and !self.started) {
-            try self.out.writeAll(noout.begin_marker);
-            self.started = true;
-        }
-    }
-
-    fn finish(self: *NooutRegion) void {
-        if (self.started) self.out.writeAll(noout.end_marker) catch {};
-        self.started = false;
-    }
-};
-
 const GrepOutput = struct {
     io: Io,
     out: *Io.Writer,
-    noout_region: NooutRegion,
+    noout_region: report.NooutRegion,
     match_sgr: []const u8,
     terminal_columns: ?usize,
     layout_color: bool,
     reference_width: usize,
 };
-
-/// Stored commands and output are untrusted terminal input. Strip terminal
-/// controls before they reach a report while optionally normalizing horizontal
-/// whitespace for grep. TJ's own SGR styling bypasses this writer.
-const GrepNormalizeWriter = struct {
-    downstream: *Io.Writer,
-    interface: Io.Writer,
-    collapse_whitespace: bool,
-    seen_content: bool = false,
-    pending_space: bool = false,
-    escape: enum { normal, esc, csi, string, string_esc, charset } = .normal,
-    utf8: [4]u8 = undefined,
-    utf8_len: usize = 0,
-    utf8_expected: usize = 0,
-
-    fn init(downstream: *Io.Writer, collapse_whitespace: bool) GrepNormalizeWriter {
-        return .{
-            .downstream = downstream,
-            .collapse_whitespace = collapse_whitespace,
-            .interface = .{ .vtable = &.{ .drain = drain }, .buffer = &.{} },
-        };
-    }
-
-    fn finish(self: *GrepNormalizeWriter) Io.Writer.Error!void {
-        if (self.utf8_expected != 0) try self.emitReplacement();
-        self.utf8_len = 0;
-        self.utf8_expected = 0;
-        self.pending_space = false;
-    }
-
-    fn drain(writer: *Io.Writer, data: []const []const u8, splat: usize) Io.Writer.Error!usize {
-        const self: *GrepNormalizeWriter = @alignCast(@fieldParentPtr("interface", writer));
-        for (data[0 .. data.len - 1]) |bytes| try self.writeBytes(bytes);
-        const pattern = data[data.len - 1];
-        for (0..splat) |_| try self.writeBytes(pattern);
-        writer.end = 0;
-        return Io.Writer.countSplat(data, splat);
-    }
-
-    fn writeBytes(self: *GrepNormalizeWriter, bytes: []const u8) Io.Writer.Error!void {
-        for (bytes) |byte| try self.writeByte(byte);
-    }
-
-    fn writeByte(self: *GrepNormalizeWriter, byte: u8) Io.Writer.Error!void {
-        if (self.utf8_expected != 0) return self.writeUtf8Continuation(byte);
-        switch (self.escape) {
-            .normal => {
-                if (byte == 0x1b) {
-                    self.escape = .esc;
-                    return;
-                }
-                if (byte == ' ' or byte == '\t' or byte == '\r' or byte == 0x0b or byte == 0x0c) {
-                    try self.writeWhitespace(byte);
-                    return;
-                }
-                if (byte < 0x20 or byte == 0x7f) return;
-                if (byte >= 0x80) {
-                    try self.writeHighByte(byte);
-                    return;
-                }
-                try self.emitVisible(&.{byte});
-            },
-            .esc => {
-                self.escape = switch (byte) {
-                    '[' => .csi,
-                    ']', 'P', 'X', '^', '_' => .string,
-                    '(', ')', '*', '+' => .charset,
-                    else => .normal,
-                };
-            },
-            .csi => {
-                if (byte >= 0x40 and byte <= 0x7e) self.escape = .normal;
-            },
-            .string => {
-                if (byte == 0x07 or byte == 0x9c) {
-                    self.escape = .normal;
-                } else if (byte == 0x1b) {
-                    self.escape = .string_esc;
-                }
-            },
-            .string_esc => {
-                self.escape = if (byte == '\\') .normal else if (byte == 0x1b) .string_esc else .string;
-            },
-            .charset => self.escape = .normal,
-        }
-    }
-
-    fn writeWhitespace(self: *GrepNormalizeWriter, byte: u8) Io.Writer.Error!void {
-        if (self.collapse_whitespace) {
-            if (self.seen_content) self.pending_space = true;
-            return;
-        }
-        try self.downstream.writeByte(if (byte == ' ' or byte == '\t') byte else ' ');
-        self.seen_content = true;
-    }
-
-    fn writeHighByte(self: *GrepNormalizeWriter, byte: u8) Io.Writer.Error!void {
-        if (byte >= 0x80 and byte <= 0x9f) {
-            self.escape = switch (byte) {
-                0x90, 0x98, 0x9d, 0x9e, 0x9f => .string,
-                0x9b => .csi,
-                else => .normal,
-            };
-            return;
-        }
-        const expected: usize = std.unicode.utf8ByteSequenceLength(byte) catch {
-            try self.emitReplacement();
-            return;
-        };
-        self.utf8[0] = byte;
-        self.utf8_len = 1;
-        self.utf8_expected = expected;
-    }
-
-    fn writeUtf8Continuation(self: *GrepNormalizeWriter, byte: u8) Io.Writer.Error!void {
-        if (byte < 0x80 or byte > 0xbf) {
-            try self.emitReplacement();
-            self.utf8_len = 0;
-            self.utf8_expected = 0;
-            return self.writeByte(byte);
-        }
-        self.utf8[self.utf8_len] = byte;
-        self.utf8_len += 1;
-        if (self.utf8_len != self.utf8_expected) return;
-
-        const bytes = self.utf8[0..self.utf8_len];
-        const codepoint = std.unicode.utf8Decode(bytes) catch {
-            self.utf8_len = 0;
-            self.utf8_expected = 0;
-            try self.emitReplacement();
-            return;
-        };
-        self.utf8_len = 0;
-        self.utf8_expected = 0;
-        if (codepoint >= 0x80 and codepoint <= 0x9f) return;
-        try self.emitVisible(bytes);
-    }
-
-    fn emitVisible(self: *GrepNormalizeWriter, bytes: []const u8) Io.Writer.Error!void {
-        if (self.pending_space) try self.downstream.writeByte(' ');
-        self.pending_space = false;
-        self.seen_content = true;
-        try self.downstream.writeAll(bytes);
-    }
-
-    fn emitReplacement(self: *GrepNormalizeWriter) Io.Writer.Error!void {
-        try self.emitVisible("\xef\xbf\xbd");
-    }
-};
-
-fn sanitizeDisplayText(gpa: std.mem.Allocator, text: []const u8) ![]u8 {
-    var bytes: std.ArrayList(u8) = .empty;
-    errdefer bytes.deinit(gpa);
-    var downstream = Io.Writer.Allocating.fromArrayList(gpa, &bytes);
-    defer bytes = downstream.toArrayList();
-    var sanitized = GrepNormalizeWriter.init(&downstream.writer, false);
-    try sanitized.interface.writeAll(text);
-    try sanitized.finish();
-    return downstream.toOwnedSlice();
-}
 
 const GrepWindow = struct {
     start: u64,
@@ -529,7 +352,7 @@ const GrepLineSink = struct {
             }
         }
         if (window.leading_ellipsis) try writer.writeAll("…");
-        var normalized = GrepNormalizeWriter.init(writer, true);
+        var normalized = report.SanitizingWriter.init(writer, true);
         try search.copyHighlightedSpan(
             self.output.io,
             file,
@@ -562,7 +385,7 @@ const GrepLineSink = struct {
         }
         if (has_failure) {
             if (has_name or has_tags) width += 1;
-            width += 1 + decimalWidth(self.exit_code.?);
+            width += 1 + report.decimalWidth(self.exit_code.?);
         }
         return width;
     }
@@ -659,7 +482,7 @@ test "grep display normalizes whitespace and strips terminal controls" {
         defer bytes.deinit(gpa);
         var downstream = Io.Writer.Allocating.fromArrayList(gpa, &bytes);
         defer bytes = downstream.toArrayList();
-        var normalized = GrepNormalizeWriter.init(&downstream.writer, true);
+        var normalized = report.SanitizingWriter.init(&downstream.writer, true);
 
         var offset: usize = 0;
         while (offset < input.len) {
@@ -677,7 +500,7 @@ test "grep display normalizes whitespace and strips terminal controls" {
 
 test "history display sanitization preserves ordinary spacing" {
     const gpa = std.testing.allocator;
-    const sanitized = try sanitizeDisplayText(gpa, "echo\tbefore\x1b[2Jafter\rnext\x01");
+    const sanitized = try report.sanitizeDisplayText(gpa, "echo\tbefore\x1b[2Jafter\rnext\x01");
     defer gpa.free(sanitized);
     try std.testing.expectEqualStrings("echo\tbeforeafter next", sanitized);
 }
@@ -691,7 +514,7 @@ fn grepReferenceWidth(io: Io, root: store.Dir, journals: []const []const u8, qua
     var width: usize = 1;
     for (journals) |journal| {
         const highest = try store.highestEntryNumber(io, root, journal) orelse continue;
-        const number_width = decimalWidth(highest);
+        const number_width = report.decimalWidth(highest);
         const candidate = if (qualified)
             1 + journalDisplaySuffix(journal).len + 1 + number_width
         else
@@ -720,7 +543,7 @@ fn grepCommand(
     defer root.close(io);
     var matcher = try search.Matcher.init(gpa, request.pattern, request.ignore_case);
     defer matcher.deinit();
-    const terminal_columns = if (sys.isTty(1)) historyTerminalColumns() else null;
+    const terminal_columns = if (sys.isTty(1)) report.terminalColumns() else null;
     var output: GrepOutput = .{
         .io = io,
         .out = out,
@@ -730,7 +553,7 @@ fn grepCommand(
         },
         .match_sgr = if (colorEnabled(request.color)) selectedMatchSgr(sys.env("GREP_COLORS")) else "",
         .terminal_columns = terminal_columns,
-        .layout_color = historyColorEnabled(),
+        .layout_color = report.layoutColorEnabled(),
         .reference_width = 1,
     };
     defer output.noout_region.finish();
@@ -1017,7 +840,7 @@ fn appendWholeHistoryJournal(
 }
 
 fn historyReferenceWidth(journal: *const HistoryJournal, item: HistoryCursor.Item) usize {
-    const number_width = decimalWidth(item.number);
+    const number_width = report.decimalWidth(item.number);
     if (!item.qualified) return number_width;
     return 1 + journalDisplaySuffix(journal.name).len + 1 + number_width;
 }
@@ -1126,22 +949,22 @@ fn listInteractions(
     for (selected.items) |selection| {
         const journal = &journals.items[selection.journal_index];
         if (journal.numbers.len == 0) continue;
-        var width = decimalWidth(journal.numbers[journal.numbers.len - 1]);
+        var width = report.decimalWidth(journal.numbers[journal.numbers.len - 1]);
         if (selection.qualified) width += 1 + journalDisplaySuffix(journal.name).len + 1;
         number_width = @max(number_width, width);
     }
-    const size_width = max_entry_size_width;
+    const size_width = report.max_entry_size_width;
 
     const date_width = 12;
     const prefix_width = 4 + 1 + number_width + 1 + size_width + 1 + date_width + 1;
-    const columns = historyTerminalColumns();
+    const columns = report.terminalColumns();
     const payload_width: ?usize = if (columns) |value|
         if (value > prefix_width) value - prefix_width else 1
     else
         null;
-    const color_enabled = historyColorEnabled();
+    const color_enabled = report.layoutColorEnabled();
     const current = sys.env("TJ_JOURNAL");
-    var noout_region: NooutRegion = .{
+    var noout_region: report.NooutRegion = .{
         .out = out,
         .enabled = current != null and current.?.len != 0 and sys.isTty(1),
     };
@@ -1179,7 +1002,7 @@ fn listInteractions(
 
         var payload: std.ArrayList(u8) = .empty;
         defer payload.deinit(gpa);
-        const command = try sanitizeDisplayText(gpa, firstLine(info.command));
+        const command = try report.sanitizeDisplayText(gpa, firstLine(info.command));
         defer gpa.free(command);
         try payload.appendSlice(gpa, command);
 
@@ -1214,7 +1037,7 @@ fn listInteractions(
         try noout_region.begin();
 
         var size_buf: [24]u8 = undefined;
-        const size_text = formatEntrySize(info, &size_buf);
+        const size_text = report.formatEntrySize(info, &size_buf);
         var date_buf: [date_width]u8 = undefined;
         const timing = store.readTiming(gpa, io, root, journal.name, info.number);
         const date_text = formatLsDate(if (timing) |value| value.started else null, now_ms, &date_buf);
@@ -1265,7 +1088,7 @@ fn usageCommand(
     };
     defer measured.deinit(gpa);
 
-    var noout_region: NooutRegion = .{
+    var noout_region: report.NooutRegion = .{
         .out = out,
         .enabled = sys.isTty(1),
     };
@@ -1284,7 +1107,7 @@ fn usageCommand(
         return;
     }
 
-    const color_enabled = historyColorEnabled();
+    const color_enabled = report.layoutColorEnabled();
     try out.writeAll("Total ");
     if (color_enabled) try out.writeAll("\x1b[32m");
     try out.writeAll(total_text);
@@ -1295,17 +1118,17 @@ fn usageCommand(
     var size_width: usize = 1;
     var largest: u64 = 0;
     for (measured.entries) |entry| {
-        reference_width = @max(reference_width, 1 + decimalWidth(entry.number));
+        reference_width = @max(reference_width, 1 + report.decimalWidth(entry.number));
         var size_buf: [24]u8 = undefined;
         size_width = @max(size_width, formatUsageSize(entry.bytes, exact_bytes, &size_buf).len);
         largest = @max(largest, entry.bytes);
     }
     const prefix_width = reference_width + 1 + size_width + 1;
-    const columns = historyTerminalColumns() orelse 80;
+    const columns = report.terminalColumns() orelse 80;
     const available = if (columns > prefix_width) columns - prefix_width else 1;
 
     for (measured.entries) |entry| {
-        const actual_reference_width = 1 + decimalWidth(entry.number);
+        const actual_reference_width = 1 + report.decimalWidth(entry.number);
         try out.splatByteAll(' ', reference_width - actual_reference_width);
         if (color_enabled) try out.writeAll("\x1b[33m");
         try out.print("@{d}", .{entry.number});
@@ -1329,7 +1152,7 @@ fn usageCommand(
 }
 
 fn formatUsageSize(bytes: u64, exact: bool, buf: *[24]u8) []const u8 {
-    if (!exact) return formatHumanSize(bytes, buf);
+    if (!exact) return report.formatHumanSize(bytes, buf);
     return std.fmt.bufPrint(buf, "{d}", .{bytes}) catch "?";
 }
 
@@ -1345,37 +1168,6 @@ test "usage chart bars preserve small entries and avoid integer overflow" {
     try std.testing.expectEqual(@as(usize, 5), usageBarWidth(5, 10, 10));
     try std.testing.expectEqual(@as(usize, 4), usageBarWidth(1, 3, 10));
     try std.testing.expectEqual(@as(usize, 80), usageBarWidth(std.math.maxInt(u64), std.math.maxInt(u64), 80));
-}
-
-/// The widest string `formatEntrySize` can produce. `formatHumanSize` divides
-/// while `bytes >= unit * 1024`, so the whole part always stays below 1024:
-/// the widest results are `1023b` below the first unit and `1023k` above it.
-pub const max_entry_size_width = 5;
-
-fn formatEntrySize(info: store.InteractionInfo, buf: *[24]u8) []const u8 {
-    if (!info.out_present) return "-";
-    return formatHumanSize(info.out_bytes, buf);
-}
-
-fn formatHumanSize(bytes: u64, buf: *[24]u8) []const u8 {
-    if (bytes < 1024) return std.fmt.bufPrint(buf, "{d}b", .{bytes}) catch "?";
-
-    const suffixes = "kMGTPE";
-    var unit: u64 = 1024;
-    var suffix: usize = 0;
-    while (suffix + 1 < suffixes.len and bytes >= unit * 1024) {
-        unit *= 1024;
-        suffix += 1;
-    }
-    var whole = bytes / unit;
-    if (whole < 10) {
-        const tenth = ((bytes % unit) * 10 + unit / 2) / unit;
-        if (tenth < 10) {
-            return std.fmt.bufPrint(buf, "{d}.{d}{c}", .{ whole, tenth, suffixes[suffix] }) catch "?";
-        }
-        whole += 1;
-    }
-    return std.fmt.bufPrint(buf, "{d}{c}", .{ whole, suffixes[suffix] }) catch "?";
 }
 
 /// `ls -l`-style UTC date: current-year entries show HH:MM, older entries the
@@ -1441,31 +1233,6 @@ fn historyEntryVisible(
         if (!found) return false;
     }
     return true;
-}
-
-fn decimalWidth(number: u32) usize {
-    var value = number;
-    var width: usize = 1;
-    while (value >= 10) : (value /= 10) width += 1;
-    return width;
-}
-
-fn historyTerminalColumns() ?usize {
-    if (!sys.isTty(1)) return null;
-    if (sys.getWinsize(1)) |size| {
-        if (size.col != 0) return size.col;
-    } else |_| {}
-    if (sys.env("COLUMNS")) |text| {
-        const columns = std.fmt.parseInt(usize, text, 10) catch 0;
-        if (columns != 0) return columns;
-    }
-    return 80;
-}
-
-fn historyColorEnabled() bool {
-    if (!sys.isTty(1) or sys.envPresent("NO_COLOR")) return false;
-    const term = sys.env("TERM") orelse return false;
-    return !std.mem.eql(u8, term, "dumb");
 }
 
 const HistoryLine = struct { start: usize, end: usize };
@@ -1611,11 +1378,11 @@ test "history renders annotations green and failures red" {
 
 test "long listing formats human sizes and ls-style UTC dates" {
     var size_buf: [24]u8 = undefined;
-    try std.testing.expectEqualStrings("0b", formatHumanSize(0, &size_buf));
-    try std.testing.expectEqualStrings("999b", formatHumanSize(999, &size_buf));
-    try std.testing.expectEqualStrings("1.5k", formatHumanSize(1536, &size_buf));
-    try std.testing.expectEqualStrings("18k", formatHumanSize(18 * 1024, &size_buf));
-    try std.testing.expectEqualStrings("6.1M", formatHumanSize(6 * 1024 * 1024 + 1024 * 1024 / 10, &size_buf));
+    try std.testing.expectEqualStrings("0b", report.formatHumanSize(0, &size_buf));
+    try std.testing.expectEqualStrings("999b", report.formatHumanSize(999, &size_buf));
+    try std.testing.expectEqualStrings("1.5k", report.formatHumanSize(1536, &size_buf));
+    try std.testing.expectEqualStrings("18k", report.formatHumanSize(18 * 1024, &size_buf));
+    try std.testing.expectEqualStrings("6.1M", report.formatHumanSize(6 * 1024 * 1024 + 1024 * 1024 / 10, &size_buf));
 
     // The history size column is a fixed width, so the formatter must never
     // exceed it. Probe every unit boundary and the extremes rather than trust
@@ -1626,13 +1393,13 @@ test "long listing formats human sizes and ls-style UTC dates" {
         for ([_]u64{ 0, 1, 9, 10, 999, 1000, 1023, 1024, 1025 }) |offset| {
             const bytes = unit *| offset;
             var probe_buf: [24]u8 = undefined;
-            widest = @max(widest, formatHumanSize(bytes, &probe_buf).len);
+            widest = @max(widest, report.formatHumanSize(bytes, &probe_buf).len);
         }
         unit *|= 1024;
     }
     var extreme_buf: [24]u8 = undefined;
-    widest = @max(widest, formatHumanSize(std.math.maxInt(u64), &extreme_buf).len);
-    try std.testing.expectEqual(max_entry_size_width, widest);
+    widest = @max(widest, report.formatHumanSize(std.math.maxInt(u64), &extreme_buf).len);
+    try std.testing.expectEqual(report.max_entry_size_width, widest);
 
     const current = store.parseTimestamp("2026-08-29T10:14:00.000Z").?;
     const now = store.parseTimestamp("2026-12-01T00:00:00.000Z").?;
