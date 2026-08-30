@@ -473,7 +473,7 @@ test "use replays the journal immediately unless no-replay is set" {
         output: []const u8,
         meta: []const u8,
     }{
-        .{ .number = "1", .command = "first-command", .output = "\x1b]11;?\x1b\\\x1b[6nREPLAY-FIRST\r\n", .meta = "{\"started\":\"2026-01-01T00:00:00.000Z\",\"ended\":\"2026-01-01T01:00:00.000Z\"}\n" },
+        .{ .number = "1", .command = "first-command", .output = "\x1b]11;?\x1b\\\x1b[6n\x1b]2;HISTORICAL-TITLE\x07REPLAY-FIRST\r\n", .meta = "{\"started\":\"2026-01-01T00:00:00.000Z\",\"ended\":\"2026-01-01T01:00:00.000Z\"}\n" },
         .{ .number = "2", .command = "second-command", .output = "REPLAY-SECOND\r\n", .meta = "{\"started\":\"2026-01-02T00:00:00.000Z\",\"ended\":\"2026-01-02T01:00:00.000Z\"}\n" },
         .{ .number = "3", .command = "third-command", .output = "REPLAY-THIRD\r\n", .meta = "{\"started\":\"2026-01-03T00:00:00.000Z\",\"ended\":\"2026-01-03T01:00:00.000Z\"}\n" },
     };
@@ -504,6 +504,8 @@ test "use replays the journal immediately unless no-replay is set" {
     try std.testing.expect(third < child);
     try std.testing.expect(std.mem.indexOf(u8, replayed.out.items, "\x1b]11;?") == null);
     try std.testing.expect(std.mem.indexOf(u8, replayed.out.items, "\x1b[6n") == null);
+    try std.testing.expect(std.mem.indexOf(u8, replayed.out.items, "HISTORICAL-TITLE") == null);
+    try std.testing.expect(std.mem.indexOf(u8, replayed.out.items, "\x1b]2;") == null);
 
     var skipped = try support.runTjctl(gpa, &.{
         "--home", scratch.path(), "use", "--no-replay", &id, "--", "/bin/sh", "-c", "printf 'NO-REPLAY-CHILD\\n'",

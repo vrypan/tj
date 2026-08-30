@@ -72,6 +72,8 @@ pub fn spawnTjctl(gpa: std.mem.Allocator, args: []const []const u8, rows: u16, c
         if (std.mem.startsWith(u8, arg, "-")) continue;
         if (std.mem.eql(u8, arg, "new") or std.mem.eql(u8, arg, "use")) {
             try adjusted.append(gpa, "--no-splash");
+            try adjusted.append(gpa, "--title");
+            try adjusted.append(gpa, "none");
             inserted = true;
         }
     }

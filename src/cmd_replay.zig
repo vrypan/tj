@@ -50,8 +50,10 @@ pub fn replayRequestFromArgs(args: []const [:0]const u8) !ReplayRequest {
 
 /// `tjctl replay <journal>` - play a recording back into the terminal.
 ///
-/// Nothing is re-executed: this is the output that was captured, escape
-/// sequences and all, so it looks the way it looked. What cannot be
+/// Nothing is re-executed: this is the visual output that was captured, with
+/// colours and cursor controls intact. Terminal queries and window-title
+/// changes are omitted because they are not screen content and can affect the
+/// newly attached shell. What cannot be
 /// reconstructed is when each byte arrived, since only the start and end of
 /// each interaction were recorded - so output appears at once, and the pacing
 /// comes from the real durations and the real gaps between commands.

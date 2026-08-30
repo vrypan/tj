@@ -221,6 +221,7 @@ test "build-time completions expose cli grammar and journal references" {
     try std.testing.expect(std.mem.indexOf(u8, ctl_zsh, "_tjctl__cmd_use()") != null);
     try std.testing.expect(std.mem.indexOf(u8, ctl_zsh, "--no-replay[") != null);
     try std.testing.expect(std.mem.indexOf(u8, ctl_zsh, "--no-splash[") != null);
+    try std.testing.expect(std.mem.indexOf(u8, ctl_zsh, "--title=") != null);
     try std.testing.expect(std.mem.indexOf(u8, ctl_zsh, "'tjctl' 'complete'") != null);
 
     // Positional entry-reference slots use the same runtime resolver as the

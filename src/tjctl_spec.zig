@@ -14,8 +14,15 @@ const home_flag = zecli.FlagSpec{
 };
 const keep_osc = zecli.FlagSpec{ .name = "keep-osc", .description = "Forward TJ protocol control sequences" };
 const no_splash = zecli.FlagSpec{ .name = "no-splash", .description = "Start without the recording splash" };
-const lifecycle_flags = [_]zecli.FlagSpec{ home_flag, keep_osc, no_splash };
-const use_flags = [_]zecli.FlagSpec{ home_flag, keep_osc, no_splash, .{ .name = "no-replay", .description = "Start without replaying the journal" } };
+const title = zecli.FlagSpec{
+    .name = "title",
+    .short = 't',
+    .value = .string,
+    .value_name = "FORMAT",
+    .description = "Override the shell-evaluated terminal-title format, or use none",
+};
+const lifecycle_flags = [_]zecli.FlagSpec{ home_flag, keep_osc, no_splash, title };
+const use_flags = [_]zecli.FlagSpec{ home_flag, keep_osc, no_splash, title, .{ .name = "no-replay", .description = "Start without replaying the journal" } };
 const force_flags = [_]zecli.FlagSpec{.{ .name = "force", .description = "Skip confirmation or override pin protection" }};
 const du_flags = [_]zecli.FlagSpec{
     .{ .name = "chart", .description = "Show every entry's size as a chart" },

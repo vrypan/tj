@@ -137,6 +137,8 @@ tjctl new                         # generated name such as 260830-k7m4q2
 tjctl new release-build           # choose a canonical name
 tjctl new release-build -- zsh -f # run a specific command instead
 tjctl new --no-splash             # start immediately without confirmation
+tjctl new --title='TJ | $TJ_REF | $PWD'
+tjctl new --title none            # leave terminal window titles unchanged
 ```
 
 Append a later writer run to an existing journal:
@@ -159,13 +161,42 @@ previous screen exactly and start the writer. This makes recording visible
 without taking ownership of the shell prompt. `--no-splash` skips the screen
 and pause; non-interactive starts skip it automatically.
 
+TJ initially sets the window and tab title to `TJ | JOURNAL`, so recording
+remains visible without shell integration. The bundled zsh plugin then
+evaluates the `-t`/`--title` format at every prompt and uses the result as the
+exact title.
+Without `--title`, `tjctl` inherits a non-empty `$TJ_TITLE` from its environment;
+if none is set, the default format is `TJ | $TJ_JOURNAL`. `--title=none`
+disables all TJ title handling. TJ asks xterm-compatible terminals to restore
+the previous title on exit.
+
+The literal format is exported as `$TJ_TITLE` and evaluated by the shell
+plugin, so parameter, arithmetic, command substitutions, and zsh prompt
+escapes are supported:
+
+```sh
+tjctl use release-build --title='TJ $TJ_REF | %3~'
+tjctl use release-build --title='TJ | $(git branch --show-current) | $PWD'
+```
+
+Use single quotes to defer expansion until each prompt inside the journal.
+Command substitutions therefore run at every prompt. Double quotes let the
+calling shell expand the format before `tjctl` starts. Applications may set a
+temporary title while they run. When a command starts, the plugin first shows
+`TJ | COMMAND` using the original command line; an application-specific title
+may replace it afterward. At the next prompt, the plugin restores the
+configured format. Recorded title sequences remain unchanged in `out`, but
+replay omits them.
+
 Only one writer can attach to a journal at a time.
 
 By default, `use` first replays the journal into the terminal, then starts
 the fresh shell or command. This replay is immediate: recorded pauses and
 typing delays are ignored. Use `--no-replay` when the existing transcript is
 already visible or should not be redrawn. Replayed bytes go directly to the
-terminal and are not appended to the journal again.
+terminal and are not appended to the journal again. Window-title changes and
+terminal queries are omitted because they are not part of the screen
+transcript and could affect the newly attached shell.
 
 Using an existing journal is append-only, not process resumption. It starts a fresh shell or
 command with the caller's current directory and environment. It does not
@@ -501,6 +532,7 @@ running anything:
 | `TJ_REF` | `@release-build.43` — a reference to the command about to be typed |
 | `TJ_NEXT` | `43` — just the number |
 | `TJ_JOURNAL` | the complete canonical journal name |
+| `TJ_TITLE` | literal shell-evaluated title format, or `none` |
 | `TJ` | path to the entry/resource binary when discoverable |
 | `TJCTL` | path to the journal-control binary when discoverable |
 

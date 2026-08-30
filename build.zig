@@ -120,6 +120,13 @@ pub fn build(b: *std.Build) void {
     integration_mod.addOptions("build_options", integration_options);
 
     const unit_tests = b.addTest(.{ .root_module = exe_mod });
+    const title_test_mod = b.createModule(.{
+        .root_source_file = b.path("src/terminal_title.zig"),
+        .target = target,
+        .optimize = optimize,
+        .link_libc = true,
+    });
+    const title_unit_tests = b.addTest(.{ .root_module = title_test_mod });
     const integration_tests = b.addTest(.{ .root_module = integration_mod });
 
     const splash_integration_mod = b.createModule(.{
@@ -148,6 +155,7 @@ pub fn build(b: *std.Build) void {
 
     const test_step = b.step("test", "Run tests");
     test_step.dependOn(&b.addRunArtifact(unit_tests).step);
+    test_step.dependOn(&b.addRunArtifact(title_unit_tests).step);
     test_step.dependOn(&run_integration_tests.step);
     test_step.dependOn(&run_splash_integration_tests.step);
     for (completion_runs) |generate| test_step.dependOn(&generate.step);

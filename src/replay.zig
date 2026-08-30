@@ -8,6 +8,7 @@ const Io = std.Io;
 
 const store = @import("store.zig");
 const sys = @import("sys.zig");
+const terminal_title = @import("terminal_title.zig");
 
 const read_chunk_size = 64 * 1024;
 
@@ -28,10 +29,17 @@ const max_replay_query_len = blk: {
 
 const ReplayOutput = struct {
     out: *Io.Writer,
+    titles: terminal_title.Decorator = .{ .mode = .omit },
     pending: [max_replay_query_len]u8 = undefined,
     pending_len: usize = 0,
 
     fn writeAll(self: *ReplayOutput, bytes: []const u8) !void {
+        try self.titles.feed(bytes, self);
+    }
+
+    /// Receives non-title bytes from the title scanner, then removes terminal
+    /// queries before forwarding the remaining visual stream.
+    pub fn emit(self: *ReplayOutput, bytes: []const u8) !void {
         var plain_start: usize = 0;
         for (bytes, 0..) |byte, i| {
             if (self.pending_len == 0) {
@@ -76,6 +84,7 @@ const ReplayOutput = struct {
     /// An incomplete candidate remains ordinary recorded data. Resource and
     /// interaction boundaries cannot complete an escape sequence.
     fn boundary(self: *ReplayOutput) !void {
+        try self.titles.flush(self);
         if (self.pending_len == 0) return;
         try self.out.writeAll(self.pending[0..self.pending_len]);
         self.pending_len = 0;
@@ -242,8 +251,8 @@ fn typeOut(
     return total;
 }
 
-/// Writes a recorded resource through verbatim. `out` is what the terminal
-/// saw, so replaying it raw is what makes colours and terminal state return.
+/// Writes a recorded resource through the replay filter. Visual controls are
+/// retained, while terminal queries and window-title changes are omitted.
 fn writeResource(
     io: Io,
     root: store.Dir,
@@ -298,8 +307,8 @@ test "replay timing arithmetic rejects unrepresentable durations" {
     try std.testing.expectError(error.BadReplayOption, addDuration(&total, 1));
 }
 
-test "replay drops terminal queries without changing visual controls" {
-    const input = "before\x1b]11;?\x1b\\middle\x1b[6nafter\x1b[31mred\x1b[0m";
+test "replay drops terminal queries and titles without changing visual controls" {
+    const input = "before\x1b]11;?\x1b\\middle\x1b]2;historical\x07\x1b[6nafter\x1b[31mred\x1b[0m";
     const expected = "beforemiddleafter\x1b[31mred\x1b[0m";
 
     for (1..input.len + 1) |split| {

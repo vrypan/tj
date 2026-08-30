@@ -310,9 +310,30 @@ Before launching that fresh child, `tjctl use` replays the selected journal
 to the outer terminal by default. It uses the ordinary replay rendering, but
 with command typing delays, recorded command durations, and gaps all set to
 zero. Non-visual background-colour and cursor-position queries are suppressed
-so their terminal replies cannot become input to the fresh child. The replay
-bypasses the new writer's scanner and is not recorded again. `--no-replay`
-suppresses this startup replay.
+so their terminal replies cannot become input to the fresh child. OSC 0, OSC 1,
+and OSC 2 window and tab-title changes are also omitted, including markers
+split across reads, so replay cannot replace the title selected for the new
+writer. The replay bypasses the new writer's scanner and is not recorded again.
+`--no-replay` suppresses this startup replay.
+
+`tjctl new` and `tjctl use` accept one `-t`/`--title FORMAT`. An explicit format
+takes precedence; otherwise a non-empty inherited `TJ_TITLE` is used, followed
+by the default literal format `TJ | $TJ_JOURNAL`. `none` disables all TJ title
+handling. The writer exports the selected literal format as `TJ_TITLE`. On a
+terminal, an enabled writer pushes the previous title and initially displays
+`TJ | JOURNAL`, so the recording indicator does not depend on shell
+integration. The zsh plugin
+evaluates `TJ_TITLE` with zsh's nested shell expansion at each prompt, allowing
+parameter, arithmetic, and command substitutions, then applies zsh prompt
+expansion so escapes such as `%3~` work. It removes BEL, ESC, and C1 ST from
+the result and emits that exact result with OSC 0, updating both the window and
+icon/tab title on terminals that distinguish them. At `preexec`, the plugin
+emits `TJ | COMMAND`, using the original typed command with control bytes
+removed and without evaluating it as shell or prompt syntax. Later title
+changes from the running application pass through unchanged, and the next
+prompt restores the configured format. The previous title is restored on
+normal, signal, and panic exits. `none` emits no fallback, performs no
+title-stack operation, and makes the plugin leave titles alone.
 
 Entries start at 1. Every later writer starts at one greater than the
 highest valid numeric entry directory. A missing `rc` means unfinished,
@@ -381,9 +402,10 @@ error and return status 2. Operational and storage failures retain status 1,
 as do commands with a documented negative result such as a grep with no
 matches.
 
-The writer exports `TJ_JOURNAL`, `TJ_NEXT`, `TJ_HOME`, `TJ`, and `TJCTL`. `TJ`
-is the sibling entry binary when installed beside `tjctl`, with the literal
-command name as a development fallback; `TJCTL` is the running control binary.
+The writer exports `TJ_JOURNAL`, `TJ_NEXT`, `TJ_TITLE`, `TJ_HOME`, `TJ`, and
+`TJCTL`. `TJ_TITLE` has the title-format or `none` semantics above. `TJ` is the
+sibling entry binary when installed beside `tjctl`, with the literal command
+name as a development fallback; `TJCTL` is the running control binary.
 The zsh integration derives `TJ_REF` as
 `@${TJ_JOURNAL}.${TJ_NEXT}`. These variables describe the selected durable
 journal and its next unused entry; they are not a snapshot of prior process

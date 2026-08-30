@@ -84,6 +84,11 @@ _tj_preexec() {
   local typed=${_TJ_TYPED:-$1}
   _TJ_TYPED=
 
+  # Match the terminal convention: the configured format describes the idle
+  # prompt, while a running command gets a short, immediately useful title.
+  # Programs remain free to replace this with a more specific title.
+  _tj_update_running_title "$typed"
+
   local expanded='' expanded_flag=0
   # preexec runs before filename expansion. $3 is the full executable form
   # (including aliases), but still contains dynamic named directories, so
@@ -121,12 +126,41 @@ _tj_publish() {
 
 _tj_publish
 
+_tj_update_running_title() {
+  emulate -L zsh
+  local format=${TJ_TITLE:-'TJ | $TJ_JOURNAL'}
+  [[ $format == none ]] && return 0
+
+  # The command is terminal data, not a format: remove control bytes rather
+  # than evaluating parameters, substitutions, or prompt escapes within it.
+  local rendered=${1//[[:cntrl:]]/}
+  _tj_emit "0;TJ | $rendered"
+}
+
+_tj_update_title() {
+  emulate -L zsh
+  local format=${TJ_TITLE:-'TJ | $TJ_JOURNAL'}
+  [[ $format == none ]] && return 0
+
+  # The format is deliberately shell-evaluated: users may use parameters,
+  # arithmetic, command substitutions, and zsh prompt escapes such as %3~.
+  # Remove the bytes that can terminate an OSC string before enclosing the
+  # result in one.
+  local rendered="${(e)format}"
+  rendered="${(%)rendered}"
+  rendered=${rendered//$'\e'/}
+  rendered=${rendered//$'\a'/}
+  rendered=${rendered//$'\x9c'/}
+  _tj_emit "0;$rendered"
+}
+
 _tj_precmd() {
   # Must be the first thing read, before any command here disturbs it.
   # Not named `status`: that is a special parameter in zsh.
   local exit_code=$?
   _tj_emit "133;D;$exit_code"
   _tj_emit "133;A"
+  _tj_update_title
 }
 
 add-zsh-hook preexec _tj_preexec

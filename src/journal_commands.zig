@@ -21,6 +21,7 @@ pub fn run(
     out: *Io.Writer,
 ) !u8 {
     const home = parsed.last("home") orelse command.home;
+    const title = parsed.last("title") orelse sys.env("TJ_TITLE") orelse "TJ | $TJ_JOURNAL";
     switch (command.which) {
         .new => {
             const result = try proxy.run(gpa, io, .{
@@ -28,6 +29,7 @@ pub fn run(
                 .argv = child,
                 .keep_osc = parsed.present("keep-osc"),
                 .splash = !parsed.present("no-splash"),
+                .title = title,
                 .home = home,
             });
             return result.exit_code;
@@ -39,6 +41,7 @@ pub fn run(
                 .keep_osc = parsed.present("keep-osc"),
                 .replay_before_start = !parsed.present("no-replay"),
                 .splash = !parsed.present("no-splash"),
+                .title = title,
                 .home = home,
             });
             return result.exit_code;

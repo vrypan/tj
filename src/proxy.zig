@@ -20,6 +20,7 @@ const journal_store = @import("store.zig");
 const Store = journal_store.Store;
 const replay = @import("replay.zig");
 const splash = @import("splash.zig");
+const terminal_title = @import("terminal_title.zig");
 
 const io_buf_size = 64 * 1024;
 const max_protocol_error_log_bytes = 384;
@@ -54,6 +55,7 @@ fn onSignal(sig: posix.SIG) callconv(.c) void {
 /// Restores the terminal from a panic handler. Zig does not run deferred code
 /// on panic, so without this a crash would leave the user in raw mode.
 pub fn restoreOnPanic() void {
+    terminal_title.restoreFromSignal(stdout_fd);
     if (panic_restore) |saved| tty.restore(saved);
 }
 
@@ -70,6 +72,7 @@ pub const Options = struct {
     keep_osc: bool = false,
     replay_before_start: bool = false,
     splash: bool = false,
+    title: []const u8 = "none",
     home: ?[]const u8 = null,
 };
 
@@ -90,6 +93,12 @@ pub fn run(gpa: std.mem.Allocator, io: std.Io, opts: Options) !Result {
         .existing => |selector| try Store.continueJournal(gpa, io, opts.home, selector),
     };
     defer store.close();
+
+    const title_enabled = !std.mem.eql(u8, opts.title, "none") and sys.isTty(stdout_fd);
+    defer if (title_enabled) terminal_title.pop(stdout_fd);
+
+    const title_env = try gpa.dupeZ(u8, opts.title);
+    defer gpa.free(title_env);
 
     // Continuation reconstructs the journal's visible transcript before a
     // fresh child starts. Write directly to the outer terminal so replayed
@@ -118,7 +127,6 @@ pub fn run(gpa: std.mem.Allocator, io: std.Io, opts: Options) !Result {
         };
         if (choice == .cancel) return error.StartupCancelled;
     }
-
     // Seed the inner pty with the outer terminal's settings so programs that
     // query them (line width, control characters) see the truth from the start.
     // With a redirected stdin there is no outer terminal to copy or restore;
@@ -144,7 +152,13 @@ pub fn run(gpa: std.mem.Allocator, io: std.Io, opts: Options) !Result {
     sig_pipe_w.store(sig_fds[1], .monotonic);
 
     installSignalHandlers();
-    exportEnvironment(&store);
+    // Activate only after fatal signals are under proxy control. Unsupported
+    // terminals harmlessly ignore the xterm title-stack request.
+    if (title_enabled) {
+        terminal_title.push(stdout_fd);
+        terminal_title.writeFallback(stdout_fd, store.journalId());
+    }
+    exportEnvironment(&store, title_env);
 
     const pid = c.fork();
     if (pid < 0) {
@@ -270,7 +284,7 @@ fn installSignalHandlers() void {
 }
 
 /// Exported before the fork so the shell and its plugin inherit them.
-fn exportEnvironment(store: *Store) void {
+fn exportEnvironment(store: *Store, title: [:0]const u8) void {
     var journal: [journal_name.max_len + 1]u8 = undefined;
     @memcpy(journal[0..store.journal.len], store.journal);
     journal[store.journal.len] = 0;
@@ -281,6 +295,7 @@ fn exportEnvironment(store: *Store) void {
     next[next_text.len] = 0;
     sys.setEnv("TJ_NEXT", next[0..next_text.len :0]);
 
+    sys.setEnv("TJ_TITLE", title.ptr);
     // Also when it came from --home: every `tj` invoked inside the writer has
     // to resolve references against the selected journal root.
     var root: [std.fs.max_path_bytes + 1]u8 = undefined;
