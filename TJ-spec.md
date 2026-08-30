@@ -313,8 +313,10 @@ zero. Non-visual background-colour and cursor-position queries are suppressed
 so their terminal replies cannot become input to the fresh child. OSC 0, OSC 1,
 and OSC 2 window and tab-title changes are also omitted, including markers
 split across reads, so replay cannot replace the title selected for the new
-writer. The replay bypasses the new writer's scanner and is not recorded again.
-`--no-replay` suppresses this startup replay.
+writer. Standalone BEL bytes are omitted so historical alerts do not fire
+again; BEL remains intact when it terminates an OSC sequence. The replay
+bypasses the new writer's scanner and is not recorded again. `--no-replay`
+suppresses this startup replay.
 
 `tjctl new` and `tjctl use` accept one `-t`/`--title FORMAT`. An explicit format
 takes precedence; otherwise a non-empty inherited `TJ_TITLE` is used, followed

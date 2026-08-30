@@ -30,6 +30,7 @@ const max_replay_query_len = blk: {
 const ReplayOutput = struct {
     out: *Io.Writer,
     titles: terminal_title.Decorator = .{ .mode = .omit },
+    bell_state: BellState = .ground,
     pending: [max_replay_query_len]u8 = undefined,
     pending_len: usize = 0,
 
@@ -37,9 +38,49 @@ const ReplayOutput = struct {
         try self.titles.feed(bytes, self);
     }
 
-    /// Receives non-title bytes from the title scanner, then removes terminal
-    /// queries before forwarding the remaining visual stream.
+    /// Receives non-title bytes from the title scanner, removes standalone
+    /// bells, then passes the remaining stream to the query filter. BEL still
+    /// terminates OSC strings because it is protocol framing in that context.
     pub fn emit(self: *ReplayOutput, bytes: []const u8) !void {
+        var kept_start: usize = 0;
+        for (bytes, 0..) |byte, i| {
+            if (!self.dropBell(byte)) continue;
+            if (kept_start < i) try self.emitWithoutBells(bytes[kept_start..i]);
+            kept_start = i + 1;
+        }
+        if (kept_start < bytes.len) try self.emitWithoutBells(bytes[kept_start..]);
+    }
+
+    fn dropBell(self: *ReplayOutput, byte: u8) bool {
+        switch (self.bell_state) {
+            .ground => switch (byte) {
+                0x07 => return true,
+                0x1b => self.bell_state = .escape,
+                0x9d => self.bell_state = .osc,
+                else => {},
+            },
+            .escape => switch (byte) {
+                ']' => self.bell_state = .osc,
+                0x1b => self.bell_state = .escape,
+                0x9d => self.bell_state = .osc,
+                else => self.bell_state = .ground,
+            },
+            .osc => switch (byte) {
+                0x07, 0x9c => self.bell_state = .ground,
+                0x1b => self.bell_state = .osc_escape,
+                else => {},
+            },
+            .osc_escape => self.bell_state = switch (byte) {
+                '\\', 0x07, 0x9c => .ground,
+                0x1b => .osc_escape,
+                else => .osc,
+            },
+        }
+        return false;
+    }
+
+    /// Removes terminal queries before forwarding the visual stream.
+    fn emitWithoutBells(self: *ReplayOutput, bytes: []const u8) !void {
         var plain_start: usize = 0;
         for (bytes, 0..) |byte, i| {
             if (self.pending_len == 0) {
@@ -85,11 +126,14 @@ const ReplayOutput = struct {
     /// interaction boundaries cannot complete an escape sequence.
     fn boundary(self: *ReplayOutput) !void {
         try self.titles.flush(self);
+        self.bell_state = .ground;
         if (self.pending_len == 0) return;
         try self.out.writeAll(self.pending[0..self.pending_len]);
         self.pending_len = 0;
     }
 };
+
+const BellState = enum { ground, escape, osc, osc_escape };
 
 const QueryStatus = enum { prefix, complete, not_query };
 
@@ -308,8 +352,28 @@ test "replay timing arithmetic rejects unrepresentable durations" {
 }
 
 test "replay drops terminal queries and titles without changing visual controls" {
-    const input = "before\x1b]11;?\x1b\\middle\x1b]2;historical\x07\x1b[6nafter\x1b[31mred\x1b[0m";
+    const input = "before\x07\x1b]11;?\x1b\\middle\x1b]2;historical\x07\x1b[6nafter\x1b[31mred\x1b[0m";
     const expected = "beforemiddleafter\x1b[31mred\x1b[0m";
+
+    for (1..input.len + 1) |split| {
+        var bytes: std.ArrayList(u8) = .empty;
+        var allocating = Io.Writer.Allocating.fromArrayList(std.testing.allocator, &bytes);
+        defer {
+            bytes = allocating.toArrayList();
+            bytes.deinit(std.testing.allocator);
+        }
+
+        var output: ReplayOutput = .{ .out = &allocating.writer };
+        try output.writeAll(input[0..split]);
+        try output.writeAll(input[split..]);
+        try output.boundary();
+        try std.testing.expectEqualStrings(expected, allocating.writer.buffered());
+    }
+}
+
+test "replay preserves BEL terminators but drops standalone bells" {
+    const input = "a\x07b\x1b]7;file:///tmp\x07c\x9d7;file:///var/tmp\x9cd\x07e";
+    const expected = "ab\x1b]7;file:///tmp\x07c\x9d7;file:///var/tmp\x9cde";
 
     for (1..input.len + 1) |split| {
         var bytes: std.ArrayList(u8) = .empty;

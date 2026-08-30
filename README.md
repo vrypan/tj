@@ -194,9 +194,10 @@ By default, `use` first replays the journal into the terminal, then starts
 the fresh shell or command. This replay is immediate: recorded pauses and
 typing delays are ignored. Use `--no-replay` when the existing transcript is
 already visible or should not be redrawn. Replayed bytes go directly to the
-terminal and are not appended to the journal again. Window-title changes and
-terminal queries are omitted because they are not part of the screen
-transcript and could affect the newly attached shell.
+terminal and are not appended to the journal again. Window-title changes,
+terminal queries, and standalone audible bells are omitted because they are
+not part of the screen transcript and could affect the newly attached shell.
+BEL bytes used to terminate an OSC sequence remain intact.
 
 Using an existing journal is append-only, not process resumption. It starts a fresh shell or
 command with the caller's current directory and environment. It does not
