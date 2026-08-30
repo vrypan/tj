@@ -51,6 +51,13 @@ const ReplayOutput = struct {
         if (kept_start < bytes.len) try self.emitWithoutBells(bytes[kept_start..]);
     }
 
+    pub fn title(self: *ReplayOutput, selector: u8, value: []const u8) !void {
+        _ = self;
+        _ = selector;
+        _ = value;
+        unreachable;
+    }
+
     fn dropBell(self: *ReplayOutput, byte: u8) bool {
         switch (self.bell_state) {
             .ground => switch (byte) {

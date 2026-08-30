@@ -306,6 +306,10 @@ using the caller's cwd and environment. It restores no cwd, environment,
 shell options, functions, history, jobs, file descriptors, processes, or
 other state from previous writers.
 
+Interactive writers show the startup splash unless `--no-splash` is present
+or a non-empty inherited `TJ_NO_SPLASH` is set. Non-interactive writers do not
+show it.
+
 Before launching that fresh child, `tjctl use` replays the selected journal
 to the outer terminal by default. It uses the ordinary replay rendering, but
 with command typing delays, recorded command durations, and gaps all set to
@@ -320,22 +324,35 @@ suppresses this startup replay.
 
 `tjctl new` and `tjctl use` accept one `-t`/`--title FORMAT`. An explicit format
 takes precedence; otherwise a non-empty inherited `TJ_TITLE` is used, followed
-by the default literal format `TJ | $TJ_JOURNAL`. `none` disables all TJ title
+by the default literal format `TJ | %3~`. `none` disables all TJ title
 handling. The writer exports the selected literal format as `TJ_TITLE`. On a
 terminal, an enabled writer pushes the previous title and initially displays
-`TJ | JOURNAL`, so the recording indicator does not depend on shell
-integration. The zsh plugin
-evaluates `TJ_TITLE` with zsh's nested shell expansion at each prompt, allowing
+`JOURNAL`; the blinking marker makes the recording indicator independent of
+shell integration. The zsh plugin evaluates `TJ_TITLE` with zsh's nested shell
+expansion at each prompt, allowing
 parameter, arithmetic, and command substitutions, then applies zsh prompt
 expansion so escapes such as `%3~` work. It removes BEL, ESC, and C1 ST from
 the result and emits that exact result with OSC 0, updating both the window and
 icon/tab title on terminals that distinguish them. At `preexec`, the plugin
-emits `TJ | COMMAND`, using the original typed command with control bytes
+emits `COMMAND`, using the original typed command with control bytes
 removed and without evaluating it as shell or prompt syntax. Later title
-changes from the running application pass through unchanged, and the next
+changes from the running application become the current title, and the next
 prompt restores the configured format. The previous title is restored on
 normal, signal, and panic exits. `none` emits no fallback, performs no
 title-stack operation, and makes the plugin leave titles alone.
+
+Title handling defaults to a 1500 ms recording-marker interval. An explicit
+`--title-blink=MS` takes precedence over a non-empty inherited
+`TJ_TITLE_BLINK`, followed by `1500`; the selected decimal value is exported
+as `TJ_TITLE_BLINK`. A positive interval makes the proxy intercept complete,
+bounded OSC 0, OSC 1, and OSC 2 sequences, retain separate last window and
+icon/tab titles, and forward them with alternating fixed-width `●` and `○`
+prefixes. It redraws the last titles on that interval from the existing proxy
+poll loop. The original sequences, rather than the decorated ones, remain in
+`out`. An oversized or unrecognized sequence remains byte-transparent.
+`--title-blink=0` disables interception, decoration, and periodic refresh.
+`TJ_TITLE=none` disables the entire title lifecycle and exports a blink
+interval of `0`; an explicit blink value is still syntax-checked.
 
 Entries start at 1. Every later writer starts at one greater than the
 highest valid numeric entry directory. A missing `rc` means unfinished,
@@ -404,10 +421,11 @@ error and return status 2. Operational and storage failures retain status 1,
 as do commands with a documented negative result such as a grep with no
 matches.
 
-The writer exports `TJ_JOURNAL`, `TJ_NEXT`, `TJ_TITLE`, `TJ_HOME`, `TJ`, and
-`TJCTL`. `TJ_TITLE` has the title-format or `none` semantics above. `TJ` is the
-sibling entry binary when installed beside `tjctl`, with the literal command
-name as a development fallback; `TJCTL` is the running control binary.
+The writer exports `TJ_JOURNAL`, `TJ_NEXT`, `TJ_TITLE`, `TJ_TITLE_BLINK`,
+`TJ_HOME`, `TJ`, and `TJCTL`. The title variables have the format and interval
+semantics above. `TJ` is the sibling entry binary when installed beside
+`tjctl`, with the literal command name as a development fallback; `TJCTL` is
+the running control binary.
 The zsh integration derives `TJ_REF` as
 `@${TJ_JOURNAL}.${TJ_NEXT}`. These variables describe the selected durable
 journal and its next unused entry; they are not a snapshot of prior process

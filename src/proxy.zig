@@ -73,6 +73,7 @@ pub const Options = struct {
     replay_before_start: bool = false,
     splash: bool = false,
     title: []const u8 = "none",
+    title_blink_ms: u32 = 1500,
     home: ?[]const u8 = null,
 };
 
@@ -154,11 +155,20 @@ pub fn run(gpa: std.mem.Allocator, io: std.Io, opts: Options) !Result {
     installSignalHandlers();
     // Activate only after fatal signals are under proxy control. Unsupported
     // terminals harmlessly ignore the xterm title-stack request.
+    var blinker_storage: terminal_title.Blinker = undefined;
+    var blinker: ?*terminal_title.Blinker = null;
     if (title_enabled) {
         terminal_title.push(stdout_fd);
-        terminal_title.writeFallback(stdout_fd, store.journalId());
+        if (opts.title_blink_ms == 0) {
+            terminal_title.writeFallback(stdout_fd, store.journalId());
+        } else {
+            const now_ms = std.Io.Clock.now(.awake, io).toMilliseconds();
+            blinker_storage = .init(stdout_fd, opts.title_blink_ms, now_ms);
+            blinker = &blinker_storage;
+            blinker_storage.startJournal(store.journalId()) catch {};
+        }
     }
-    exportEnvironment(&store, title_env);
+    exportEnvironment(&store, title_env, opts.title_blink_ms);
 
     const pid = c.fork();
     if (pid < 0) {
@@ -180,11 +190,12 @@ pub fn run(gpa: std.mem.Allocator, io: std.Io, opts: Options) !Result {
         if (raw) |saved| tty.restore(saved);
     }
 
-    var recorder: Recorder = .{ .store = &store };
+    var recorder: Recorder = .{ .store = &store, .blinker = blinker };
     var output: scanner.Scanner = .{ .keep_osc = opts.keep_osc };
-    pump(pty.master, sig_fds[0], pid, &recorder, &output) catch {};
+    pump(io, pty.master, sig_fds[0], pid, &recorder, &output) catch {};
     // Nothing may stay withheld inside the scanner once the stream is over.
     output.flush(&recorder);
+    if (blinker) |active| active.flush() catch {};
 
     sys.close(pty.master);
     sys.close(sig_fds[0]);
@@ -284,7 +295,7 @@ fn installSignalHandlers() void {
 }
 
 /// Exported before the fork so the shell and its plugin inherit them.
-fn exportEnvironment(store: *Store, title: [:0]const u8) void {
+fn exportEnvironment(store: *Store, title: [:0]const u8, title_blink_ms: u32) void {
     var journal: [journal_name.max_len + 1]u8 = undefined;
     @memcpy(journal[0..store.journal.len], store.journal);
     journal[store.journal.len] = 0;
@@ -296,6 +307,10 @@ fn exportEnvironment(store: *Store, title: [:0]const u8) void {
     sys.setEnv("TJ_NEXT", next[0..next_text.len :0]);
 
     sys.setEnv("TJ_TITLE", title.ptr);
+    var blink: [16]u8 = undefined;
+    const blink_text = std.fmt.bufPrint(&blink, "{d}", .{title_blink_ms}) catch unreachable;
+    blink[blink_text.len] = 0;
+    sys.setEnv("TJ_TITLE_BLINK", blink[0..blink_text.len :0]);
     // Also when it came from --home: every `tj` invoked inside the writer has
     // to resolve references against the selected journal root.
     var root: [std.fs.max_path_bytes + 1]u8 = undefined;
@@ -347,6 +362,7 @@ fn warnNothingRecorded() void {
 /// terminal is meant to see. This is the only place the two jobs meet.
 const Recorder = struct {
     store: *Store,
+    blinker: ?*terminal_title.Blinker = null,
     /// The command line arrives just before the "command is running" boundary,
     /// so it waits here until the interaction actually opens.
     command: [scanner.max_osc]u8 = undefined,
@@ -367,8 +383,14 @@ const Recorder = struct {
 
     /// Bytes for the terminal that also belong in `out`.
     pub fn data(self: *Recorder, bytes: []const u8) void {
-        self.forward(bytes);
         self.store.append(bytes);
+        if (self.blinker) |active| {
+            active.feed(bytes) catch {
+                self.broken = true;
+            };
+        } else {
+            self.forward(bytes);
+        }
     }
 
     /// Bytes for the terminal only: tj's own sequences under `--keep-osc`,
@@ -440,7 +462,7 @@ const Recorder = struct {
     }
 };
 
-fn pump(master: sys.Fd, sig_r: sys.Fd, pid: c.pid_t, recorder: *Recorder, output: *scanner.Scanner) !void {
+fn pump(io: std.Io, master: sys.Fd, sig_r: sys.Fd, pid: c.pid_t, recorder: *Recorder, output: *scanner.Scanner) !void {
     var in_buf: [io_buf_size]u8 = undefined;
     var out_buf: [io_buf_size]u8 = undefined;
 
@@ -457,7 +479,13 @@ fn pump(master: sys.Fd, sig_r: sys.Fd, pid: c.pid_t, recorder: *Recorder, output
         // While a command is running, wake up regularly to flush its output to
         // disk, so `tail -f` on `@N/out` shows progress.
         const recording = recorder.store.isRecording();
-        _ = posix.poll(&fds, if (recording) flush_interval_ms else -1) catch return;
+        const before_poll_ms = std.Io.Clock.now(.awake, io).toMilliseconds();
+        var timeout: c_int = if (recording) flush_interval_ms else -1;
+        if (recorder.blinker) |active| {
+            const title_timeout = active.timeout(before_poll_ms);
+            if (timeout < 0 or title_timeout < timeout) timeout = title_timeout;
+        }
+        _ = posix.poll(&fds, timeout) catch return;
 
         if (sig.revents & (posix.POLL.IN | posix.POLL.HUP) != 0) {
             try drainSignals(sig_r, master, pid);
@@ -470,6 +498,14 @@ fn pump(master: sys.Fd, sig_r: sys.Fd, pid: c.pid_t, recorder: *Recorder, output
             if (recorder.broken) return;
         } else {
             recorder.store.tick();
+        }
+
+        if (recorder.blinker) |active| {
+            const now_ms = std.Io.Clock.now(.awake, io).toMilliseconds();
+            active.tick(now_ms) catch {
+                recorder.broken = true;
+            };
+            if (recorder.broken) return;
         }
 
         if (in.fd >= 0 and in.revents & (posix.POLL.IN | posix.POLL.HUP) != 0) {

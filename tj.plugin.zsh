@@ -128,18 +128,18 @@ _tj_publish
 
 _tj_update_running_title() {
   emulate -L zsh
-  local format=${TJ_TITLE:-'TJ | $TJ_JOURNAL'}
+  local format=${TJ_TITLE:-'TJ | %3~'}
   [[ $format == none ]] && return 0
 
   # The command is terminal data, not a format: remove control bytes rather
   # than evaluating parameters, substitutions, or prompt escapes within it.
   local rendered=${1//[[:cntrl:]]/}
-  _tj_emit "0;TJ | $rendered"
+  _tj_emit "0;$rendered"
 }
 
 _tj_update_title() {
   emulate -L zsh
-  local format=${TJ_TITLE:-'TJ | $TJ_JOURNAL'}
+  local format=${TJ_TITLE:-'TJ | %3~'}
   [[ $format == none ]] && return 0
 
   # The format is deliberately shell-evaluated: users may use parameters,

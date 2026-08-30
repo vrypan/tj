@@ -137,8 +137,9 @@ tjctl new                         # generated name such as 260830-k7m4q2
 tjctl new release-build           # choose a canonical name
 tjctl new release-build -- zsh -f # run a specific command instead
 tjctl new --no-splash             # start immediately without confirmation
-tjctl new --title='TJ | $TJ_REF | $PWD'
+tjctl new --title='$TJ_REF | $PWD'
 tjctl new --title none            # leave terminal window titles unchanged
+tjctl new --title-blink=0         # keep titles static
 ```
 
 Append a later writer run to an existing journal:
@@ -159,14 +160,15 @@ On an interactive terminal, `new` and `use` briefly take over the screen to
 show the selected journal and next entry number. Press Enter to restore the
 previous screen exactly and start the writer. This makes recording visible
 without taking ownership of the shell prompt. `--no-splash` skips the screen
-and pause; non-interactive starts skip it automatically.
+and pause; a non-empty `$TJ_NO_SPLASH` does the same when the option is absent.
+Non-interactive starts skip it automatically.
 
-TJ initially sets the window and tab title to `TJ | JOURNAL`, so recording
-remains visible without shell integration. The bundled zsh plugin then
+TJ initially sets the window and tab title to `JOURNAL`; the blinking marker
+makes recording visible without shell integration. The bundled zsh plugin then
 evaluates the `-t`/`--title` format at every prompt and uses the result as the
 exact title.
 Without `--title`, `tjctl` inherits a non-empty `$TJ_TITLE` from its environment;
-if none is set, the default format is `TJ | $TJ_JOURNAL`. `--title=none`
+if none is set, the default format is `TJ | %3~`. `--title=none`
 disables all TJ title handling. TJ asks xterm-compatible terminals to restore
 the previous title on exit.
 
@@ -175,18 +177,27 @@ plugin, so parameter, arithmetic, command substitutions, and zsh prompt
 escapes are supported:
 
 ```sh
-tjctl use release-build --title='TJ $TJ_REF | %3~'
-tjctl use release-build --title='TJ | $(git branch --show-current) | $PWD'
+tjctl use release-build --title='$TJ_REF | %3~'
+tjctl use release-build --title='$(git branch --show-current) | $PWD'
 ```
 
 Use single quotes to defer expansion until each prompt inside the journal.
 Command substitutions therefore run at every prompt. Double quotes let the
 calling shell expand the format before `tjctl` starts. Applications may set a
 temporary title while they run. When a command starts, the plugin first shows
-`TJ | COMMAND` using the original command line; an application-specific title
-may replace it afterward. At the next prompt, the plugin restores the
+`COMMAND` using the original command line; an application-specific title may
+replace it afterward. At the next prompt, the plugin restores the
 configured format. Recorded title sequences remain unchanged in `out`, but
 replay omits them.
+
+While title handling is enabled, the proxy intercepts OSC 0, OSC 1, and OSC 2
+titles from the shell and applications, preserves the last window and tab
+titles, and alternates a fixed-width `●`/`○` recording marker every 1500 ms.
+`--title-blink=MS` changes the interval; `--title-blink=0` forwards titles
+unchanged and disables the marker and periodic refresh. Without an explicit
+option, `tjctl` inherits `$TJ_TITLE_BLINK`, then defaults to `1500`. Original
+application title sequences are still retained in `out`. `TJ_TITLE=none`
+disables all title behavior regardless of the inherited blink setting.
 
 Only one writer can attach to a journal at a time.
 
@@ -534,6 +545,7 @@ running anything:
 | `TJ_NEXT` | `43` — just the number |
 | `TJ_JOURNAL` | the complete canonical journal name |
 | `TJ_TITLE` | literal shell-evaluated title format, or `none` |
+| `TJ_TITLE_BLINK` | title-marker interval in milliseconds; `0` disables it |
 | `TJ` | path to the entry/resource binary when discoverable |
 | `TJCTL` | path to the journal-control binary when discoverable |
 

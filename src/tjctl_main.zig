@@ -99,7 +99,7 @@ fn rootErrorMessage(err: anyerror) []const u8 {
 
 fn isUsageError(err: anyerror) bool {
     return switch (err) {
-        error.MissingArgument, error.BadReplayOption, error.BadArguments => true,
+        error.MissingArgument, error.BadReplayOption, error.BadTitleBlink, error.BadArguments => true,
         else => false,
     };
 }
@@ -121,6 +121,7 @@ fn commandErrorMessage(err: anyerror) []const u8 {
         error.InsideJournal => "tjctl: cannot replay inside a live journal writer\n",
         error.MissingArgument => "tjctl: this subcommand needs an argument\n",
         error.BadReplayOption => "tjctl: invalid replay numeric option\n",
+        error.BadTitleBlink => "tjctl: --title-blink needs milliseconds from 0 through 2147483647\n",
         error.JournalFull => "tjctl: journal has no entry numbers left\n",
         error.ForkFailed => "tjctl: cannot fork\n",
         error.Syscall => "tjctl: cannot allocate a pseudo-terminal\n",

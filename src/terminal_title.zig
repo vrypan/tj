@@ -9,7 +9,6 @@ const sys = @import("sys.zig");
 
 const esc = 0x1b;
 const bel = 0x07;
-const prefix = "TJ |";
 const max_title = 32 * 1024;
 
 pub const push_sequence = "\x1b[22;0t";
@@ -37,12 +36,12 @@ pub fn restoreFromSignal(fd: sys.Fd) void {
 
 pub fn writeFallback(fd: sys.Fd, journal: []const u8) void {
     var buf: [128]u8 = undefined;
-    const sequence = std.fmt.bufPrint(&buf, "\x1b]0;TJ | {s}\x1b\\", .{journal}) catch return;
+    const sequence = std.fmt.bufPrint(&buf, "\x1b]0;{s}\x1b\\", .{journal}) catch return;
     sys.writeAll(fd, sequence) catch {};
 }
 
 const State = enum { ground, escape, probe, title, pass };
-pub const Mode = enum { pass, prefix, omit };
+pub const Mode = enum { pass, omit, capture };
 
 pub const Decorator = struct {
     mode: Mode = .pass,
@@ -95,7 +94,8 @@ pub const Decorator = struct {
                 // In omit mode, a recognized title prefix is unsafe to replay
                 // even without its terminator: it would leave the terminal
                 // consuming subsequent screen output as title text.
-                if (self.mode != .omit) {
+                const recognized = self.state == .title;
+                if (!recognized or (self.mode != .omit and self.mode != .capture)) {
                     try sink.emit(&[_]u8{ esc, ']' });
                     try sink.emit(self.buf[0..self.len]);
                     if (self.esc_pending) try sink.emit(&[_]u8{esc});
@@ -205,24 +205,119 @@ pub const Decorator = struct {
 
     fn finishTitle(self: *Decorator, sink: anytype, terminated_by_bel: bool) !void {
         const omit = self.state == .title and self.mode == .omit;
+        const capture = self.state == .title and self.mode == .capture;
         // A still-probing one-byte OSC is not a title after all.
         if (self.state != .title) {
             try sink.emit(&[_]u8{ esc, ']' });
             try sink.emit(self.buf[0..self.len]);
+        } else if (capture) {
+            try sink.title(self.buf[0], self.buf[2..self.len]);
         } else if (!omit) {
             try sink.emit(&[_]u8{ esc, ']' });
-            try sink.emit(self.buf[0..2]);
-            const title = self.buf[2..self.len];
-            if (!std.mem.startsWith(u8, title, prefix)) {
-                try sink.emit(prefix);
-                if (title.len != 0) try sink.emit(" ");
-            }
-            try sink.emit(title);
+            try sink.emit(self.buf[0..self.len]);
         }
-        if (!omit) try sink.emit(if (terminated_by_bel) &[_]u8{bel} else &[_]u8{ esc, '\\' });
+        if (!omit and !capture) try sink.emit(if (terminated_by_bel) &[_]u8{bel} else &[_]u8{ esc, '\\' });
         self.state = .ground;
         self.len = 0;
         self.esc_pending = false;
+    }
+};
+
+/// Captures application titles and periodically redraws them with a fixed-width
+/// recording marker. The proxy owns all calls, so writes cannot interleave
+/// with bytes being forwarded from the child PTY.
+pub const Blinker = struct {
+    fd: sys.Fd,
+    interval_ms: u32,
+    next_tick_ms: i64,
+    filled: bool = true,
+    parser: Decorator = .{ .mode = .capture },
+    window: [max_title]u8 = undefined,
+    window_len: usize = 0,
+    icon: [max_title]u8 = undefined,
+    icon_len: usize = 0,
+    has_window: bool = false,
+    has_icon: bool = false,
+
+    pub fn init(fd: sys.Fd, interval_ms: u32, now_ms: i64) Blinker {
+        std.debug.assert(interval_ms != 0);
+        return .{
+            .fd = fd,
+            .interval_ms = interval_ms,
+            .next_tick_ms = now_ms + @as(i64, interval_ms),
+        };
+    }
+
+    pub fn startJournal(self: *Blinker, journal: []const u8) !void {
+        const initial = std.fmt.bufPrint(&self.window, "{s}", .{journal}) catch return error.TitleTooLong;
+        self.window_len = initial.len;
+        @memcpy(self.icon[0..initial.len], initial);
+        self.icon_len = initial.len;
+        self.has_window = true;
+        self.has_icon = true;
+        try self.writeTitle('0', initial);
+    }
+
+    pub fn feed(self: *Blinker, bytes: []const u8) !void {
+        try self.parser.feed(bytes, self);
+    }
+
+    pub fn flush(self: *Blinker) !void {
+        try self.parser.flush(self);
+    }
+
+    /// Called by the capture parser for bytes that are not title sequences.
+    pub fn emit(self: *Blinker, bytes: []const u8) !void {
+        try sys.writeAll(self.fd, bytes);
+    }
+
+    /// Called only for a complete, bounded OSC 0, 1, or 2 title.
+    pub fn title(self: *Blinker, selector: u8, value: []const u8) !void {
+        switch (selector) {
+            '0' => {
+                self.storeTitle(&self.window, &self.window_len, &self.has_window, value);
+                self.storeTitle(&self.icon, &self.icon_len, &self.has_icon, value);
+            },
+            '1' => self.storeTitle(&self.icon, &self.icon_len, &self.has_icon, value),
+            '2' => self.storeTitle(&self.window, &self.window_len, &self.has_window, value),
+            else => unreachable,
+        }
+        try self.writeTitle(selector, value);
+    }
+
+    pub fn timeout(self: *const Blinker, now_ms: i64) c_int {
+        if (now_ms >= self.next_tick_ms) return 0;
+        return @intCast(self.next_tick_ms - now_ms);
+    }
+
+    pub fn tick(self: *Blinker, now_ms: i64) !void {
+        if (now_ms < self.next_tick_ms) return;
+        self.filled = !self.filled;
+        self.next_tick_ms = now_ms + @as(i64, self.interval_ms);
+
+        if (self.has_window and self.has_icon and
+            std.mem.eql(u8, self.window[0..self.window_len], self.icon[0..self.icon_len]))
+        {
+            try self.writeTitle('0', self.window[0..self.window_len]);
+            return;
+        }
+        if (self.has_icon) try self.writeTitle('1', self.icon[0..self.icon_len]);
+        if (self.has_window) try self.writeTitle('2', self.window[0..self.window_len]);
+    }
+
+    fn storeTitle(self: *Blinker, dest: *[max_title]u8, len: *usize, present: *bool, value: []const u8) void {
+        _ = self;
+        @memcpy(dest[0..value.len], value);
+        len.* = value.len;
+        present.* = true;
+    }
+
+    fn writeTitle(self: *Blinker, selector: u8, value: []const u8) !void {
+        const lead = [_]u8{ esc, ']', selector, ';' };
+        try sys.writeAll(self.fd, &lead);
+        try sys.writeAll(self.fd, if (self.filled) "● " else "○ ");
+        try sys.writeAll(self.fd, value);
+        try sys.writeAll(self.fd, &[_]u8{ esc, '\\' });
     }
 };
 
@@ -236,6 +331,12 @@ const TestSink = struct {
 
     pub fn emit(self: *TestSink, bytes: []const u8) !void {
         try self.bytes.appendSlice(self.gpa, bytes);
+    }
+
+    pub fn title(self: *TestSink, selector: u8, value: []const u8) !void {
+        try self.bytes.append(self.gpa, selector);
+        try self.bytes.appendSlice(self.gpa, ":");
+        try self.bytes.appendSlice(self.gpa, value);
     }
 };
 
@@ -253,26 +354,6 @@ fn transform(gpa: std.mem.Allocator, input: []const u8, chunk: usize, mode: Mode
     return gpa.dupe(u8, sink.bytes.items);
 }
 
-test "window and tab titles are prefixed across every read split" {
-    const gpa = std.testing.allocator;
-    const input = "a\x1b]0;~/Devel/\x07b\x1b]1;tab\x1b\\c\x1b]2;vim README.md\x1b\\d";
-    const expected = "a\x1b]0;TJ | ~/Devel/\x07b\x1b]1;TJ | tab\x1b\\c\x1b]2;TJ | vim README.md\x1b\\d";
-    var chunk: usize = 1;
-    while (chunk <= input.len) : (chunk += 1) {
-        const actual = try transform(gpa, input, chunk, .prefix);
-        defer gpa.free(actual);
-        try std.testing.expectEqualStrings(expected, actual);
-    }
-}
-
-test "title decoration is idempotent and leaves other controls alone" {
-    const gpa = std.testing.allocator;
-    const input = "\x1b]2;TJ | already\x1b\\\x1b]7;file:///tmp\x07\x1b[31mred\x1b[0m";
-    const actual = try transform(gpa, input, 2, .prefix);
-    defer gpa.free(actual);
-    try std.testing.expectEqualStrings(input, actual);
-}
-
 test "window and tab titles can be omitted across every read split" {
     const gpa = std.testing.allocator;
     const input = "a\x1b]0;historical\x07b\x1b]1;old tab\x1b\\c\x1b]2;old title\x1b\\d\x1b]7;file:///tmp\x07";
@@ -280,6 +361,18 @@ test "window and tab titles can be omitted across every read split" {
     var chunk: usize = 1;
     while (chunk <= input.len) : (chunk += 1) {
         const actual = try transform(gpa, input, chunk, .omit);
+        defer gpa.free(actual);
+        try std.testing.expectEqualStrings(expected, actual);
+    }
+}
+
+test "title capture reports complete titles and forwards everything else" {
+    const gpa = std.testing.allocator;
+    const input = "a\x1b]0;both\x07b\x1b]1;tab\x1b\\c\x1b]2;window\x1b\\d";
+    const expected = "a0:bothb1:tabc2:windowd";
+    var chunk: usize = 1;
+    while (chunk <= input.len) : (chunk += 1) {
+        const actual = try transform(gpa, input, chunk, .capture);
         defer gpa.free(actual);
         try std.testing.expectEqualStrings(expected, actual);
     }
@@ -298,26 +391,10 @@ test "omitting titles is bounded and drops an unfinished title" {
     try std.testing.expectEqualStrings("beforeafter", actual);
 }
 
-test "disabled decoration and unfinished sequences are byte transparent" {
+test "disabled title handling is byte transparent" {
     const gpa = std.testing.allocator;
     const input = "before\x1b]2;unfinished\x1b";
     const disabled = try transform(gpa, input, 1, .pass);
     defer gpa.free(disabled);
     try std.testing.expectEqualStrings(input, disabled);
-    const unfinished = try transform(gpa, input, 1, .prefix);
-    defer gpa.free(unfinished);
-    try std.testing.expectEqualStrings(input, unfinished);
-}
-
-test "an oversized title remains byte transparent" {
-    const gpa = std.testing.allocator;
-    var input: std.ArrayList(u8) = .empty;
-    defer input.deinit(gpa);
-    try input.appendSlice(gpa, "\x1b]2;");
-    try input.appendNTimes(gpa, 'x', max_title + 100);
-    try input.appendSlice(gpa, "\x1b\\after");
-
-    const actual = try transform(gpa, input.items, 17, .prefix);
-    defer gpa.free(actual);
-    try std.testing.expectEqualStrings(input.items, actual);
 }

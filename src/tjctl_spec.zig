@@ -21,8 +21,14 @@ const title = zecli.FlagSpec{
     .value_name = "FORMAT",
     .description = "Override the shell-evaluated terminal-title format, or use none",
 };
-const lifecycle_flags = [_]zecli.FlagSpec{ home_flag, keep_osc, no_splash, title };
-const use_flags = [_]zecli.FlagSpec{ home_flag, keep_osc, no_splash, title, .{ .name = "no-replay", .description = "Start without replaying the journal" } };
+const title_blink = zecli.FlagSpec{
+    .name = "title-blink",
+    .value = .string,
+    .value_name = "MS",
+    .description = "Alternate the title recording marker every MS (0 disables)",
+};
+const lifecycle_flags = [_]zecli.FlagSpec{ home_flag, keep_osc, no_splash, title, title_blink };
+const use_flags = [_]zecli.FlagSpec{ home_flag, keep_osc, no_splash, title, title_blink, .{ .name = "no-replay", .description = "Start without replaying the journal" } };
 const force_flags = [_]zecli.FlagSpec{.{ .name = "force", .description = "Skip confirmation or override pin protection" }};
 const du_flags = [_]zecli.FlagSpec{
     .{ .name = "chart", .description = "Show every entry's size as a chart" },

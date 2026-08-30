@@ -149,7 +149,7 @@ test "new exports journal variables and removes the old environment contract" {
         "--",
         "/bin/sh",
         "-c",
-        "printf 'J=%s N=%s TJ=%s TJCTL=%s SHORT=%s TITLE=%s\\n' \"$TJ_JOURNAL\" \"$TJ_NEXT\" \"$TJ\" \"$TJCTL\" \"${TJ_JOURNAL_SHORT-unset}\" \"$TJ_TITLE\"",
+        "printf 'J=%s N=%s TJ=%s TJCTL=%s SHORT=%s TITLE=%s BLINK=%s\\n' \"$TJ_JOURNAL\" \"$TJ_NEXT\" \"$TJ\" \"$TJCTL\" \"${TJ_JOURNAL_SHORT-unset}\" \"$TJ_TITLE\" \"$TJ_TITLE_BLINK\"",
     }, 24, 80);
     defer r.out.deinit(gpa);
     try std.testing.expectEqual(@as(u8, 0), r.code);
@@ -158,6 +158,7 @@ test "new exports journal variables and removes the old environment contract" {
     try std.testing.expect(std.mem.indexOf(u8, r.out.items, support.tjctl) != null);
     try std.testing.expect(std.mem.indexOf(u8, r.out.items, "SHORT=unset") != null);
     try std.testing.expect(std.mem.indexOf(u8, r.out.items, "TITLE=none") != null);
+    try std.testing.expect(std.mem.indexOf(u8, r.out.items, "BLINK=0") != null);
     try std.testing.expect(std.mem.indexOf(u8, r.out.items, "SESS" ++ "ION") == null);
 }
 
@@ -177,13 +178,13 @@ test "the zsh plugin evaluates the configured title at each prompt" {
     defer out.deinit(gpa);
     try support.setupJournalZsh(gpa, child, &out);
 
-    try std.testing.expect(try child.readUntil(gpa, &out, "\x1b]0;FORMAT:@", support.timeout_ms));
+    try std.testing.expect(try child.readUntil(gpa, &out, "FORMAT:@", support.timeout_ms));
     try std.testing.expect(std.mem.indexOf(u8, out.items, ":42:COMMAND:") != null);
     try std.testing.expect(std.mem.indexOf(u8, out.items, "$TJ_REF") == null);
     try std.testing.expect(std.mem.indexOf(u8, out.items, "%1~") == null);
     try child.write("exit 0\n");
     try std.testing.expectEqual(@as(u8, 0), try child.finish(gpa, &out, support.timeout_ms));
-    try std.testing.expect(std.mem.indexOf(u8, out.items, "\x1b]0;TJ | exit 0\x1b\\") != null);
+    try std.testing.expect(std.mem.indexOf(u8, out.items, "exit 0\x1b\\") != null);
 }
 
 test "use preserves unfinished numbers and gaps" {

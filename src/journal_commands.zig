@@ -21,15 +21,25 @@ pub fn run(
     out: *Io.Writer,
 ) !u8 {
     const home = parsed.last("home") orelse command.home;
-    const title = parsed.last("title") orelse sys.env("TJ_TITLE") orelse "TJ | $TJ_JOURNAL";
+    const title = parsed.last("title") orelse sys.env("TJ_TITLE") orelse "TJ | %3~";
+    const splash_enabled = !parsed.present("no-splash") and sys.env("TJ_NO_SPLASH") == null;
+    const title_blink_ms = if (command.which == .new or command.which == .use) blk: {
+        if (std.mem.eql(u8, title, "none")) {
+            if (parsed.last("title-blink")) |explicit| _ = try parseTitleBlink(explicit);
+            break :blk 0;
+        }
+        if (parsed.last("title-blink")) |explicit| break :blk try parseTitleBlink(explicit);
+        break :blk try parseTitleBlink(sys.env("TJ_TITLE_BLINK") orelse "1500");
+    } else 0;
     switch (command.which) {
         .new => {
             const result = try proxy.run(gpa, io, .{
                 .journal = .{ .new = if (parsed.positionals.items.len == 0) null else parsed.positionals.items[0] },
                 .argv = child,
                 .keep_osc = parsed.present("keep-osc"),
-                .splash = !parsed.present("no-splash"),
+                .splash = splash_enabled,
                 .title = title,
+                .title_blink_ms = title_blink_ms,
                 .home = home,
             });
             return result.exit_code;
@@ -40,8 +50,9 @@ pub fn run(
                 .argv = child,
                 .keep_osc = parsed.present("keep-osc"),
                 .replay_before_start = !parsed.present("no-replay"),
-                .splash = !parsed.present("no-splash"),
+                .splash = splash_enabled,
                 .title = title,
+                .title_blink_ms = title_blink_ms,
                 .home = home,
             });
             return result.exit_code;
@@ -67,6 +78,19 @@ pub fn run(
         .complete => try completeJournals(gpa, io, home, if (parsed.positionals.items.len == 0) "" else parsed.positionals.items[0], out),
     }
     return 0;
+}
+
+fn parseTitleBlink(text: []const u8) !u32 {
+    const millis = std.fmt.parseInt(u32, text, 10) catch return error.BadTitleBlink;
+    if (millis > @as(u32, std.math.maxInt(i32))) return error.BadTitleBlink;
+    return millis;
+}
+
+test "title blink intervals accept zero and fit poll timeouts" {
+    try std.testing.expectEqual(@as(u32, 0), try parseTitleBlink("0"));
+    try std.testing.expectEqual(@as(u32, 1500), try parseTitleBlink("1500"));
+    try std.testing.expectError(error.BadTitleBlink, parseTitleBlink("fast"));
+    try std.testing.expectError(error.BadTitleBlink, parseTitleBlink("2147483648"));
 }
 
 fn completeJournals(gpa: std.mem.Allocator, io: Io, home: ?[]const u8, prefix: []const u8, out: *Io.Writer) !void {
