@@ -275,6 +275,7 @@ const Model = struct {
             self.scroll = 0;
             return;
         }
+        self.scroll = @min(self.scroll, self.count - rows);
         if (self.cursor < self.scroll) self.scroll = self.cursor;
         if (self.cursor >= self.scroll + rows) self.scroll = self.cursor - rows + 1;
     }
@@ -301,6 +302,7 @@ pub fn run(gpa: std.mem.Allocator, io: Io, home: ?[]const u8) !void {
     var ui = try zooi.Ui.init(gpa, .{});
     defer ui.deinit();
     model.size = ui.size();
+    model.scrollToCursor();
     try render(gpa, io, home, journal, &model, ui.screen());
 
     while (try ui.nextEvent()) |first| {
@@ -1030,6 +1032,9 @@ test "browser navigation clamps and scrolls" {
     model.setCursor(3);
     try std.testing.expectEqual(@as(usize, 3), model.cursor);
     try std.testing.expectEqual(@as(usize, 2), model.scroll);
+    model.size.rows = 5;
+    model.scrollToCursor();
+    try std.testing.expectEqual(@as(usize, 1), model.scroll);
     model.moveCursor(-20);
     try std.testing.expectEqual(@as(usize, 0), model.cursor);
     try std.testing.expectEqual(@as(usize, 0), model.scroll);
