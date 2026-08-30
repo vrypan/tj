@@ -971,6 +971,19 @@ make -j6 all      # every target -> dist/<target>/bin/{tj,tjctl}
 make package      # complete install trees as dist/tj-<version>-<target>.tar.gz
 ```
 
+To publish a release, update the version in `build.zig.zon` and
+`src/frontend.zig`, commit and push it to `main`, then run:
+
+```sh
+gh workflow run release.yml --ref main
+gh run list --workflow release.yml --limit 1
+gh run watch RUN_ID --exit-status
+```
+
+The release workflow repeats the checks, builds all six archives through
+`make package`, generates `SHA256SUMS`, and publishes the tag and GitHub release
+with generated notes. It refuses versions whose tag already exists.
+
 Targets: `{aarch64,x86_64}` × `{macos, linux-musl, linux-gnu}`. The musl
 builds are static. Override `OPTIMIZE` (default `ReleaseSafe`) or `ZIG`
 to change how they are built.

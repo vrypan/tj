@@ -1,0 +1,137 @@
+name: Release
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: release
+  cancel-in-progress: false
+
+jobs:
+  build:
+    name: Build release artifacts
+    runs-on: ubuntu-24.04
+    outputs:
+      tag: ${{ steps.version.outputs.tag }}
+      version: ${{ steps.version.outputs.version }}
+    steps:
+      - name: Require main
+        shell: bash
+        run: |
+          if [[ "$GITHUB_REF" != "refs/heads/main" ]]; then
+            echo "releases must be run from main, not $GITHUB_REF" >&2
+            exit 1
+          fi
+
+      - uses: actions/checkout@v6
+
+      # Keep this in sync with build.zig.zon minimum_zig_version.
+      - uses: mlugg/setup-zig@v2
+        with:
+          version: 0.16.0
+
+      - name: Install test dependencies
+        run: sudo apt-get update && sudo apt-get install --yes zsh
+
+      - name: Derive release version
+        id: version
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          version="$(sed -n 's/^[[:space:]]*\.version = "\([^"]*\)",[[:space:]]*$/\1/p' build.zig.zon)"
+          if [[ ! "$version" =~ ^[0-9]+\.[0-9]+\.[0-9]+([.-][0-9A-Za-z.-]+)?$ ]]; then
+            echo "invalid version in build.zig.zon: ${version:-<empty>}" >&2
+            exit 1
+          fi
+
+          binary_version="$(sed -n 's/^pub const version = "\([^"]*\)";$/\1/p' src/frontend.zig)"
+          if [[ "$binary_version" != "$version" ]]; then
+            echo "version mismatch: build.zig.zon has $version, src/frontend.zig has ${binary_version:-<empty>}" >&2
+            exit 1
+          fi
+
+          tag="v${version}"
+          remote_tag="$(git ls-remote --tags origin "refs/tags/${tag}")"
+          if [[ -n "$remote_tag" ]]; then
+            echo "tag already exists on origin: $tag" >&2
+            exit 1
+          fi
+
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+          echo "tag=$tag" >> "$GITHUB_OUTPUT"
+
+      - name: Check source
+        run: make check
+
+      - name: Build release archives
+        run: make -j6 package
+
+      - name: Generate checksums
+        shell: bash
+        env:
+          VERSION: ${{ steps.version.outputs.version }}
+        run: |
+          set -euo pipefail
+
+          archives=(dist/tj-"$VERSION"-*.tar.gz)
+          if (( ${#archives[@]} != 6 )); then
+            echo "expected 6 release archives, found ${#archives[@]}" >&2
+            exit 1
+          fi
+
+          for archive in "${archives[@]}"; do
+            test -f "$archive"
+          done
+
+          (
+            cd dist
+            sha256sum tj-"$VERSION"-*.tar.gz > SHA256SUMS
+          )
+
+      - name: Upload release artifacts
+        uses: actions/upload-artifact@v7
+        with:
+          name: release-${{ steps.version.outputs.tag }}
+          path: |
+            dist/tj-${{ steps.version.outputs.version }}-*.tar.gz
+            dist/SHA256SUMS
+          if-no-files-found: error
+          compression-level: 0
+          retention-days: 7
+
+  publish:
+    name: Publish ${{ needs.build.outputs.tag }}
+    needs: build
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v8
+        with:
+          name: release-${{ needs.build.outputs.tag }}
+          path: dist
+
+      - name: Verify release artifacts
+        working-directory: dist
+        run: sha256sum --check SHA256SUMS
+
+      - name: Create GitHub release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ needs.build.outputs.tag }}
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          gh release create "$TAG" \
+            --repo "$GITHUB_REPOSITORY" \
+            --target "$GITHUB_SHA" \
+            --title "$TAG" \
+            --generate-notes \
+            --fail-on-no-commits \
+            dist/*.tar.gz \
+            dist/SHA256SUMS
