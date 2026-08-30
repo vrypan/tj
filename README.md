@@ -975,7 +975,7 @@ Targets: `{aarch64,x86_64}` × `{macos, linux-musl, linux-gnu}`. The musl
 builds are static. Override `OPTIMIZE` (default `ReleaseSafe`) or `ZIG`
 to change how they are built.
 
-The build fetches the exactly pinned, std-only Zecli 0.2.2 and Zooi 0.1.1
+The build fetches the exactly pinned, std-only Zecli 0.2.2 and Zooi 0.1.3
 source packages on first use. Zecli provides CLI parsing and generated
 completion; Zooi provides `tj tui` terminal mechanics. Both are build-time
 source dependencies and add no runtime package dependency.
