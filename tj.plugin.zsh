@@ -98,13 +98,13 @@ _tj_preexec() {
 # Exported rather than computed by the prompt, so showing any of this costs no
 # process per prompt:
 #
-#   TJ_JOURNAL        the full journal id, exported by tj itself
+#   TJ_JOURNAL        the full journal id, exported by tjctl
 #   TJ_NEXT           the number the next command will get
 #   TJ_REF            a reference to it that can be typed from anywhere
 #
-# tj computes the next unused number while holding the journal lock. Starting
+# tjctl computes the next unused number while holding the journal lock. Starting
 # one behind keeps this counter aligned with the preexec event below, including
-# after unfinished interactions and numbering gaps.
+# after unfinished entries and numbering gaps.
 typeset -gi _tj_count=$(( TJ_NEXT - 1 ))
 
 _tj_publish() {
@@ -141,9 +141,9 @@ add-zle-hook-widget zle-line-init _tj_prompt_end
 
 # --- the journal namespace --------------------------------------------------
 
-# Whether $1 is exactly a syntactically valid interaction-reference head. The
+# Whether $1 is exactly a syntactically valid entry-reference head. The
 # resource suffix is deliberately not part of this check: ~[@10] names the
-# interaction directory and zsh owns whatever filesystem path follows it.
+# entry directory and zsh owns whatever filesystem path follows it.
 _tj_valid_reference_head() {
   emulate -L zsh
   setopt extendedglob
@@ -171,7 +171,7 @@ _tj_valid_reference_head() {
     return
   fi
 
-  # Interaction names are deliberately conservative and disjoint from
+  # Entry names are deliberately conservative and disjoint from
   # numbers. Zig remains authoritative; this mirror only decides whether a
   # shell word is worth asking `tj resolve` about.
   (( ${#target} >= 1 && ${#target} <= 63 )) || return 1

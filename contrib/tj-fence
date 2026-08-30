@@ -3,7 +3,7 @@
 #
 # An agent writes ordinary markdown - it is good at that and needs no
 # instructions - and the fenced blocks become addressable files of the
-# interaction. Nothing is asked of the model, which will not emit terminal
+# entry. Nothing is asked of the model, which will not emit terminal
 # control sequences anyway, and rightly refuses when asked to.
 #
 #   cl() { claude -p "$*" | tj-fence; }

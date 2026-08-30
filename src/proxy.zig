@@ -25,6 +25,7 @@ const max_protocol_error_log_bytes = 384;
 
 /// How often a running command's buffered output reaches the disk.
 const flush_interval_ms = 200;
+const nothing_recorded_message = "tjctl: nothing was recorded - is tj.plugin.zsh sourced in your ~/.zshrc?";
 
 const stdin_fd: sys.Fd = 0;
 const stdout_fd: sys.Fd = 1;
@@ -161,7 +162,9 @@ pub fn run(gpa: std.mem.Allocator, io: std.Io, opts: Options) !Result {
     sig_pipe_w.store(-1, .monotonic);
     sys.close(sig_fds[1]);
 
-    return .{ .exit_code = sys.waitFor(pid).code };
+    const child_result = sys.waitFor(pid);
+    if (!store.hasRecordedEntry()) warnNothingRecorded();
+    return .{ .exit_code = child_result.code };
 }
 
 /// Resolves the command to run: what the user asked for, else their shell.
@@ -303,6 +306,11 @@ fn warnStartup(comptime fmt: []const u8, args: anytype) void {
     var buf: [256]u8 = undefined;
     const text = std.fmt.bufPrint(&buf, fmt, args) catch return;
     sys.writeAll(stderr_fd, text) catch {};
+}
+
+fn warnNothingRecorded() void {
+    sys.writeAll(stderr_fd, nothing_recorded_message) catch return;
+    sys.writeAll(stderr_fd, if (sys.isTty(stderr_fd)) "\r\n" else "\n") catch {};
 }
 
 /// Turns scanner events into journal entries and forwards every byte the

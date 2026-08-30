@@ -76,13 +76,14 @@ If your zsh setup does not already include your installation prefix's
 fpath=(~/.local/share/zsh/site-functions $fpath)
 ```
 
-Adjust the path for the prefix passed to `make install`. Outside a TJ writer
-writer the recording hooks remain inactive; only the lightweight `tjcd`
+Adjust the path for the prefix passed to `make install`. Outside a TJ writer,
+the recording hooks remain inactive; only the lightweight `tjcd`
 helper is defined. Loading the plugin unconditionally is safe.
 
 **Without this line tj still runs and your terminal still behaves normally,
-but nothing is recorded** and `tj hist` comes back empty. That is the one
-setup step worth not skipping.
+but nothing is recorded** and `tj hist` comes back empty. When such a writer
+exits, `tjctl` warns that the plugin may not be sourced. That is the one setup
+step worth not skipping.
 
 ### SSH and terminal descriptions
 
@@ -128,8 +129,7 @@ tjctl use --no-replay release-build
 `new` always creates a fresh journal. Names contain 1–63 lowercase letters,
 digits, and internal hyphens. `use` requires exactly one existing journal.
 Selection tries an exact name first, then accepts an unambiguous suffix;
-ambiguous suffixes are refused. Existing ULID-shaped directory names still
-work as ordinary names. Names carry no ordering or retention semantics.
+ambiguous suffixes are refused. Names carry no ordering or retention semantics.
 Only one writer can attach to a journal at a time.
 
 By default, `use` first replays the journal into the terminal, then starts
@@ -478,23 +478,25 @@ ls -l ~/.claude/skills/tj/SKILL.md    # check it resolves; a dangling
                                       # symlink fails silently
 ```
 
-Then let the agent run `tj`, and nothing else. Either per invocation:
+Then let the agent run entry-reading commands plus the read-only journal
+listing needed to discover persisted journals. Either per invocation:
 
 ```sh
-cl() { claude -p "$*" --allowedTools "Bash(tj *)" | tj-fence; }
+cl() { claude -p "$*" --allowedTools "Bash(tj *)" "Bash(tjctl ls)" | tj-fence; }
 ```
 
 or once, in `~/.claude/settings.json`, after which the wrapper is just
 `claude -p "$*"`:
 
 ```json
-{ "permissions": { "allow": ["Bash(tj *)"] } }
+{ "permissions": { "allow": ["Bash(tj *)", "Bash(tjctl ls)"] } }
 ```
 
 Three details are load-bearing, each of which fails quietly:
 
-- **`tj` must be on `$PATH`.** The rule matches the literal name, so an
-  agent invoking `"$TJ"` — an expanded variable — never matches it.
+- **`tj` and `tjctl` must be on `$PATH`.** The rules match literal names, so
+  an agent invoking `"$TJ"` or `"$TJCTL"` — expanded variables — never
+  matches them.
 - **The prompt goes before `--allowedTools`.** That flag is variadic and
   swallows every word after it, leaving no prompt: Claude then reports
   "Input must be provided either through stdin or as a prompt argument".
@@ -525,8 +527,8 @@ Three differences from the Claude wrapper:
   model then answered from invention; `--append-system-prompt` puts the file
   in front of it and the answers come out right.
 - **`--tools` allowlists by tool name, not by command.** `--tools bash` is
-  the narrowest it goes, so pi cannot be given `tj` and nothing else the way
-  `Bash(tj *)` does for Claude Code.
+  the narrowest it goes, so pi cannot be restricted to the two literal
+  command forms the way Claude Code can.
 - **`--` before the prompt**, since messages are positional there. Name the
   function something other than `pi`, or call `command pi` inside it, or it
   recurses.
@@ -787,9 +789,9 @@ mess of it, exactly as they would without tj.
 typing itself out, then the output as it was captured, colours and all. With
 the zsh plugin, each entry keeps the exact prompt bytes zsh rendered
 before it: prompt substitutions, Starship output, colours, multiple lines, and
-the right prompt are replayed rather than evaluated again. Older journals use
-`$ ` as a fallback. Non-visual background-colour and cursor-position queries
-are omitted so their terminal replies cannot become shell input:
+the right prompt are replayed rather than evaluated again. Non-visual
+background-colour and cursor-position queries are omitted so their terminal
+replies cannot become shell input:
 
 ```sh
 tjctl replay release-build
@@ -844,7 +846,7 @@ output directly:
 ├── cmd        the command line as entered
 ├── cwd        absolute logical directory in which the command started
 ├── out        what you could scroll back to, escape sequences and all
-├── prompt     exact rendered zsh prompt; absent in older journals
+├── prompt     exact rendered zsh prompt
 ├── rc         exit status; absent means the command never finished
 └── meta.json
 ```
@@ -869,10 +871,6 @@ during a write is not a supported snapshot. Deleting the journal carries the
 database and sidecars with it. This concurrency contract is for processes on
 the same host, not a shared network filesystem.
 
-This release deliberately does not migrate the former `annotations.json`
-format. If that legacy file exists, annotation access fails closed; delete the
-old journal as part of adopting this format break.
-
 Writer coordination uses private `~/.tj/.locks/<journal-name>` lifetime locks,
 plus journal mutation/metadata locks and a root namespace lock. The held
 advisory lock—not its mere presence—indicates activity. Creation, whole-journal
@@ -894,6 +892,10 @@ A journal newly created by `tjctl new` may be removed when that writer records
 nothing. An existing journal opened by `tjctl use` is never deleted merely
 because the new writer was empty. A journal that logged why it could not
 record is also kept, because that log is the explanation.
+
+At writer shutdown, `tjctl` writes a diagnostic to standard error when the
+journal contains no entry. It does not add the diagnostic to the journal or
+prevent empty-new cleanup.
 
 ## Development
 
@@ -920,8 +922,8 @@ builds are static. Override `OPTIMIZE` (default `ReleaseSafe`) or `ZIG`
 to change how they are built.
 
 The build fetches the exactly pinned, std-only Zecli 0.2.2 source package on
-first use. Zecli is compiled into `tj`; release binaries remain self-contained
-and have no Zecli runtime dependency.
+first use. Zecli is compiled into both CLI binaries; release binaries remain
+self-contained and have no Zecli runtime dependency.
 
 The proxy uses `std.posix` wherever Zig 0.16 provides the call. Process
 control, `ioctl`, and the pty grant/unlock sequence have no `std`
@@ -934,7 +936,7 @@ self-contained.
 The proxy is transparent: `tjctl new -- <command>` is indistinguishable from
 running the command directly. The pty is allocated and sized from the outer
 terminal, both byte streams are forwarded unchanged, `SIGWINCH` propagates,
-signals sent to `tj` reach the shell, and the terminal is handed back with
+signals sent to `tjctl` reach the shell, and the terminal is handed back with
 its original settings on every exit path.
 
 Recording works for `cmd`, `cwd`, `out`, `prompt` and `rc`; zsh canonicalizes interactive

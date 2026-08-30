@@ -271,6 +271,13 @@ pub const Store = struct {
         return self.current != null;
     }
 
+    /// Whether this journal had an entry when the writer attached or opened
+    /// one during this run. `next_number` advances only after the entry's core
+    /// files have been created successfully.
+    pub fn hasRecordedEntry(self: *const Store) bool {
+        return self.current != null or self.next_number == null or self.next_number.? != 1;
+    }
+
     /// The exact journal selected and locked by this writer.
     pub fn journalId(self: *const Store) []const u8 {
         return self.journal;

@@ -119,8 +119,8 @@ fi
 current_journal=${TJ_JOURNAL:-}
 current_entry=
 
-# The zsh preexec hook opens this interaction, then advances TJ_NEXT. Exclude
-# the interaction running tj-grep so its own command and partial out cannot
+# The zsh preexec hook opens this entry, then advances TJ_NEXT. Exclude
+# the entry running tj-grep so its own command and partial out cannot
 # become search results.
 if [[ ${TJ_NEXT:-} =~ ^[0-9]+$ ]] && ((TJ_NEXT > 1)); then
     current_entry=$((TJ_NEXT - 1))

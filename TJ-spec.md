@@ -293,8 +293,7 @@ A journal is a durable named directory. A `tjctl` writer process is temporary
 and attaches to one journal. Canonical names are 1–63 bytes, begin and end
 with a lowercase ASCII letter or digit, and otherwise contain lowercase ASCII
 letters, digits, or hyphens. Dots are forbidden because they separate a
-journal selector from an entry selector. Existing 26-character lowercase
-Crockford ULID directory names satisfy this grammar and require no migration.
+journal selector from an entry selector.
 
 `tjctl new [NAME]` creates a journal. Without `NAME`, it generates
 `YYMMDD-RANDOM`: a UTC date, hyphen, and six lowercase Crockford characters.
@@ -362,7 +361,7 @@ tjctl complete [PREFIX]
 
 Each binary has its own compile-time-validated flat command schema. `tj` owns
 entry and resource operations; `tjctl` owns journal lifecycle and management.
-There are no compatibility aliases between them. A bare command or `--help`
+Commands are not aliased between the two binaries. A bare command or `--help`
 prints application help, and `COMMAND --help` prints command help. Help is
 written to standard output and returns status 0.
 
@@ -790,10 +789,6 @@ part of live database state while present, so an inactive journal must be
 copied as one directory. Concurrent WAL users are supported only on the same
 host, not across a network filesystem.
 
-The former `annotations.json` format is deliberately unsupported and is not
-migrated. Its presence makes annotation access fail rather than silently
-choosing or overwriting a format.
-
 The lifetime writer lock does not serialize child commands. Shared advisory
 guards at `.locks/<journal-name>.mutation` allow annotation updates to overlap;
 SQLite serializes their short write transactions. Entry/output and whole-
@@ -1103,12 +1098,15 @@ structured output in the style of nushell or PowerShell.
 
 Recorded resources remain ordinary files. The embedded journal database is
 created lazily on the first annotation write; it is versioned for future
-journal-local state but version 1 stores only names, tags, and pins. Existing
-legacy annotation manifests are intentionally not migrated. A newly created
-journal that records no entry or log may be removed as noise. A journal used
+journal-local state but version 1 stores only names, tags, and pins. A newly
+created journal that records no entry or log may be removed as noise. A journal used
 again with `tjctl use` is never deleted by an empty writer run. Journal
 directories are canonical names; renaming one atomically changes its identity
 without rewriting its contents.
+
+At writer shutdown, `tjctl` writes a diagnostic to standard error when the
+journal contains no entry. The diagnostic is not stored and does not prevent
+empty-new cleanup.
 
 This immediately enables shell completion.
 

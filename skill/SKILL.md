@@ -17,11 +17,12 @@ Persisted journals may still exist and are listed by `tjctl ls`. Use that only
 when evidence outside the current journal is actually relevant.
 
 Run **`tj`** by its plain name, one command per call, with no pipe and no
-`;`. Not `"$TJ"`, not `tj ... | tail`. A wrapper may grant permission to run
-`tj` and nothing else, and a rule like `Bash(tj *)` matches only the literal
-name in a simple command — a pipeline or an expanded variable does not match
-it, and the journal silently stays unreadable. Every window you might want a
-pipe for, `tj` already has as a flag.
+`;`. Not `"$TJ"`, not `tj ... | tail`. The one exception is the read-only
+`tjctl ls` inventory described above; run that exact command by its plain
+name and do not invoke other `tjctl` commands. A wrapper may grant only these
+literal command forms. A pipeline or expanded variable does not match such a
+rule, and the journal silently stays unreadable. Every window you might want
+a pipe for, `tj` already has as a flag.
 
 If `tj` is genuinely not on `$PATH`, `$TJ` holds its full path, but prefer
 the plain name.
@@ -145,8 +146,8 @@ as readable text when writing to a pipe, which is what you will get. Add
 
 With the zsh integration, `prompt` contains the exact rendered prompt that
 preceded the entry, including dynamic prompt-engine output. Use
-`tj cat '@42/prompt'` only when the prompt itself is relevant; it is absent in
-older journals and is not part of `out`.
+`tj cat '@42/prompt'` only when the prompt itself is relevant; it is not part
+of `out`.
 
 The same integration records the absolute logical command-start directory in
 `cwd`. Use `tjcd @42` to change the calling zsh process back to it. `tjcd`
