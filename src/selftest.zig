@@ -1,4 +1,4 @@
-//! Test-only helper. Runs `tj` as a child and reports what happened to the
+//! Test-only helper. Runs a `tjctl` writer as a child and reports what happened to the
 //! terminal settings it inherited: they must be raw while tj is running and
 //! identical to the originals once it exits.
 //!
@@ -10,14 +10,14 @@ const posix = std.posix;
 const c = std.c;
 const sys = @import("sys.zig");
 
-const tj = std.fmt.comptimePrint("{s}", .{@import("build_options").tj_exe});
+const tjctl = std.fmt.comptimePrint("{s}", .{@import("build_options").tjctl_exe});
 
 pub fn main(init: std.process.Init) !u8 {
     _ = init;
 
     const before = posix.tcgetattr(0) catch return 1;
 
-    const argv = [_:null]?[*:0]const u8{ tj, "new", "--", "/bin/sh", "-c", "sleep 1" };
+    const argv = [_:null]?[*:0]const u8{ tjctl, "new", "--", "/bin/sh", "-c", "sleep 1" };
     const pid = c.fork();
     if (pid < 0) return 1;
     if (pid == 0) {

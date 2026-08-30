@@ -63,7 +63,7 @@ pub fn completeReference(
     }
 }
 
-/// `@4<TAB>` and `@pgsd.<TAB>` - which interactions exist.
+/// `@4<TAB>` and `@release-build.<TAB>` - which entries exist.
 pub fn completeInteractions(
     gpa: std.mem.Allocator,
     io: Io,
@@ -79,7 +79,7 @@ pub fn completeInteractions(
     const journal: []const u8 = if (std.mem.lastIndexOfScalar(u8, body, '.')) |dot| blk: {
         qualifier = body[0 .. dot + 1];
         prefix = body[dot + 1 ..];
-        journal_owned = try store.findNewestJournal(gpa, io, root, body[0..dot]) orelse return;
+        journal_owned = store.findUniqueJournal(gpa, io, root, body[0..dot]) catch return;
         break :blk journal_owned.?;
     } else sys.env("TJ_JOURNAL") orelse return;
 

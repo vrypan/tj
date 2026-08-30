@@ -99,7 +99,6 @@ _tj_preexec() {
 # process per prompt:
 #
 #   TJ_JOURNAL        the full journal id, exported by tj itself
-#   TJ_JOURNAL_SHORT  the shortest suffix that names this journal
 #   TJ_NEXT           the number the next command will get
 #   TJ_REF            a reference to it that can be typed from anywhere
 #
@@ -108,14 +107,10 @@ _tj_preexec() {
 # after unfinished interactions and numbering gaps.
 typeset -gi _tj_count=$(( TJ_NEXT - 1 ))
 
-# Four characters of a ULID's random tail is plenty to tell a handful of
-# journals apart. $TJ_JOURNAL holds the whole id when that is not enough.
-export TJ_JOURNAL_SHORT=${TJ_JOURNAL: -4}
-
 _tj_publish() {
   export TJ_NEXT=$(( _tj_count + 1 ))
   # Qualified by journal, so it still resolves from another pane.
-  export TJ_REF="@${TJ_JOURNAL_SHORT}.${TJ_NEXT}"
+  export TJ_REF="@${TJ_JOURNAL}.${TJ_NEXT}"
 }
 
 _tj_publish
@@ -161,7 +156,8 @@ _tj_valid_reference_head() {
   if [[ $body == *.* ]]; then
     qualifier=${body%.*}
     target=${body##*.}
-    [[ $qualifier == [A-Za-z0-9]## && ${#qualifier} -le 26 ]] || return 1
+    (( ${#qualifier} >= 1 && ${#qualifier} <= 63 )) || return 1
+    [[ $qualifier == [a-z0-9] || $qualifier == [a-z0-9][a-z0-9-]#[a-z0-9] ]] || return 1
   else
     target=$body
   fi

@@ -13,22 +13,8 @@ const home_flag = zecli.FlagSpec{
     .completion = .directories,
 };
 
-const keep_osc_flag = zecli.FlagSpec{
-    .name = "keep-osc",
-    .description = "Forward TJ's own control sequences instead of stripping them",
-};
-
-const new_flags = [_]zecli.FlagSpec{ home_flag, keep_osc_flag };
-
-const continue_flags = [_]zecli.FlagSpec{
-    home_flag,
-    keep_osc_flag,
-    .{ .name = "no-replay", .description = "Start without replaying the existing journal" },
-};
-
 const root_flags = [_]zecli.FlagSpec{
     home_flag,
-    keep_osc_flag,
     .{ .name = "version", .short = 'V', .description = "Print version" },
 };
 
@@ -45,11 +31,6 @@ const hist_flags = [_]zecli.FlagSpec{
         .description = "Show entries having this tag (AND when repeated)",
         .repeatable = true,
     },
-};
-
-const usage_flags = [_]zecli.FlagSpec{
-    .{ .name = "chart", .description = "Show every entry's size as a terminal-width chart" },
-    .{ .name = "bytes", .description = "List exact entry bytes, or use exact values in the chart" },
 };
 
 const cat_flags = [_]zecli.FlagSpec{
@@ -69,16 +50,6 @@ const cat_flags = [_]zecli.FlagSpec{
         .description = "Print the last N lines",
         .repeatable = true,
     },
-};
-
-const replay_flags = [_]zecli.FlagSpec{
-    .{ .name = "speed", .value = .string, .value_name = "X", .description = "Divide recorded delays by X", .default_value = "1" },
-    .{ .name = "typing", .value = .string, .value_name = "MS", .description = "Delay per command character", .default_value = "35" },
-    .{ .name = "max-pause", .value = .string, .value_name = "MS", .description = "Cap each recorded pause", .default_value = "2000" },
-    .{ .name = "prompt", .value = .string, .value_name = "TEXT", .description = "Override captured prompts", .default_value = "$ " },
-    .{ .name = "from", .value = .string, .value_name = "N", .description = "Start at entry N", .default_value = "1" },
-    .{ .name = "to", .value = .string, .value_name = "N", .description = "Stop after entry N" },
-    .{ .name = "duration", .description = "Print replay duration instead of playing it" },
 };
 
 const remove_flag = [_]zecli.FlagSpec{
@@ -107,25 +78,6 @@ const grep_flags = [_]zecli.FlagSpec{
 
 const commands = [_]zecli.CommandSpec{
     .{
-        .name = "new",
-        .description = "Run $SHELL, or a command, writing a new journal",
-        .usage = "tj new [options] [-- COMMAND...]",
-        .flags = &new_flags,
-        .extra_help = "COMMAND may omit `--` when its executable does not begin with `-`.\n",
-    },
-    .{
-        .name = "continue",
-        .description = "Run a fresh shell or command, appending to one journal",
-        .usage = "tj continue [options] <JOURNAL> [-- COMMAND...]",
-        .flags = &continue_flags,
-        .arguments = &.{.{
-            .name = "JOURNAL",
-            .description = "Existing journal ID or unambiguous suffix",
-            .required = true,
-        }},
-        .extra_help = "Continuing does not restore paths, environment, shell state, or processes.\n",
-    },
-    .{
         .name = "noout",
         .description = "Run a command whose visible output is omitted from out",
         .usage = "tj noout -- COMMAND...",
@@ -139,31 +91,12 @@ const commands = [_]zecli.CommandSpec{
         .flags = &hist_flags,
         .arguments = &.{.{
             .name = "TARGET",
-            .description = "Entry reference, numeric range, or @journal-suffix.",
+            .description = "Entry reference, numeric range, or @journal-name.",
             .repeatable = true,
             .completion = reference_completion,
         }},
-        .extra_help = "With no targets, list the current journal. A trailing dot selects an entire journal: @8wpc.\n",
+        .extra_help = "With no targets, list the current journal. A trailing dot selects an entire journal: @release-build.\n",
     },
-    .{
-        .name = "usage",
-        .description = "Show the current journal's logical storage size",
-        .usage = "tj usage [--chart] [--bytes]",
-        .flags = &usage_flags,
-        .extra_help = "Sizes sum file lengths, not filesystem allocation blocks. --bytes alone prints @ENTRY BYTES; with --chart it selects exact numeric sizes.\n",
-    },
-    .{
-        .name = "journal",
-        .description = "List journals or remove an inactive journal",
-        .usage = "tj journal <list|rm> [JOURNAL] [--force]",
-        .flags = &force_flag,
-        .arguments = &.{
-            .{ .name = "ACTION", .description = "Journal operation", .required = true, .completion = .{ .values = &.{ "list", "rm" } } },
-            .{ .name = "JOURNAL", .description = "Journal ID or unambiguous suffix" },
-        },
-        .extra_help = "`list` takes no JOURNAL or options. `rm` refuses active and pinned journals; --force overrides pins and confirmation.\n",
-    },
-    .{ .name = "current", .description = "Print the current journal ID", .usage = "tj current" },
     .{ .name = "last", .description = "Print the last completed entry", .usage = "tj last" },
     .{
         .name = "cat",
@@ -177,13 +110,6 @@ const commands = [_]zecli.CommandSpec{
             .repeatable = true,
             .completion = reference_completion,
         }},
-    },
-    .{
-        .name = "replay",
-        .description = "Play a journal back into the terminal",
-        .usage = "tj replay [options] [JOURNAL]",
-        .flags = &replay_flags,
-        .arguments = &.{.{ .name = "JOURNAL", .description = "Journal ID or suffix" }},
     },
     .{
         .name = "resolve",
@@ -242,7 +168,7 @@ const commands = [_]zecli.CommandSpec{
             .repeatable = true,
             .completion = reference_completion,
         }},
-        .extra_help = "Pinned targets are skipped unless --force is present. Use `tj journal rm ID` to remove a whole journal.\n",
+        .extra_help = "Pinned targets are skipped unless --force is present.\n",
     },
     .{
         .name = "grep",
@@ -265,9 +191,9 @@ pub const application = application: {
         \\References name previous computations the way paths name files:
         \\  @42/out             entry 42 of this journal
         \\  @-/out              the last entry that completed
-        \\  @pgsd.42/out        entry 42 of another journal
+        \\  @release-build.42/out        entry 42 of another journal
         \\  @build-failure/out  a named entry in this journal
-        \\  @pgsd.build-failure/out  a named entry in another journal
+        \\  @release-build.build-failure/out  a named entry in another journal
         \\  ~[@42]/out          canonical zsh form; unquoted @42/out is shorthand
         \\
         \\Recording and reference expansion need the shell integration:

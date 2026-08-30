@@ -74,11 +74,6 @@ pub fn activeInteraction() ?ActiveInteraction {
     return .{ .journal = journal, .number = next - 1 };
 }
 
-pub fn journalDisplaySuffix(journal: []const u8) []const u8 {
-    const length = @min(journal.len, 4);
-    return journal[journal.len - length ..];
-}
-
 /// Multi-line commands are real; a listing shows only the first line of one.
 pub fn firstLine(text: []const u8) []const u8 {
     const end = std.mem.indexOfScalar(u8, text, '\n') orelse return text;

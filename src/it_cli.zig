@@ -5,7 +5,7 @@ const posix = std.posix;
 const harness = @import("harness.zig");
 const noout = @import("noout.zig");
 const plain = @import("plain.zig");
-const ulid = @import("ulid.zig");
+const journal_name = @import("journal_name.zig");
 
 const options = @import("build_options");
 const tj = options.tj_exe;
@@ -26,15 +26,11 @@ test "application and every command expose generated help" {
         try std.testing.expect(std.mem.indexOf(u8, result.stdout, "Commands:") != null);
         try std.testing.expect(std.mem.indexOf(u8, result.stdout, "hist, history") != null);
         try std.testing.expect(std.mem.indexOf(u8, result.stdout, "--home <DIR>") != null);
-        try std.testing.expect(std.mem.indexOf(u8, result.stdout, "@pgsd.42/out") != null);
+        try std.testing.expect(std.mem.indexOf(u8, result.stdout, "@release-build.42/out") != null);
         try std.testing.expect(std.mem.indexOf(u8, result.stdout, "source /path/to/tj.plugin.zsh") != null);
     }
 
-    const command_names = [_][]const u8{
-        "new",     "continue", "noout", "hist",   "usage",   "journal",
-        "current", "last",     "cat",   "replay", "resolve", "complete",
-        "name",    "tag",      "pin",   "rm",     "grep",
-    };
+    const command_names = [_][]const u8{ "noout", "hist", "last", "cat", "resolve", "complete", "name", "tag", "pin", "rm", "grep" };
     for (command_names) |name| {
         const result = try support.runNonTty(gpa, &.{ name, "--help" });
         defer gpa.free(result.stdout);
@@ -42,6 +38,17 @@ test "application and every command expose generated help" {
         try std.testing.expectEqual(@as(u8, 0), result.term.exited);
         try std.testing.expectEqualStrings("", result.stderr);
         const usage = try std.fmt.allocPrint(gpa, "Usage: tj {s}", .{name});
+        defer gpa.free(usage);
+        try std.testing.expect(std.mem.indexOf(u8, result.stdout, usage) != null);
+    }
+
+    const control_names = [_][]const u8{ "new", "use", "ls", "mv", "rm", "du", "replay", "current", "complete" };
+    for (control_names) |name| {
+        const result = try support.runTjctlNonTty(gpa, &.{ name, "--help" });
+        defer gpa.free(result.stdout);
+        defer gpa.free(result.stderr);
+        try std.testing.expectEqual(@as(u8, 0), result.term.exited);
+        const usage = try std.fmt.allocPrint(gpa, "Usage: tjctl {s}", .{name});
         defer gpa.free(usage);
         try std.testing.expect(std.mem.indexOf(u8, result.stdout, usage) != null);
     }
@@ -124,6 +131,13 @@ test "a closed stdout pipe exits quietly" {
         try std.testing.expectEqual(std.process.Child.Term{ .exited = 0 }, result.term);
         try std.testing.expectEqualStrings("", result.stderr);
     }
+
+    for ([_][]const []const u8{ &.{"--help"}, &.{"--version"}, &.{ "ls", "--help" } }) |args| {
+        const result = try support.runTjctlWithClosedStdout(gpa, args);
+        defer gpa.free(result.stderr);
+        try std.testing.expectEqual(std.process.Child.Term{ .exited = 0 }, result.term);
+        try std.testing.expectEqualStrings("", result.stderr);
+    }
 }
 
 test "build-time completions expose cli grammar and journal references" {
@@ -143,16 +157,12 @@ test "build-time completions expose cli grammar and journal references" {
     try std.testing.expect(std.mem.startsWith(u8, zsh, "#compdef tj\n"));
     try std.testing.expect(std.mem.indexOf(u8, zsh, "'hist:List entries with annotations, size, and date'") != null);
     try std.testing.expect(std.mem.indexOf(u8, zsh, "_tj__cmd_hist()") != null);
-    try std.testing.expect(std.mem.indexOf(u8, zsh, "_tj__cmd_usage()") != null);
-    try std.testing.expect(std.mem.indexOf(u8, zsh, "--chart[Show every entry") != null);
-    try std.testing.expect(std.mem.indexOf(u8, zsh, "--bytes[List exact entry bytes") != null);
+    try std.testing.expect(std.mem.indexOf(u8, zsh, "_tj__cmd_usage()") == null);
     try std.testing.expect(std.mem.indexOf(u8, zsh, "_tj__cmd_ls()") == null);
     try std.testing.expect(std.mem.indexOf(u8, zsh, "--tag=[") != null);
     try std.testing.expect(std.mem.indexOf(u8, zsh, "--pinned") != null);
     try std.testing.expect(std.mem.indexOf(u8, zsh, "--pin") != null);
-    try std.testing.expect(std.mem.indexOf(u8, zsh, "--no-replay[") != null);
     try std.testing.expect(std.mem.indexOf(u8, zsh, "WHEN:(never auto always)") != null);
-    try std.testing.expect(std.mem.indexOf(u8, zsh, ":ACTION:(list rm)") != null);
 
     const fish = try support.Dir.cwd().readFileAlloc(io, options.fish_completion, gpa, .limited(1 << 20));
     defer gpa.free(fish);
@@ -161,7 +171,14 @@ test "build-time completions expose cli grammar and journal references" {
     try std.testing.expect(std.mem.indexOf(u8, fish, "-a 'ls'") == null);
     try std.testing.expect(std.mem.indexOf(u8, fish, "__tj_using_command hist history") != null);
     try std.testing.expect(std.mem.indexOf(u8, fish, "__tj_vals_cmd_grep_f_color") != null);
-    try std.testing.expect(std.mem.indexOf(u8, fish, "__tj_vals_cmd_journal_a_ACTION") != null);
+    try std.testing.expect(std.mem.indexOf(u8, fish, "__tj_vals_cmd_journal_a_ACTION") == null);
+
+    const ctl_zsh = try support.Dir.cwd().readFileAlloc(io, options.tjctl_zsh_completion, gpa, .limited(1 << 20));
+    defer gpa.free(ctl_zsh);
+    try std.testing.expect(std.mem.startsWith(u8, ctl_zsh, "#compdef tjctl\n"));
+    try std.testing.expect(std.mem.indexOf(u8, ctl_zsh, "_tjctl__cmd_use()") != null);
+    try std.testing.expect(std.mem.indexOf(u8, ctl_zsh, "--no-replay[") != null);
+    try std.testing.expect(std.mem.indexOf(u8, ctl_zsh, "'tjctl' 'complete'") != null);
 
     // Positional entry-reference slots use the same runtime resolver as the
     // plugin's global shorthand completion.
@@ -179,13 +196,11 @@ test "schema errors use status two and command help" {
         diagnostic: []const u8,
         usage: []const u8,
     }{
-        .{ .args = &.{ "journal", "list", "extra" }, .diagnostic = "invalid arguments", .usage = "Usage: tj journal" },
         .{ .args = &.{ "rm", "--journal", "abcd" }, .diagnostic = "unknown option", .usage = "Usage: tj rm" },
         .{ .args = &.{ "grep", "--unknown", "x" }, .diagnostic = "unknown option", .usage = "Usage: tj grep" },
         .{ .args = &.{ "cat", "--head" }, .diagnostic = "requires <N>", .usage = "Usage: tj cat" },
         .{ .args = &.{"resolve"}, .diagnostic = "missing required argument", .usage = "Usage: tj resolve" },
         .{ .args = &.{ "complete", "@1", "@2" }, .diagnostic = "too many arguments", .usage = "Usage: tj complete" },
-        .{ .args = &.{ "usage", "extra" }, .diagnostic = "too many arguments", .usage = "Usage: tj usage" },
         .{ .args = &.{ "grep", "--color=sometimes", "x" }, .diagnostic = "invalid value", .usage = "Usage: tj grep" },
     };
     for (cases) |case| {
@@ -199,12 +214,25 @@ test "schema errors use status two and command help" {
     }
 }
 
+test "removed journal commands are unknown under tj" {
+    const gpa = std.testing.allocator;
+    support.leaveJournal();
+    for ([_][]const u8{ "new", "continue", "journal", "usage", "current", "replay" }) |name| {
+        const result = try support.runNonTty(gpa, &.{name});
+        defer gpa.free(result.stdout);
+        defer gpa.free(result.stderr);
+        try std.testing.expectEqual(@as(u8, 2), result.term.exited);
+        try std.testing.expectEqualStrings("", result.stdout);
+        try std.testing.expect(std.mem.indexOf(u8, result.stderr, "unknown subcommand") != null);
+    }
+}
+
 test "exit status of the wrapped command is tj's exit status" {
     const gpa = std.testing.allocator;
     for ([_]u8{ 0, 3, 42 }) |want| {
         var script_buf: [32]u8 = undefined;
         const script = try std.fmt.bufPrint(&script_buf, "exit {d}", .{want});
-        var r = try support.run(gpa, &.{ "new", "--", "/bin/sh", "-c", script }, 24, 80);
+        var r = try support.runTjctl(gpa, &.{ "new", "--", "/bin/sh", "-c", script }, 24, 80);
         defer r.out.deinit(gpa);
         try std.testing.expectEqual(want, r.code);
     }
@@ -212,35 +240,35 @@ test "exit status of the wrapped command is tj's exit status" {
 
 test "a command killed by a signal reports 128+signal" {
     const gpa = std.testing.allocator;
-    var r = try support.run(gpa, &.{ "new", "--", "/bin/sh", "-c", "kill -TERM $$" }, 24, 80);
+    var r = try support.runTjctl(gpa, &.{ "new", "--", "/bin/sh", "-c", "kill -TERM $$" }, 24, 80);
     defer r.out.deinit(gpa);
     try std.testing.expectEqual(@as(u8, 128 + 15), r.code);
 }
 
 test "the outer window size reaches the wrapped command" {
     const gpa = std.testing.allocator;
-    var r = try support.run(gpa, &.{ "new", "--", "/bin/sh", "-c", "stty size" }, 31, 113);
+    var r = try support.runTjctl(gpa, &.{ "new", "--", "/bin/sh", "-c", "stty size" }, 31, 113);
     defer r.out.deinit(gpa);
     try std.testing.expect(std.mem.indexOf(u8, r.out.items, "31 113") != null);
 }
 
 test "the wrapped command sees a tty" {
     const gpa = std.testing.allocator;
-    var r = try support.run(gpa, &.{ "new", "--", "/bin/sh", "-c", "test -t 0 && test -t 1 && echo ISTTY" }, 24, 80);
+    var r = try support.runTjctl(gpa, &.{ "new", "--", "/bin/sh", "-c", "test -t 0 && test -t 1 && echo ISTTY" }, 24, 80);
     defer r.out.deinit(gpa);
     try std.testing.expect(std.mem.indexOf(u8, r.out.items, "ISTTY") != null);
 }
 
 test "a command that cannot be executed exits 127" {
     const gpa = std.testing.allocator;
-    var r = try support.run(gpa, &.{ "new", "--", "/nonexistent/program" }, 24, 80);
+    var r = try support.runTjctl(gpa, &.{ "new", "--", "/nonexistent/program" }, 24, 80);
     defer r.out.deinit(gpa);
     try std.testing.expectEqual(@as(u8, 127), r.code);
 }
 
 test "input typed at the outer terminal reaches the shell" {
     const gpa = std.testing.allocator;
-    const child = try support.spawnTj(gpa, &.{ support.tj, "new", "--", "/bin/sh" }, 24, 80);
+    const child = try support.spawnTjctl(gpa, &.{ support.tjctl, "new", "--", "/bin/sh" }, 24, 80);
     var out: std.ArrayList(u8) = .empty;
     defer out.deinit(gpa);
 
@@ -256,7 +284,7 @@ test "resizing the outer terminal resizes the inner one" {
     const gpa = std.testing.allocator;
     const child = try support.spawnTj(
         gpa,
-        &.{ support.tj, "new", "--", "/bin/sh", "-c", "trap 'stty size; exit 0' WINCH; echo READY; while :; do sleep 1; done" },
+        &.{ support.tjctl, "new", "--", "/bin/sh", "-c", "trap 'stty size; exit 0' WINCH; echo READY; while :; do sleep 1; done" },
         24,
         80,
     );
@@ -276,7 +304,7 @@ test "signals sent to tj are forwarded to the shell" {
     const gpa = std.testing.allocator;
     const child = try support.spawnTj(
         gpa,
-        &.{ support.tj, "new", "--", "/bin/sh", "-c", "trap 'echo GOTTERM; exit 9' TERM; echo READY; while :; do sleep 1; done" },
+        &.{ support.tjctl, "new", "--", "/bin/sh", "-c", "trap 'echo GOTTERM; exit 9' TERM; echo READY; while :; do sleep 1; done" },
         24,
         80,
     );

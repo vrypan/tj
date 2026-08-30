@@ -1,4 +1,4 @@
-//! `tj hist`, `tj usage`, `tj journal list`, and `tj last` - the listings.
+//! Entry history plus the journal listings and usage report used by `tjctl`.
 
 const std = @import("std");
 const Io = std.Io;
@@ -8,6 +8,7 @@ const cli = @import("cli.zig");
 const store = @import("store.zig");
 const sys = @import("sys.zig");
 const reference = @import("reference.zig");
+const journal_name = @import("journal_name.zig");
 const plain = @import("plain.zig");
 const annotations = @import("annotations.zig");
 const mutation_lock = @import("mutation_lock.zig");
@@ -147,18 +148,16 @@ pub fn loadHistoryJournal(
 pub fn parseHistoryJournalSelector(text: []const u8) ?[]const u8 {
     if (text.len < 3 or text[0] != '@' or text[text.len - 1] != '.') return null;
     const suffix = text[1 .. text.len - 1];
-    if (suffix.len == 0 or suffix.len > reference.max_suffix) return null;
-    for (suffix) |char| {
-        if (!std.ascii.isDigit(char) and !std.ascii.isAlphabetic(char)) return null;
-    }
+    if (!journal_name.isValid(suffix)) return null;
     return suffix;
 }
 
 test "history journal selectors use a trailing dot" {
-    try std.testing.expectEqualStrings("8wpc", parseHistoryJournalSelector("@8wpc.").?);
+    try std.testing.expectEqualStrings("build", parseHistoryJournalSelector("@build.").?);
     try std.testing.expectEqualStrings("01m12awjf7hd5pdfvnkzmw8wpc", parseHistoryJournalSelector("@01m12awjf7hd5pdfvnkzmw8wpc.").?);
+    try std.testing.expectEqualStrings("release-build", parseHistoryJournalSelector("@release-build.").?);
     try std.testing.expect(parseHistoryJournalSelector("8wpc") == null);
-    try std.testing.expect(parseHistoryJournalSelector("@8wpc") == null);
+    try std.testing.expect(parseHistoryJournalSelector("@build") == null);
     try std.testing.expect(parseHistoryJournalSelector("@.") == null);
     try std.testing.expect(parseHistoryJournalSelector("@bad_suffix.") == null);
 }
@@ -183,7 +182,7 @@ pub fn appendWholeHistoryJournal(
 pub fn historyReferenceWidth(journal: *const HistoryJournal, item: HistoryCursor.Item) usize {
     const number_width = report.decimalWidth(item.number);
     if (!item.qualified) return number_width;
-    return 1 + context.journalDisplaySuffix(journal.name).len + 1 + number_width;
+    return 1 + journal.name.len + 1 + number_width;
 }
 
 pub fn writeHistoryReference(
@@ -197,7 +196,7 @@ pub fn writeHistoryReference(
     try out.splatByteAll(' ', width - actual_width);
     if (color_enabled) try out.writeAll("\x1b[33m");
     if (item.qualified) {
-        try out.print("@{s}.{d}", .{ context.journalDisplaySuffix(journal.name), item.number });
+        try out.print("@{s}.{d}", .{ journal.name, item.number });
     } else {
         try out.print("{d}", .{item.number});
     }
@@ -238,7 +237,7 @@ pub fn listInteractions(
     } else {
         for (parsed.positionals.items) |text| {
             if (parseHistoryJournalSelector(text)) |suffix| {
-                const journal = try store.findNewestJournal(gpa, io, root, suffix) orelse return error.NoSuchJournal;
+                const journal = try store.findUniqueJournal(gpa, io, root, suffix);
                 defer gpa.free(journal);
                 try appendWholeHistoryJournal(gpa, io, root, &journals, &selected, journal, true);
                 continue;
@@ -291,7 +290,7 @@ pub fn listInteractions(
         const journal = &journals.items[selection.journal_index];
         if (journal.numbers.len == 0) continue;
         var width = report.decimalWidth(journal.numbers[journal.numbers.len - 1]);
-        if (selection.qualified) width += 1 + context.journalDisplaySuffix(journal.name).len + 1;
+        if (selection.qualified) width += 1 + journal.name.len + 1;
         number_width = @max(number_width, width);
     }
     const size_width = report.max_entry_size_width;
@@ -412,17 +411,23 @@ pub fn listInteractions(
     }
 }
 
-pub fn usageCommand(
+pub fn usageJournal(
     gpa: std.mem.Allocator,
     io: Io,
     home: ?[]const u8,
+    selector: ?[]const u8,
     parsed: *const zecli.Parsed,
     out: *Io.Writer,
 ) !void {
     var root = try store.openRoot(io, home);
     defer root.close(io);
 
-    const journal = try context.currentJournal();
+    var owned: ?[]u8 = null;
+    defer if (owned) |name| gpa.free(name);
+    const journal = if (selector) |wanted| blk: {
+        owned = try store.findUniqueJournal(gpa, io, root, wanted);
+        break :blk owned.?;
+    } else try context.currentJournal();
     const measured = store.measureJournalUsage(gpa, io, root, journal) catch |err| switch (err) {
         error.FileNotFound => return error.NoSuchJournal,
         else => |other| return other,
@@ -444,22 +449,35 @@ pub fn usageCommand(
         return;
     }
     if (!parsed.present("chart")) {
-        for (measured.entries) |entry| try out.print("@{d} {d}\n", .{ entry.number, entry.bytes });
+        for (measured.entries) |entry| {
+            if (sys.env("TJ_JOURNAL")) |current| {
+                if (std.mem.eql(u8, current, journal)) {
+                    try out.print("@{d} {d}\n", .{ entry.number, entry.bytes });
+                    continue;
+                }
+            }
+            try out.print("@{s}.{d} {d}\n", .{ journal, entry.number, entry.bytes });
+        }
         return;
     }
 
     const color_enabled = report.layoutColorEnabled();
+    const qualified = if (sys.env("TJ_JOURNAL")) |current|
+        !std.mem.eql(u8, current, journal)
+    else
+        true;
     try out.writeAll("Total ");
     if (color_enabled) try out.writeAll("\x1b[32m");
     try out.writeAll(total_text);
     if (color_enabled) try out.writeAll("\x1b[0m");
     try out.writeAll("\n\nEntry Size Chart\n");
 
-    var reference_width: usize = 2;
+    var reference_width: usize = if (qualified) journal.len + 3 else 2;
     var size_width: usize = 1;
     var largest: u64 = 0;
     for (measured.entries) |entry| {
-        reference_width = @max(reference_width, 1 + report.decimalWidth(entry.number));
+        const entry_width = 1 + report.decimalWidth(entry.number) + if (qualified) journal.len + 1 else 0;
+        reference_width = @max(reference_width, entry_width);
         var size_buf: [24]u8 = undefined;
         size_width = @max(size_width, formatUsageSize(entry.bytes, exact_bytes, &size_buf).len);
         largest = @max(largest, entry.bytes);
@@ -469,10 +487,14 @@ pub fn usageCommand(
     const available = if (columns > prefix_width) columns - prefix_width else 1;
 
     for (measured.entries) |entry| {
-        const actual_reference_width = 1 + report.decimalWidth(entry.number);
+        const actual_reference_width = 1 + report.decimalWidth(entry.number) + if (qualified) journal.len + 1 else 0;
         try out.splatByteAll(' ', reference_width - actual_reference_width);
         if (color_enabled) try out.writeAll("\x1b[33m");
-        try out.print("@{d}", .{entry.number});
+        if (qualified) {
+            try out.print("@{s}.{d}", .{ journal, entry.number });
+        } else {
+            try out.print("@{d}", .{entry.number});
+        }
         if (color_enabled) try out.writeAll("\x1b[0m");
         try out.writeByte(' ');
 

@@ -6,7 +6,7 @@ Things deliberately left undone, with enough context to pick up cold.
 
 ## Tell the user when a journal recorded nothing
 
-`tj new` without `tj.plugin.zsh` sourced runs fine and records nothing, and
+`tjctl new` without `tj.plugin.zsh` sourced runs fine and records nothing, and
 nothing says so. `tj hist` prints zero bytes and exits 0, which is
 indistinguishable from a broken journal, a wrong `$TJ_HOME`, or the feature
 not working at all. This has already cost one debugging journal.
@@ -56,16 +56,17 @@ terminal, including secrets, and grows without bound.
 Decided so far: exit is **not** the retention boundary. Deleting a journal
 when its terminal closes would break `@SUFFIX.N`, which is defined to resolve
 after a writer has ended, and would throw away exactly the recordings worth
-keeping. Only journals newly created by an empty `tj new` may be removed at
-writer exit; `tj continue` never deletes its existing journal.
+keeping. Only journals newly created by an empty `tjctl new` may be removed at
+writer exit; `tjctl use` never deletes its existing journal.
 
-Explicit `tj rm`, interaction names, tags, and pins do not settle retention.
-In particular, a pin is currently only a user annotation: it neither protects
-an interaction from explicit deletion nor promises that a future policy will
-keep it. Any retention design must make that relationship as a separate
-product decision.
+Explicit `tj rm`, entry names, tags, and pins do not settle retention. Pins
+protect entries and journals from ordinary explicit removal unless `--force`
+is used, but promise nothing about a future automatic policy. Generated
+`YYMMDD-RANDOM` names are mutable identities rather than timestamps: retention
+must use authoritative metadata and must not parse age from a journal name.
+Any retention design must decide its relationship to pins separately.
 
-What is wanted instead is deliberate: something like `tj prune --older-than
+What is wanted instead is deliberate: something like `tjctl prune --older-than
 30d`, or a size cap, or both.
 
 ### A reserved gutter for the reference number
@@ -107,9 +108,11 @@ is implemented. Revisit only if it turns out not to be enough.
 - `tj hist` has no machine-readable form. Not needed while an agent reads it
   through the skill - a model parses the table fine, and JSON measured 2.1x
   the size. It would matter if a wrapper script ever builds prompts.
-- Completion does not offer journal suffixes: `@pg<TAB>` produces nothing.
-  `SPEC.md` §8.3 does not ask for it, and full ULIDs make poor candidates,
-  but it is a gap when working across journals.
+- Arbitrary-command shorthand completion does not offer journal selectors:
+  `@rel<TAB>` produces nothing. Static `tjctl` journal operands do complete
+  complete canonical names, and qualified references resolve exact names or
+  unique suffixes, but global cross-journal shorthand remains a possible
+  future enhancement.
 - `tj resolve @1` inside a journal writer needs quoting (`tj resolve '@1'`).
   The accept-line widget canonicalizes the shorthand as `~[@1]`, then zsh's
   dynamic named-directory expansion supplies a path before tj sees it.

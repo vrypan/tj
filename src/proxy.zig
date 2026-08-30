@@ -15,9 +15,7 @@ const posix = std.posix;
 const c = std.c;
 const sys = @import("sys.zig");
 const tty = @import("tty.zig");
-const cli = @import("cli.zig");
 const scanner = @import("scanner.zig");
-const ulid = @import("ulid.zig");
 const journal_store = @import("store.zig");
 const Store = journal_store.Store;
 const replay = @import("replay.zig");
@@ -59,7 +57,20 @@ pub fn restoreOnPanic() void {
 
 pub const Result = struct { exit_code: u8 };
 
-pub fn run(gpa: std.mem.Allocator, io: std.Io, opts: cli.Proxy) !Result {
+pub const JournalSelection = union(enum) {
+    new: ?[]const u8,
+    existing: []const u8,
+};
+
+pub const Options = struct {
+    journal: JournalSelection,
+    argv: []const []const u8 = &.{},
+    keep_osc: bool = false,
+    replay_before_start: bool = false,
+    home: ?[]const u8 = null,
+};
+
+pub fn run(gpa: std.mem.Allocator, io: std.Io, opts: Options) !Result {
     const argv = try buildArgv(gpa, opts.argv);
     defer freeArgv(gpa, argv);
 
@@ -72,7 +83,7 @@ pub fn run(gpa: std.mem.Allocator, io: std.Io, opts: cli.Proxy) !Result {
     // Lifecycle acquisition is strict: selection, numbering, and locking all
     // complete before a pty or child process exists.
     var store = switch (opts.journal) {
-        .new => try Store.createJournal(gpa, io, opts.home),
+        .new => |name| try Store.createNamedJournal(gpa, io, opts.home, name),
         .existing => |selector| try Store.continueJournal(gpa, io, opts.home, selector),
     };
     defer store.close();
@@ -242,10 +253,10 @@ fn installSignalHandlers() void {
 
 /// Exported before the fork so the shell and its plugin inherit them.
 fn exportEnvironment(store: *Store) void {
-    var journal: [ulid.len + 1]u8 = undefined;
-    @memcpy(journal[0..ulid.len], &store.journal);
-    journal[ulid.len] = 0;
-    sys.setEnv("TJ_JOURNAL", journal[0..ulid.len :0]);
+    var journal: [journal_name.max_len + 1]u8 = undefined;
+    @memcpy(journal[0..store.journal.len], store.journal);
+    journal[store.journal.len] = 0;
+    sys.setEnv("TJ_JOURNAL", journal[0..store.journal.len :0]);
 
     var next: [16]u8 = undefined;
     const next_text = std.fmt.bufPrint(next[0 .. next.len - 1], "{d}", .{store.next_number.?}) catch return;
@@ -263,10 +274,29 @@ fn exportEnvironment(store: *Store) void {
     var path_buf: [std.fs.max_path_bytes]u8 = undefined;
     var value_buf: [std.fs.max_path_bytes + 1]u8 = undefined;
     const path = sys.selfExePath(&path_buf) orelse return;
-    if (path.len >= value_buf.len) return;
-    @memcpy(value_buf[0..path.len], path);
-    value_buf[path.len] = 0;
-    sys.setEnv("TJ", value_buf[0..path.len :0]);
+    if (path.len < value_buf.len) {
+        @memcpy(value_buf[0..path.len], path);
+        value_buf[path.len] = 0;
+        sys.setEnv("TJCTL", value_buf[0..path.len :0]);
+    }
+
+    const sibling = siblingEntryPath(path, &value_buf);
+    var fallback: [3:0]u8 = .{ 't', 'j', 0 };
+    if (sibling) |entry_path| sibling_found: {
+        std.Io.Dir.accessAbsolute(store.io, entry_path, .{}) catch break :sibling_found;
+        value_buf[entry_path.len] = 0;
+        sys.setEnv("TJ", value_buf[0..entry_path.len :0]);
+        return;
+    }
+    sys.setEnv("TJ", fallback[0..2 :0]);
+}
+
+const journal_name = @import("journal_name.zig");
+
+fn siblingEntryPath(self_path: []const u8, buf: []u8) ?[]const u8 {
+    if (!std.mem.eql(u8, std.fs.path.basename(self_path), "tjctl")) return null;
+    const dir = std.fs.path.dirname(self_path) orelse return null;
+    return std.fmt.bufPrint(buf, "{s}/tj", .{dir}) catch null;
 }
 
 fn warnStartup(comptime fmt: []const u8, args: anytype) void {

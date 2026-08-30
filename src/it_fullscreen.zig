@@ -5,7 +5,7 @@ const posix = std.posix;
 const harness = @import("harness.zig");
 const noout = @import("noout.zig");
 const plain = @import("plain.zig");
-const ulid = @import("ulid.zig");
+const journal_name = @import("journal_name.zig");
 
 const options = @import("build_options");
 const tj = options.tj_exe;
@@ -75,6 +75,8 @@ test "tj cat renders recorded output as readable text" {
 
     const home = try journal.homeArg(gpa);
     defer gpa.free(home);
+    const id = try journal.journalName(gpa);
+    defer gpa.free(id);
 
     var rendered = try support.run(gpa, &.{ "--home", home, "cat", "--plain", "@1" }, 24, 80);
     defer rendered.out.deinit(gpa);
@@ -183,6 +185,8 @@ test "cat windows and replay stream output beyond sixty-four mibibytes" {
     try journal.enter(gpa);
     const home = try journal.homeArg(gpa);
     defer gpa.free(home);
+    const replay_id = try journal.journalName(gpa);
+    defer gpa.free(replay_id);
 
     var head = try support.run(gpa, &.{ "--home", home, "cat", "--raw", "--head", "1", "@1" }, 24, 80);
     defer head.out.deinit(gpa);
@@ -200,8 +204,8 @@ test "cat windows and replay stream output beyond sixty-four mibibytes" {
     try std.testing.expect(std.mem.indexOf(u8, tail.out.items, "showing 2 of 4 lines") != null);
 
     support.leaveJournal();
-    const replay = try support.spawnTj(gpa, &.{
-        support.tj, "--home", home, "replay", "--typing", "0", "--max-pause", "0", "--prompt", "",
+    const replay = try support.spawnTjctl(gpa, &.{
+        support.tjctl, "--home", home, "replay", replay_id, "--typing", "0", "--max-pause", "0", "--prompt", "",
     }, 24, 80);
     var replayed = try support.finishKeepingTail(gpa, replay, 8192, 30_000);
     defer replayed.tail.deinit(gpa);

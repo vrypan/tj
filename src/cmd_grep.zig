@@ -188,10 +188,9 @@ pub const GrepLineSink = struct {
         const has_tags = self.annotation != null and self.annotation.?.tags.items.len != 0;
         const has_failure = self.exit_code != null and self.exit_code.? != 0;
 
-        var reference_buf: [64]u8 = undefined;
+        var reference_buf: [96]u8 = undefined;
         const reference_text = if (self.qualified) blk: {
-            const suffix = cmd_context.journalDisplaySuffix(self.journal);
-            break :blk try std.fmt.bufPrint(&reference_buf, "@{s}.{d}", .{ suffix, self.number });
+            break :blk try std.fmt.bufPrint(&reference_buf, "@{s}.{d}", .{ self.journal, self.number });
         } else try std.fmt.bufPrint(&reference_buf, "{d}", .{self.number});
         const prefix_width = 4 + 1 + self.output.reference_width + 1 + 1 + 1;
         try self.output.out.writeByte(if (self.annotation != null and self.annotation.?.pinned) '*' else ' ');
@@ -404,7 +403,7 @@ pub fn grepReferenceWidth(io: Io, root: store.Dir, journals: []const []const u8,
         const highest = try store.highestEntryNumber(io, root, journal) orelse continue;
         const number_width = report.decimalWidth(highest);
         const candidate = if (qualified)
-            1 + cmd_context.journalDisplaySuffix(journal).len + 1 + number_width
+            1 + journal.len + 1 + number_width
         else
             number_width;
         width = @max(width, candidate);

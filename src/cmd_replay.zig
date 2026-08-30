@@ -1,4 +1,4 @@
-//! `tj replay` - playing a recorded journal back into the terminal.
+//! `tjctl replay` - playing a recorded journal back into the terminal.
 
 const std = @import("std");
 const Io = std.Io;
@@ -16,6 +16,7 @@ const noout = @import("noout.zig");
 const report = @import("report.zig");
 const replay_engine = @import("replay.zig");
 const context = @import("context.zig");
+const tjctl_spec = @import("tjctl_spec.zig");
 
 pub const ReplayRequest = struct {
     replay: replay_engine.Options,
@@ -39,12 +40,15 @@ pub fn replayRequest(parsed: *const zecli.Parsed) !ReplayRequest {
 }
 
 pub fn replayRequestFromArgs(args: []const [:0]const u8) !ReplayRequest {
-    var parsed = try context.parseTestCommand(.replay, args);
+    var discard_buf: [1024]u8 = undefined;
+    var discarding = Io.Writer.Discarding.init(&discard_buf);
+    const spec = tjctl_spec.findCommand("replay") orelse unreachable;
+    var parsed = try zecli.parseCommand(std.testing.allocator, &discarding.writer, args, spec);
     defer parsed.deinit(std.testing.allocator);
     return replayRequest(&parsed);
 }
 
-/// `tj replay <journal>` - play a recording back into the terminal.
+/// `tjctl replay <journal>` - play a recording back into the terminal.
 ///
 /// Nothing is re-executed: this is the output that was captured, escape
 /// sequences and all, so it looks the way it looked. What cannot be
@@ -72,25 +76,15 @@ pub fn replayJournal(
     var root = try store.openRoot(io, home);
     defer root.close(io);
 
-    // A suffix works here as it does anywhere else a journal is named. With
-    // no journal named, the most recent one: there is no current journal to
-    // fall back on, since replay only runs outside one.
+    // Exact names and unique suffixes work here as everywhere else. Replay
+    // deliberately has no implicit journal because names carry no recency.
     var owned: ?[]u8 = null;
     defer if (owned) |name| gpa.free(name);
 
     const journal: []const u8 = if (wanted) |name| blk: {
-        owned = try store.findNewestJournal(gpa, io, root, name) orelse return error.NoSuchJournal;
+        owned = try store.findUniqueJournal(gpa, io, root, name);
         break :blk owned.?;
-    } else blk: {
-        const journals = try store.listJournals(gpa, io, root);
-        defer {
-            for (journals) |name| gpa.free(name);
-            gpa.free(journals);
-        }
-        if (journals.len == 0) return error.NothingRecorded;
-        owned = try gpa.dupe(u8, journals[0]);
-        break :blk owned.?;
-    };
+    } else return error.MissingArgument;
 
     try replay_engine.play(gpa, io, root, journal, replay, out);
 }
@@ -112,12 +106,12 @@ pub fn parseReplaySpeed(text: []const u8) !f64 {
 }
 
 test "replay entry ranges parse directly into u32" {
-    const minimum = try replayRequestFromArgs(&.{ "--from", "1", "--to=4294967295" });
+    const minimum = try replayRequestFromArgs(&.{ "journal", "--from", "1", "--to=4294967295" });
     try std.testing.expectEqual(@as(u32, 1), minimum.replay.from);
     try std.testing.expectEqual(std.math.maxInt(u32), minimum.replay.to);
 
-    try std.testing.expectError(error.BadReplayOption, replayRequestFromArgs(&.{ "--from", "0" }));
-    try std.testing.expectError(error.BadReplayOption, replayRequestFromArgs(&.{"--to=4294967296"}));
+    try std.testing.expectError(error.BadReplayOption, replayRequestFromArgs(&.{ "journal", "--from", "0" }));
+    try std.testing.expectError(error.BadReplayOption, replayRequestFromArgs(&.{ "journal", "--to=4294967296" }));
 }
 
 test "replay accepts only finite positive speeds" {
@@ -133,12 +127,12 @@ test "replay accepts only finite positive speeds" {
 }
 
 test "replay millisecond options use their final u64 type" {
-    const parsed = try replayRequestFromArgs(&.{ "--typing=18446744073709551615", "--max-pause", "0" });
+    const parsed = try replayRequestFromArgs(&.{ "journal", "--typing=18446744073709551615", "--max-pause", "0" });
     try std.testing.expectEqual(std.math.maxInt(u64), parsed.replay.typing_ms);
     try std.testing.expectEqual(@as(u64, 0), parsed.replay.max_pause_ms);
     try std.testing.expectError(
         error.BadReplayOption,
-        replayRequestFromArgs(&.{ "--typing", "18446744073709551616" }),
+        replayRequestFromArgs(&.{ "journal", "--typing", "18446744073709551616" }),
     );
 }
 

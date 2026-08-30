@@ -1,7 +1,7 @@
 //! The on-disk journal.
 //!
 //!     $TJ_HOME/                 default ~/.tj
-//!     └── <journal-ulid>/
+//!     └── <journal-name>/
 //!         ├── log               warnings from this journal, if any
 //!         └── 1/
 //!             ├── cmd           the command line as entered
@@ -25,7 +25,7 @@ pub const Dir = std.Io.Dir;
 const File = std.Io.File;
 
 const sys = @import("sys.zig");
-const ulid = @import("ulid.zig");
+const journal_name = @import("journal_name.zig");
 const altscreen = @import("altscreen.zig");
 const annotations = @import("annotations.zig");
 const mutation_lock = @import("mutation_lock.zig");
@@ -68,7 +68,7 @@ pub const Store = struct {
     gpa: std.mem.Allocator,
     root: Dir,
     journal_dir: Dir,
-    journal: ulid.Ulid,
+    journal: []u8,
     lock_file: File,
     origin: Origin,
     next_number: ?u32 = 1,
@@ -131,40 +131,63 @@ pub const Store = struct {
     /// Creates a new journal. `home_override` wins over `$TJ_HOME`, which wins
     /// over `~/.tj`.
     pub fn createJournal(gpa: std.mem.Allocator, io: Io, home_override: ?[]const u8) !Store {
+        return createNamedJournal(gpa, io, home_override, null);
+    }
+
+    pub fn createNamedJournal(gpa: std.mem.Allocator, io: Io, home_override: ?[]const u8, requested_name: ?[]const u8) !Store {
         var path_buf: [std.fs.max_path_bytes]u8 = undefined;
         const root_path = try resolveRoot(home_override, &path_buf);
 
         const root = try openOrCreateRoot(io, root_path);
         errdefer root.close(io);
+        const namespace = try mutation_lock.acquireNamespace(io, root);
+        defer namespace.close(io);
 
-        // ULIDs carry 80 random bits, so a clash means something is badly
-        // wrong with the entropy source; retrying is still the cheap fix.
+        if (requested_name) |name| if (!journal_name.isValid(name)) return error.InvalidJournalName;
         var attempts: usize = 0;
-        while (attempts < 8) : (attempts += 1) {
-            const id = ulid.generate(io);
-            root.createDir(io, &id, dir_permissions) catch |err| switch (err) {
-                error.PathAlreadyExists => continue,
+        candidate: while (attempts < 8) : (attempts += 1) {
+            const generated = journal_name.generate(io);
+            const id = requested_name orelse &generated;
+            if (root.statFile(io, id, .{ .follow_symlinks = false })) |_| {
+                if (requested_name == null) continue;
+                return error.JournalExists;
+            } else |err| switch (err) {
+                error.FileNotFound => {},
                 else => return err,
-            };
-            errdefer root.deleteDir(io, &id) catch {};
+            }
 
-            const lock_file = acquireJournalLock(io, root, &id) catch |err| {
-                removeLockFile(io, root, &id);
+            // Own the lifetime name before making the directory visible.
+            // The namespace guard keeps another create/use/mv/rm from
+            // observing the candidate between these two operations.
+            const lock_file = acquireJournalLock(io, root, id) catch |err| {
+                if (requested_name == null and err == error.JournalLocked) continue;
                 return err;
             };
-            errdefer lock_file.close(io);
-            errdefer removeLockFile(io, root, &id);
 
-            const journal_dir = try root.openDir(io, &id, .{ .iterate = true });
+            root.createDir(io, id, dir_permissions) catch |err| {
+                lock_file.close(io);
+                removeLockFile(io, root, id);
+                switch (err) {
+                    error.PathAlreadyExists => if (requested_name == null) continue :candidate else return error.JournalExists,
+                    else => return err,
+                }
+            };
+            errdefer lock_file.close(io);
+            errdefer removeLockFile(io, root, id);
+            errdefer root.deleteDir(io, id) catch {};
+
+            const journal_dir = try root.openDir(io, id, .{ .iterate = true });
             errdefer journal_dir.close(io);
 
             const out_buffer = try gpa.alloc(u8, out_buffer_size);
+            errdefer gpa.free(out_buffer);
+            const owned_id = try gpa.dupe(u8, id);
             return .{
                 .io = io,
                 .gpa = gpa,
                 .root = root,
                 .journal_dir = journal_dir,
-                .journal = id,
+                .journal = owned_id,
                 .lock_file = lock_file,
                 .origin = .created,
                 .out_buffer = out_buffer,
@@ -186,25 +209,27 @@ pub const Store = struct {
             else => return err,
         };
         errdefer root.close(io);
+        const namespace = try mutation_lock.acquireNamespace(io, root);
+        defer namespace.close(io);
 
         const selected = try findUniqueJournal(gpa, io, root, selector);
         defer gpa.free(selected);
-        var id: ulid.Ulid = undefined;
-        @memcpy(&id, selected);
+        const id = try gpa.dupe(u8, selected);
+        errdefer gpa.free(id);
 
-        const lock_file = try acquireJournalLock(io, root, &id);
+        const lock_file = try acquireJournalLock(io, root, id);
         errdefer lock_file.close(io);
 
         // Re-open only after the lock is held. Future pruning uses the same
         // lock, so the selected directory cannot disappear between these two
         // operations.
-        const journal_dir = root.openDir(io, &id, .{ .iterate = true }) catch |err| switch (err) {
+        const journal_dir = root.openDir(io, id, .{ .iterate = true }) catch |err| switch (err) {
             error.FileNotFound => return error.NoSuchJournal,
             else => return err,
         };
         errdefer journal_dir.close(io);
 
-        const next_number = try nextInteractionNumber(gpa, io, root, &id);
+        const next_number = try nextInteractionNumber(gpa, io, root, id);
         const out_buffer = try gpa.alloc(u8, out_buffer_size);
 
         return .{
@@ -229,15 +254,16 @@ pub const Store = struct {
         // Only the invocation that created a journal may remove it as empty
         // noise. A continued journal is persistent even when it stays empty.
         const removed = self.origin == .created and blk: {
-            self.root.deleteDir(self.io, &self.journal) catch break :blk false;
+            self.root.deleteDir(self.io, self.journal) catch break :blk false;
             break :blk true;
         };
 
         self.lock_file.close(self.io);
-        if (removed) removeLockFile(self.io, self.root, &self.journal);
+        if (removed) removeLockFile(self.io, self.root, self.journal);
 
         self.root.close(self.io);
         self.gpa.free(self.out_buffer);
+        self.gpa.free(self.journal);
         self.pending_prompt.deinit(self.gpa);
     }
 
@@ -247,7 +273,7 @@ pub const Store = struct {
 
     /// The exact journal selected and locked by this writer.
     pub fn journalId(self: *const Store) []const u8 {
-        return &self.journal;
+        return self.journal;
     }
 
     /// Opens interaction N and writes `cmd` immediately, so a journal that
@@ -744,7 +770,7 @@ fn acquireJournalLock(io: Io, root: Dir, journal: []const u8) !File {
 }
 
 fn removeLockFile(io: Io, root: Dir, journal: []const u8) void {
-    var path_buf: [64]u8 = undefined;
+    var path_buf: [journal_name.max_len + 16]u8 = undefined;
     const path = std.fmt.bufPrint(&path_buf, ".locks/{s}", .{journal}) catch return;
     root.deleteFile(io, path) catch {};
 }
@@ -755,8 +781,8 @@ pub fn openRoot(io: Io, home_override: ?[]const u8) !Dir {
     return Dir.cwd().openDir(io, path, .{ .iterate = true });
 }
 
-/// Journal ids, newest first. ULIDs sort chronologically, so this is just a
-/// reverse sort of the directory names.
+/// Canonical journal names, in lexical order. Names carry no ordering
+/// semantics.
 pub fn listJournals(gpa: std.mem.Allocator, io: Io, root: Dir) ![][]const u8 {
     var found: std.ArrayList([]const u8) = .empty;
     errdefer {
@@ -767,15 +793,15 @@ pub fn listJournals(gpa: std.mem.Allocator, io: Io, root: Dir) ![][]const u8 {
     var it = root.iterate();
     while (try it.next(io)) |entry| {
         if (entry.kind != .directory) continue;
-        if (!ulid.isValid(entry.name)) continue;
+        if (!journal_name.isValid(entry.name)) continue;
         try found.append(gpa, try gpa.dupe(u8, entry.name));
     }
 
     std.mem.sort([]const u8, found.items, {}, struct {
-        fn newestFirst(_: void, a: []const u8, b: []const u8) bool {
-            return std.mem.order(u8, a, b) == .gt;
+        fn lexical(_: void, a: []const u8, b: []const u8) bool {
+            return std.mem.order(u8, a, b) == .lt;
         }
-    }.newestFirst);
+    }.lexical);
 
     return found.toOwnedSlice(gpa);
 }
@@ -904,7 +930,7 @@ pub fn readInteraction(
     number: u32,
     command_limit: usize,
 ) !?InteractionInfo {
-    var path_buf: [64]u8 = undefined;
+    var path_buf: [journal_name.max_len + 32]u8 = undefined;
     const path = std.fmt.bufPrint(&path_buf, "{s}/{d}", .{ journal, number }) catch return null;
     var interaction = root.openDir(io, path, .{}) catch |err| switch (err) {
         error.FileNotFound, error.NotDir => return null,
@@ -1055,7 +1081,7 @@ pub fn lastCompleted(gpa: std.mem.Allocator, io: Io, root: Dir, journal: []const
     while (index > 0) {
         index -= 1;
         const number = numbers[index];
-        var path_buf: [64]u8 = undefined;
+        var path_buf: [journal_name.max_len + 32]u8 = undefined;
         const path = std.fmt.bufPrint(&path_buf, "{s}/{d}", .{ journal, number }) catch continue;
         var interaction = root.openDir(io, path, .{}) catch continue;
         defer interaction.close(io);
@@ -1163,7 +1189,7 @@ pub fn locate(
 ) !Resolved {
     const journal: []u8 = switch (ref.body) {
         .previous, .current => try gpa.dupe(u8, current orelse return error.NotInJournal),
-        .qualified => |q| try findNewestJournal(gpa, io, root, q.suffix) orelse return error.NoSuchJournal,
+        .qualified => |q| try findUniqueJournal(gpa, io, root, q.suffix),
     };
     errdefer gpa.free(journal);
 
@@ -1210,34 +1236,9 @@ pub fn locate(
     };
 }
 
-/// The most recent journal whose id ends with `suffix`. Short suffixes are for
-/// interactive use and deliberately trade certainty for convenience; anything
-/// that needs to stay valid should use the full id.
-pub fn findNewestJournal(gpa: std.mem.Allocator, io: Io, root: Dir, suffix: []const u8) !?[]u8 {
-    var lowered: [reference.max_suffix]u8 = undefined;
-    if (suffix.len > lowered.len) return null;
-    const wanted = std.ascii.lowerString(lowered[0..suffix.len], suffix);
-
-    const journals = try listJournals(gpa, io, root);
-    defer {
-        for (journals) |name| gpa.free(name);
-        gpa.free(journals);
-    }
-
-    // listJournals is newest first, so the first match wins.
-    for (journals) |name| {
-        if (std.mem.endsWith(u8, name, wanted)) return try gpa.dupe(u8, name);
-    }
-    return null;
-}
-
-/// Resolves a journal selector for mutation. Unlike references, ambiguity is
-/// an error because selecting the wrong result would append to the wrong
-/// durable object.
+/// Resolves every journal selector exact-first, then by unique suffix.
 pub fn findUniqueJournal(gpa: std.mem.Allocator, io: Io, root: Dir, suffix: []const u8) ![]u8 {
-    var lowered: [reference.max_suffix]u8 = undefined;
-    if (suffix.len == 0 or suffix.len > lowered.len) return error.NoSuchJournal;
-    const wanted = std.ascii.lowerString(lowered[0..suffix.len], suffix);
+    if (!journal_name.isValid(suffix)) return error.NoSuchJournal;
 
     const journals = try listJournals(gpa, io, root);
     defer {
@@ -1247,7 +1248,10 @@ pub fn findUniqueJournal(gpa: std.mem.Allocator, io: Io, root: Dir, suffix: []co
 
     var match: ?[]const u8 = null;
     for (journals) |name| {
-        if (!std.mem.endsWith(u8, name, wanted)) continue;
+        if (std.mem.eql(u8, name, suffix)) return gpa.dupe(u8, name);
+    }
+    for (journals) |name| {
+        if (!std.mem.endsWith(u8, name, suffix)) continue;
         if (match != null) return error.AmbiguousJournal;
         match = name;
     }
@@ -1274,7 +1278,7 @@ pub fn listNumbers(gpa: std.mem.Allocator, io: Io, root: Dir, journal: []const u
 }
 
 pub fn interactionExists(io: Io, root: Dir, journal: []const u8, number: u32) bool {
-    var path_buf: [64]u8 = undefined;
+    var path_buf: [journal_name.max_len + 32]u8 = undefined;
     const path = std.fmt.bufPrint(&path_buf, "{s}/{d}", .{ journal, number }) catch return false;
     var dir = root.openDir(io, path, .{}) catch return false;
     dir.close(io);
@@ -1324,7 +1328,7 @@ pub fn finishStagedRemoval(io: Io, root: Dir, staged: []const u8) !void {
 }
 
 pub fn cleanupJournalTrash(io: Io, root: Dir, journal: []const u8) void {
-    var path_buf: [64]u8 = undefined;
+    var path_buf: [journal_name.max_len + 32]u8 = undefined;
     const path = std.fmt.bufPrint(&path_buf, "{s}/.trash", .{journal}) catch return;
     root.deleteTree(io, path) catch {};
 }
@@ -1560,27 +1564,31 @@ fn writeJsonAtomic(
 }
 
 pub fn removeJournal(gpa: std.mem.Allocator, io: Io, root: Dir, journal: []const u8, force: bool) !void {
-    const lock = acquireJournalLock(io, root, journal) catch |err| switch (err) {
+    const namespace = try mutation_lock.acquireNamespace(io, root);
+    defer namespace.close(io);
+    const selected = try findUniqueJournal(gpa, io, root, journal);
+    defer gpa.free(selected);
+    const lock = acquireJournalLock(io, root, selected) catch |err| switch (err) {
         error.JournalLocked => return error.ActiveJournal,
         else => return err,
     };
     var lock_open = true;
     defer if (lock_open) lock.close(io);
-    const mutation_guard = try mutation_lock.acquire(io, root, journal, .exclusive);
+    const mutation_guard = try mutation_lock.acquire(io, root, selected, .exclusive);
     var mutation_lock_open = true;
     defer if (mutation_lock_open) mutation_guard.close(io);
 
     if (!force) {
-        var metadata = try annotations.openRead(gpa, io, root, journal);
+        var metadata = try annotations.openRead(gpa, io, root, selected);
         defer metadata.deinit(gpa);
         var pins = try metadata.pins();
         defer pins.deinit();
         while (try pins.next()) |number| {
-            if (interactionExists(io, root, journal, number)) return error.PinnedInteraction;
+            if (interactionExists(io, root, selected, number)) return error.PinnedInteraction;
         }
     }
 
-    var journal_dir = try root.openDir(io, journal, .{ .follow_symlinks = false });
+    var journal_dir = try root.openDir(io, selected, .{ .follow_symlinks = false });
     journal_dir.close(io);
     _ = root.createDir(io, ".trash", dir_permissions) catch |err| switch (err) {
         error.PathAlreadyExists => {},
@@ -1588,18 +1596,59 @@ pub fn removeJournal(gpa: std.mem.Allocator, io: Io, root: Dir, journal: []const
     };
     var trash = try root.openDir(io, ".trash", .{ .follow_symlinks = false });
     defer trash.close(io);
-    var staged_buf: [64]u8 = undefined;
-    const staged = try std.fmt.bufPrint(&staged_buf, "{s}.journal", .{journal});
+    var staged_buf: [journal_name.max_len + 16]u8 = undefined;
+    const staged = try std.fmt.bufPrint(&staged_buf, "{s}.journal", .{selected});
     try deleteOptionalEntry(io, trash, staged);
-    try root.rename(journal, trash, staged, io);
+    try root.rename(selected, trash, staged, io);
     try deleteOptionalEntry(io, trash, staged);
     mutation_guard.close(io);
     mutation_lock_open = false;
     lock.close(io);
     lock_open = false;
-    mutation_lock.removeFile(io, root, journal);
-    mutation_lock.removeMetadataFile(io, root, journal);
-    removeLockFile(io, root, journal);
+    mutation_lock.removeFile(io, root, selected);
+    mutation_lock.removeMetadataFile(io, root, selected);
+    removeLockFile(io, root, selected);
+}
+
+/// Atomically changes an inactive journal's canonical directory identity.
+pub fn renameJournal(
+    gpa: std.mem.Allocator,
+    io: Io,
+    root: Dir,
+    selector: []const u8,
+    destination: []const u8,
+) !void {
+    if (!journal_name.isValid(destination)) return error.InvalidJournalName;
+    const namespace = try mutation_lock.acquireNamespace(io, root);
+    defer namespace.close(io);
+
+    const source = try findUniqueJournal(gpa, io, root, selector);
+    defer gpa.free(source);
+    if (std.mem.eql(u8, source, destination)) return;
+    if (root.statFile(io, destination, .{ .follow_symlinks = false })) |_| {
+        return error.JournalExists;
+    } else |err| switch (err) {
+        error.FileNotFound => {},
+        else => return err,
+    }
+
+    const source_lifetime = acquireJournalLock(io, root, source) catch |err| switch (err) {
+        error.JournalLocked => return error.ActiveJournal,
+        else => return err,
+    };
+    defer source_lifetime.close(io);
+    const mutation = try mutation_lock.acquire(io, root, source, .exclusive);
+    defer mutation.close(io);
+    const destination_lifetime = acquireJournalLock(io, root, destination) catch |err| switch (err) {
+        error.JournalLocked => return error.JournalExists,
+        else => return err,
+    };
+    defer destination_lifetime.close(io);
+
+    try root.rename(source, root, destination, io);
+    mutation_lock.removeFile(io, root, source);
+    mutation_lock.removeMetadataFile(io, root, source);
+    removeLockFile(io, root, source);
 }
 
 fn parseInteractionDirName(name: []const u8) ?u32 {
@@ -1620,23 +1669,25 @@ fn testHome(tmp: *std.testing.TmpDir, io: Io, buf: []u8) ![]const u8 {
     return buf[0..len];
 }
 
-fn makeTestJournal(tmp: *std.testing.TmpDir, io: Io, id: ulid.Ulid, entries: []const []const u8) !void {
+fn makeTestJournal(tmp: *std.testing.TmpDir, io: Io, id: journal_name.Legacy, entries: []const []const u8) !void {
     try tmp.dir.createDir(io, &id, dir_permissions);
     var journal = try tmp.dir.openDir(io, &id, .{});
     defer journal.close(io);
     for (entries) |name| try journal.createDir(io, name, dir_permissions);
 }
 
-test "continuation resolves one journal and keeps newest reference lookup" {
+test "journal selection is exact-first then unique suffix" {
     const io = std.testing.io;
     const gpa = std.testing.allocator;
     var tmp = std.testing.tmpDir(.{ .iterate = true });
     defer tmp.cleanup();
 
-    const older = ulid.encode(1, .{0} ** 10);
-    const newer = ulid.encode(2, .{0} ** 10);
+    const older = journal_name.legacy(1, .{0} ** 10);
+    const newer = journal_name.legacy(2, .{0} ** 10);
     try makeTestJournal(&tmp, io, older, &.{});
     try makeTestJournal(&tmp, io, newer, &.{});
+    try tmp.dir.createDir(io, "work", dir_permissions);
+    try tmp.dir.createDir(io, "release-work", dir_permissions);
 
     var root = try tmp.dir.openDir(io, ".", .{ .iterate = true });
     defer root.close(io);
@@ -1644,12 +1695,85 @@ test "continuation resolves one journal and keeps newest reference lookup" {
     const exact = try findUniqueJournal(gpa, io, root, &older);
     defer gpa.free(exact);
     try std.testing.expectEqualStrings(&older, exact);
+    const exact_over_suffix = try findUniqueJournal(gpa, io, root, "work");
+    defer gpa.free(exact_over_suffix);
+    try std.testing.expectEqualStrings("work", exact_over_suffix);
     try std.testing.expectError(error.NoSuchJournal, findUniqueJournal(gpa, io, root, "nope"));
     try std.testing.expectError(error.AmbiguousJournal, findUniqueJournal(gpa, io, root, "0000"));
+}
 
-    const newest = (try findNewestJournal(gpa, io, root, "0000")).?;
-    defer gpa.free(newest);
-    try std.testing.expectEqualStrings(&newer, newest);
+test "journal listing is lexical and accepts the full name bound" {
+    const io = std.testing.io;
+    const gpa = std.testing.allocator;
+    var tmp = std.testing.tmpDir(.{ .iterate = true });
+    defer tmp.cleanup();
+
+    const longest = "a" ** journal_name.max_len;
+    for ([_][]const u8{ "zeta", longest, "alpha", "not.valid" }) |name| {
+        try tmp.dir.createDir(io, name, dir_permissions);
+    }
+    var root = try tmp.dir.openDir(io, ".", .{ .iterate = true });
+    defer root.close(io);
+    const journals = try listJournals(gpa, io, root);
+    defer {
+        for (journals) |name| gpa.free(name);
+        gpa.free(journals);
+    }
+    try std.testing.expectEqual(@as(usize, 3), journals.len);
+    try std.testing.expectEqualStrings(longest, journals[0]);
+    try std.testing.expectEqualStrings("alpha", journals[1]);
+    try std.testing.expectEqualStrings("zeta", journals[2]);
+
+    const selected = try findUniqueJournal(gpa, io, root, longest);
+    defer gpa.free(selected);
+    try std.testing.expectEqualStrings(longest, selected);
+}
+
+test "explicit journal creation validates names and rejects collisions" {
+    const io = std.testing.io;
+    const gpa = std.testing.allocator;
+    var tmp = std.testing.tmpDir(.{ .iterate = true });
+    defer tmp.cleanup();
+    var path_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const home = try testHome(&tmp, io, &path_buf);
+
+    var first = try Store.createNamedJournal(gpa, io, home, "release-build");
+    defer first.close();
+    try std.testing.expectEqualStrings("release-build", first.journalId());
+    try std.testing.expectError(error.JournalExists, Store.createNamedJournal(gpa, io, home, "release-build"));
+    try std.testing.expectError(error.InvalidJournalName, Store.createNamedJournal(gpa, io, home, "Release.Build"));
+}
+
+test "rename changes identity atomically and preserves journal bytes" {
+    const io = std.testing.io;
+    const gpa = std.testing.allocator;
+    var tmp = std.testing.tmpDir(.{ .iterate = true });
+    defer tmp.cleanup();
+    try tmp.dir.createDir(io, "before", dir_permissions);
+    var source = try tmp.dir.openDir(io, "before", .{});
+    try source.writeFile(io, .{ .sub_path = "log", .data = "preserved\n" });
+    source.close(io);
+
+    var root = try tmp.dir.openDir(io, ".", .{ .iterate = true });
+    defer root.close(io);
+    try renameJournal(gpa, io, root, "before", "after-build");
+    try std.testing.expectError(error.NoSuchJournal, findUniqueJournal(gpa, io, root, "before"));
+    const renamed = try findUniqueJournal(gpa, io, root, "build");
+    defer gpa.free(renamed);
+    try std.testing.expectEqualStrings("after-build", renamed);
+    const contents = try root.readFileAlloc(io, "after-build/log", gpa, .limited(64));
+    defer gpa.free(contents);
+    try std.testing.expectEqualStrings("preserved\n", contents);
+
+    try tmp.dir.createDir(io, "occupied", dir_permissions);
+    try std.testing.expectError(error.JournalExists, renameJournal(gpa, io, root, "after-build", "occupied"));
+    try std.testing.expectError(error.InvalidJournalName, renameJournal(gpa, io, root, "after-build", "Bad.Name"));
+
+    var home_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const home = try testHome(&tmp, io, &home_buf);
+    var writer = try Store.continueJournal(gpa, io, home, "after-build");
+    defer writer.close();
+    try std.testing.expectError(error.ActiveJournal, renameJournal(gpa, io, root, "after-build", "later-build"));
 }
 
 test "continued journals use the highest entry and are never removed as empty" {
@@ -1660,7 +1784,7 @@ test "continued journals use the highest entry and are never removed as empty" {
     var path_buf: [std.fs.max_path_bytes]u8 = undefined;
     const home = try testHome(&tmp, io, &path_buf);
 
-    const with_gap = ulid.encode(3, .{1} ** 10);
+    const with_gap = journal_name.legacy(3, .{1} ** 10);
     try makeTestJournal(&tmp, io, with_gap, &.{ "1", "3", "03", "0", "not-an-entry" });
     var continued = try Store.continueJournal(gpa, io, home, &with_gap);
     try std.testing.expectEqual(@as(?u32, 4), continued.next_number);
@@ -1669,7 +1793,7 @@ test "continued journals use the highest entry and are never removed as empty" {
     var gap_dir = try tmp.dir.openDir(io, &with_gap, .{});
     gap_dir.close(io);
 
-    const empty = ulid.encode(4, .{2} ** 10);
+    const empty = journal_name.legacy(4, .{2} ** 10);
     try makeTestJournal(&tmp, io, empty, &.{});
     var empty_continue = try Store.continueJournal(gpa, io, home, &empty);
     try std.testing.expectEqual(@as(?u32, 1), empty_continue.next_number);
@@ -1686,13 +1810,13 @@ test "unfinished entries consume their numbers and full journals fail" {
     var path_buf: [std.fs.max_path_bytes]u8 = undefined;
     const home = try testHome(&tmp, io, &path_buf);
 
-    const unfinished = ulid.encode(5, .{3} ** 10);
+    const unfinished = journal_name.legacy(5, .{3} ** 10);
     try makeTestJournal(&tmp, io, unfinished, &.{ "1", "2" });
     var continued = try Store.continueJournal(gpa, io, home, &unfinished);
     try std.testing.expectEqual(@as(?u32, 3), continued.next_number);
     continued.close();
 
-    const full = ulid.encode(6, .{4} ** 10);
+    const full = journal_name.legacy(6, .{4} ** 10);
     try makeTestJournal(&tmp, io, full, &.{"4294967295"});
     try std.testing.expectError(error.JournalFull, Store.continueJournal(gpa, io, home, &full));
 }
@@ -1705,7 +1829,7 @@ test "journal writer locks are exclusive and released on close" {
     var path_buf: [std.fs.max_path_bytes]u8 = undefined;
     const home = try testHome(&tmp, io, &path_buf);
 
-    const id = ulid.encode(7, .{5} ** 10);
+    const id = journal_name.legacy(7, .{5} ** 10);
     try makeTestJournal(&tmp, io, id, &.{"1"});
     var first = try Store.continueJournal(gpa, io, home, &id);
     try std.testing.expectError(error.JournalLocked, Store.continueJournal(gpa, io, home, &id));
@@ -1727,7 +1851,7 @@ test "journal writer locks are exclusive and released on close" {
 /// Resource names inside one interaction. `meta.json` and the journal log are
 /// tj's own bookkeeping and are never offered.
 pub fn listResources(gpa: std.mem.Allocator, io: Io, root: Dir, journal: []const u8, number: u32) ![][]u8 {
-    var path_buf: [64]u8 = undefined;
+    var path_buf: [journal_name.max_len + 16]u8 = undefined;
     const sub = try std.fmt.bufPrint(&path_buf, "{s}/{d}", .{ journal, number });
 
     var dir = try root.openDir(io, sub, .{ .iterate = true });
@@ -2206,7 +2330,8 @@ test "output removal redacts out and published resources but keeps the entry" {
     const root_len = try tmp.dir.realPath(io, &root_buf);
 
     var journal = try Store.createJournal(gpa, io, root_buf[0..root_len]);
-    const id = journal.journal;
+    const id = try gpa.dupe(u8, journal.journal);
+    defer gpa.free(id);
     journal.begin("publish", null, null);
     journal.beginResource("files/report.txt", "text/plain");
     journal.append("published bytes\r\n");
@@ -2221,7 +2346,7 @@ test "output removal redacts out and published resources but keeps the entry" {
     var marker_path_buf: [96]u8 = undefined;
     const marker_path = try std.fmt.bufPrint(&marker_path_buf, "{s}/1/out.removed", .{id});
     try root.writeFile(io, .{ .sub_path = marker_path, .data = "", .flags = .{ .permissions = file_permissions } });
-    try recoverPendingOutputRemovals(gpa, io, root, &id);
+    try recoverPendingOutputRemovals(gpa, io, root, id);
 
     var path_buf: [96]u8 = undefined;
     const interaction_path = try std.fmt.bufPrint(&path_buf, "{s}/1", .{id});
@@ -2260,7 +2385,8 @@ test "output removal refuses resource paths that traverse symlinks" {
     });
 
     var journal = try Store.createJournal(gpa, io, root_buf[0..root_len]);
-    const id = journal.journal;
+    const id = try gpa.dupe(u8, journal.journal);
+    defer gpa.free(id);
     journal.begin("publish", null, null);
     journal.beginResource("files/report.txt", "text/plain");
     journal.append("recorded\r\n");
@@ -2277,7 +2403,7 @@ test "output removal refuses resource paths that traverse symlinks" {
     try interaction.deleteTree(io, "files");
     try interaction.symLink(io, "../../outside", "files", .{ .is_directory = true });
 
-    try std.testing.expectError(error.InvalidMetadata, removeOutput(gpa, io, root, &id, 1));
+    try std.testing.expectError(error.InvalidMetadata, removeOutput(gpa, io, root, id, 1));
     var out = try interaction.openFile(io, "out", .{});
     out.close(io);
     try std.testing.expectError(error.FileNotFound, interaction.openFile(io, "out.removed", .{}));
@@ -2291,7 +2417,7 @@ test "staged entry removal leaves a numbering hole" {
     const gpa = std.testing.allocator;
     var tmp = std.testing.tmpDir(.{ .iterate = true });
     defer tmp.cleanup();
-    const id = ulid.encode(30, .{9} ** 10);
+    const id = journal_name.legacy(30, .{9} ** 10);
     try makeTestJournal(&tmp, io, id, &.{ "1", "2", "3" });
     var root = try tmp.dir.openDir(io, ".", .{ .iterate = true });
     defer root.close(io);
@@ -2319,7 +2445,7 @@ pub const Timing = struct {
 /// Reads the timings an interaction recorded. Absent or unparseable metadata
 /// is not an error: replaying without pacing is better than not replaying.
 pub fn readTiming(gpa: std.mem.Allocator, io: Io, root: Dir, journal: []const u8, number: u32) ?Timing {
-    var path_buf: [64]u8 = undefined;
+    var path_buf: [journal_name.max_len + 32]u8 = undefined;
     const sub = std.fmt.bufPrint(&path_buf, "{s}/{d}/meta.json", .{ journal, number }) catch return null;
 
     const text = root.readFileAlloc(io, sub, gpa, .limited(64 * 1024)) catch return null;

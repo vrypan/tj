@@ -289,19 +289,25 @@ to expose its errors as a distinct resource can do so with OSC 5107
 
 ## Journals and numbering
 
-A journal is a durable ULID directory. A `tj` process is a temporary writer
-attached to one journal. `tj new` always generates a new ULID; `tj continue
-<id-or-suffix>` attaches to one existing journal and rejects zero or multiple
-matches. ULIDs are 26-character Crockford base32 strings: a 48-bit millisecond
-timestamp followed by 80 random bits. If a generated ULID already exists in
-the store, TJ generates another one.
+A journal is a durable named directory. A `tjctl` writer process is temporary
+and attaches to one journal. Canonical names are 1–63 bytes, begin and end
+with a lowercase ASCII letter or digit, and otherwise contain lowercase ASCII
+letters, digits, or hyphens. Dots are forbidden because they separate a
+journal selector from an entry selector. Existing 26-character lowercase
+Crockford ULID directory names satisfy this grammar and require no migration.
+
+`tjctl new [NAME]` creates a journal. Without `NAME`, it generates
+`YYMMDD-RANDOM`: a UTC date, hyphen, and six lowercase Crockford characters.
+The date is a human clue only; journal identity, ordering, and retention never
+derive from it. A collision is retried for a generated name and rejected for
+an explicit name.
 
 Continuation is append-only. It launches a fresh shell or requested command
 using the caller's cwd and environment. It restores no cwd, environment,
 shell options, functions, history, jobs, file descriptors, processes, or
 other state from previous writers.
 
-Before launching that fresh child, continuation replays the selected journal
+Before launching that fresh child, `tjctl use` replays the selected journal
 to the outer terminal by default. It uses the ordinary replay rendering, but
 with command typing delays, recorded command durations, and gaps all set to
 zero. Non-visual background-colour and cursor-position queries are suppressed
@@ -315,31 +321,58 @@ but that directory still consumes its number. Gaps are never filled and old
 entries are never overwritten.
 
 At most one cooperating writer may attach to a journal. A nonblocking,
-exclusive advisory lock in `~/.tj/.locks/<journal-ulid>` is held for the
+exclusive advisory lock in `~/.tj/.locks/<journal-name>` is held for the
 writer's lifetime and is closed on exec in the child. Readers do not take
 this lock. Locking, selection, and number exhaustion fail before the child is
 started.
 
-The lifecycle CLI is explicit:
+Journal-directory identity changes use advisory locks in this fixed order:
 
 ``` text
-tj new [--keep-osc] [-- command ...]
-tj continue [--keep-osc] [--no-replay] <id-or-suffix> [-- command ...]
-tj journal list
+root namespace
+  -> source lifetime writer lock
+  -> source exclusive mutation lock
+  -> destination lifetime writer lock (rename only)
 ```
 
-All public commands are first-class subcommands in one validated command
-schema. A bare `tj` or `tj --help` prints application help; `tj COMMAND
---help` prints help for that command. Help is written to standard output and
-returns status 0.
+Creation owns the namespace and destination lifetime name before exposing the
+new directory. Whole-journal removal and rename hold the namespace while they
+resolve the exact/unique source and prove it inactive. Rename validates an
+absent destination, acquires its lifetime name, and atomically renames the
+complete directory on the same filesystem. That rename is the identity commit
+point: failures before it leave the old journal usable; afterward the complete
+journal exists under the new name. Old unlocked lock files are removed
+best-effort. A visible journal is never copied piecemeal.
+
+The two flat command surfaces are explicit:
+
+``` text
+tj hist|cat|grep|name|tag|pin|rm|last|resolve|complete|noout ...
+
+tjctl new [options] [NAME] [-- COMMAND...]
+tjctl use [options] JOURNAL [-- COMMAND...]
+tjctl ls
+tjctl mv JOURNAL NEW-NAME
+tjctl rm JOURNAL [--force]
+tjctl du [JOURNAL] [--chart] [--bytes]
+tjctl replay JOURNAL [options]
+tjctl current
+tjctl complete [PREFIX]
+```
+
+Each binary has its own compile-time-validated flat command schema. `tj` owns
+entry and resource operations; `tjctl` owns journal lifecycle and management.
+There are no compatibility aliases between them. A bare command or `--help`
+prints application help, and `COMMAND --help` prints command help. Help is
+written to standard output and returns status 0.
 
 Command options accept `--option value` and `--option=value` when the option
 requires a value. A required-value option without one is invalid; there is no
 implicit value for options such as `grep --color`. `--` ends TJ option parsing
-where a command accepts dash-prefixed operands. For `new` and `continue`, it
-also explicitly begins the child argv, though it may be omitted before an
-ordinary executable name. For `noout`, the separator is mandatory. TJ never
-parses options in a child argv after that boundary.
+where a command accepts dash-prefixed operands. For `tjctl new` and `use`, it
+is the only way to begin child argv. Thus `tjctl new make` creates the journal
+named `make`; it does not execute `make`. For `noout`, the separator is also
+mandatory. Neither binary parses options in child argv after that boundary.
 
 Every command enforces the arity in its published usage. Unknown commands,
 unknown options, missing option values, and missing or extra operands are
@@ -348,39 +381,51 @@ error and return status 2. Operational and storage failures retain status 1,
 as do commands with a documented negative result such as a grep with no
 matches.
 
-The writer exports `TJ_JOURNAL`, `TJ_NEXT`, `TJ_HOME`, and `TJ`. The zsh
-integration derives `TJ_JOURNAL_SHORT` and `TJ_REF`. These variables describe
-the selected durable journal and its next unused entry; they are not a
-snapshot of prior process state.
+The writer exports `TJ_JOURNAL`, `TJ_NEXT`, `TJ_HOME`, `TJ`, and `TJCTL`. `TJ`
+is the sibling entry binary when installed beside `tjctl`, with the literal
+command name as a development fallback; `TJCTL` is the running control binary.
+The zsh integration derives `TJ_REF` as
+`@${TJ_JOURNAL}.${TJ_NEXT}`. These variables describe the selected durable
+journal and its next unused entry; they are not a snapshot of prior process
+state.
 
 Within the current journal, `@42` refers to entry 42. To refer to
 an entry in another journal (for example, another terminal pane,
 or a journal that has already ended), the reference is qualified with
-the journal ULID or any suffix of it:
+the journal's complete canonical name or an unambiguous suffix:
 
 ``` text
 @42/out                                  entry 42, current journal
 @build-failure/out                       named entry, current journal
-@01knxf1n5ffvk9jsm8wve1pgsd.42/out       entry 42, full journal id
-@wve1pgsd.42/out                         same, using a suffix
-@pgsd.42/out                             same, using a shorter suffix
-@pgsd.build-failure/out                  named entry in that journal
+@release-build.42/out                    entry 42, complete journal name
+@build.42/out                            same, using a unique suffix
+@release-build.build-failure/out         named entry in that journal
 @-/out                                   previous entry, current journal
 ```
 
-Suffixes rather than prefixes, because the timestamp prefix is shared
-by every journal started in the same moment while the random tail is
-what distinguishes them. A suffix may be of any length. If more than
-one journal matches, the most recent one wins. This trades certainty
-for convenience: short suffixes are for interactive use, and anything
-that needs a stable reference (a note, a script, an agent transcript)
-should use the full ULID.
+Every journal selector follows one rule: an exact valid directory name wins;
+otherwise exactly one canonical name must end with the selector. Zero matches
+return `NoSuchJournal`, and multiple matches return `AmbiguousJournal`.
+Matching is lowercase and case-sensitive. This applies to reads, `use`, `mv`,
+`rm`, `du`, replay, history, completion, and zsh dynamic directories. Printed
+cross-journal references always use the complete name. `tjctl mv` is an
+intentional identity change and leaves no alias, so old qualified references
+stop resolving.
 
-That newest-match rule applies to read references and replay. `tj continue`
-requires a unique match because it mutates the selected journal.
+All-journal traversal, including `tjctl ls` and `tj grep --all`, is ascending
+lexicographic canonical-name order. Directory names have no chronological
+meaning. `tjctl replay` therefore always requires a journal selector.
 
-Because the ULID is time-ordered, journals sort chronologically in
-`~/.tj/` with no extra metadata.
+`tjctl ls` streams each valid complete name and entry count and marks the
+current journal when applicable. `tjctl current` prints the complete
+`TJ_JOURNAL` value and fails outside a writer. `tjctl du` retains logical-byte,
+chart, color, and noout behavior described below. `tjctl replay` retains the
+recorded-prompt, range, pacing, duration, and inside-writer rules; only its
+mandatory selector and command owner change. `tjctl rm` prompts on a terminal
+unless forced, refuses pins unless forced, and never removes an active journal.
+`tjctl mv` never prompts, refuses active sources and existing destinations,
+and preserves the directory's entries, resources, database, sidecars, logs,
+and private trash without editing their contents.
 
 An all-digit reference (`@42`) always means the current journal and is
 never interpreted as a suffix.
@@ -440,8 +485,8 @@ TJ references are shell-neutral identifiers accepted by TJ commands:
 ``` text
 @10
 @build-failure
-@pgsd.10
-@pgsd.build-failure
+@release-build.10
+@release-build.build-failure
 @-
 ```
 
@@ -453,8 +498,8 @@ are ordinary filesystem suffixes:
 ~[@10]/out
 ~[@build-failure]/out
 ~[@10]/files/data.csv
-~[@pgsd.10]/out
-~[@pgsd.build-failure]/out
+~[@release-build.10]/out
+~[@release-build.build-failure]/out
 ~[@-]/out
 ```
 
@@ -467,7 +512,7 @@ Conceptually:
 ``` text
 ~[@10]/out                 → ~/.tj/<journal>/10/out
 ~[@10]/files/data.csv      → ~/.tj/<journal>/10/files/data.csv
-~[@pgsd.10]/out            → ~/.tj/<ulid ending in pgsd>/10/out
+~[@release-build.10]/out   → ~/.tj/release-build/10/out
 ~[@-]/out                  → ~/.tj/<journal>/<previous>/out
 ```
 
@@ -500,7 +545,7 @@ head and preserves the resource suffix:
 @10/out       → ~[@10]/out
 @build-failure/out → ~[@build-failure]/out
 @-/out        → ~[@-]/out
-@pgsd.10/out  → ~[@pgsd.10]/out
+@release-build.10/out  → ~[@release-build.10]/out
 ```
 
 Quoted references, malformed references, and words such as `user@host` are
@@ -577,6 +622,13 @@ and the equivalent reference positions in `hist`, `resolve`, `name`, `tag`,
 This is separate from zsh's global shorthand fallback, which completes
 references in arbitrary command lines.
 
+A separate generated completion set serves `tjctl`. Journal operands for
+`use`, the source of `mv`, `rm`, `du`, and `replay` call `tjctl complete` and
+receive complete canonical names matching the typed prefix.
+The `new` name and `mv` destination are free new names and do not complete
+existing journals. Bash, zsh, and fish scripts for both binaries are installed;
+the host-only generator is not a runtime program.
+
 Numeric and assigned-name candidates are offered in both completion paths.
 Resources below a named entry complete exactly as resources below its
 numeric identity.
@@ -630,7 +682,7 @@ With no operands, `tj hist` selects every entry in the current journal. With
 operands, it accepts entry references, inclusive unqualified numeric ranges,
 and journal selectors, processing them from left to right. A journal selector
 has the form `@SUFFIX.`; the trailing dot distinguishes the journal itself
-from `@SUFFIX.ENTRY`. Bare journal IDs and suffixes are not accepted. Ranges
+from `@NAME.ENTRY`. Bare journal names and suffixes are not accepted. Ranges
 skip numbering holes and fail when they select no existing entry. Entries
 selected from another journal use `@SUFFIX.N` in the reference column so a
 mixed listing remains unambiguous.
@@ -671,13 +723,14 @@ Width calculation, wrapping, and styling operate only on that safe text. ANSI
 sequences emitted by history itself are therefore the only terminal controls
 in the rendered listing.
 
-`tj usage` reports the current journal's total logical byte length, formatted
+`tjctl du [JOURNAL]` reports the selected journal's total logical byte length,
+or the current journal when no selector is supplied, formatted
 with the same base-1024 `b`, `k`, `M`, `G`, and larger suffixes as history.
 Logical length is the sum of file lengths, not allocated filesystem blocks;
 directory metadata is not counted, symlinks are not followed, and their link
 length is counted. The total includes journal-level files as well as entries.
 
-`tj usage --chart` prints that total followed by one row for every valid
+`tjctl du --chart` prints that total followed by one row for every valid
 numeric entry directory, sorted by entry number. An entry row sums every file
 beneath that entry, including core and published resources. The largest entry
 fills the available terminal width; every nonempty smaller entry receives at
@@ -687,9 +740,11 @@ automatic color subject to `NO_COLOR`, except that bars retain the terminal's
 default foreground; redirected output has neither styling nor OSC markers and
 uses an 80-column chart width.
 
-`tj usage --bytes` without `--chart` emits one `@ENTRY BYTES` row per valid
+`tjctl du --bytes` without `--chart` emits one `@ENTRY BYTES` row per valid
 numeric entry, in entry order, using exact decimal logical byte counts and no
-total row. With `--chart`, `--bytes` preserves the chart layout and bars but
+total row. When a selected journal differs from the current journal, entry
+references use its complete canonical name. With `--chart`, `--bytes`
+preserves the chart layout and bars but
 formats both the journal total and every entry size as exact decimal bytes
 instead of compact human-readable units.
 
@@ -714,7 +769,7 @@ are processed from left to right, while each range is processed atomically;
 range query results appear in numeric order.
 
 Targeted name and tag queries may read qualified references. Every annotation
-write is restricted to the journal whose full id is in `TJ_JOURNAL`.
+write is restricted to the journal whose complete name is in `TJ_JOURNAL`.
 Syntactically qualified references and canonical paths belonging to another
 journal are rejected before mutation. To annotate another journal, a user
 continues it and runs the annotation command there.
@@ -740,7 +795,7 @@ migrated. Its presence makes annotation access fail rather than silently
 choosing or overwriting a format.
 
 The lifetime writer lock does not serialize child commands. Shared advisory
-guards at `.locks/<journal-ulid>.mutation` allow annotation updates to overlap;
+guards at `.locks/<journal-name>.mutation` allow annotation updates to overlap;
 SQLite serializes their short write transactions. Entry/output and whole-
 journal removal take the exclusive guard. Removal first renames entry
 directories into journal-local trash, then transactionally removes name, tag,
@@ -771,7 +826,8 @@ tj rm @42/out
 tj rm @2..@10
 tj rm @12 @15/out @20..@25
 tj rm --force @42
-tj journal rm <id-or-suffix> [--force]
+tjctl rm <name-or-suffix> [--force]
+tjctl mv <name-or-suffix> <new-name>
 ```
 
 Entry and output removal require a current journal and may target only
@@ -815,7 +871,7 @@ unless `--force` is present, acquires the existing writer lock nonblockingly,
 then takes the journal mutation lock, and refuses an active journal. Without
 `--force`, it also refuses a journal containing pinned entries; the pin
 check is repeated while holding the mutation lock. Successful removal renames
-the ULID directory to root-private trash before recursive deletion. `--force`
+the journal directory to root-private trash before recursive deletion. `--force`
 skips confirmation and overrides pin protection only; it never bypasses
 selection, locking, or other validation.
 
@@ -854,7 +910,7 @@ match styling. These modes control match highlighting independently of the
 yellow reference and other layout colors.
 
 Iteration uses the storage model rather than recursive filesystem traversal:
-journals are newest first, entries are numeric ascending, resources are
+journals are in ascending canonical-name order, entries are numeric ascending, resources are
 `cmd` then `out`, and matching lines retain source order. Matching does not
 cross a newline. Each matching source line is emitted once even if it contains
 the literal more than once. Matching operates on original stored bytes. For
@@ -867,13 +923,13 @@ reach the result stream. Results use history's row grammar:
 
 ``` text
 *@#! 42 < matching source line @name #tag !1
-     @8wpc.42 > matching command line under --all
+     @release-build.42 > matching command line under --all
 ```
 
 The four positional flags match history. `>` denotes `cmd` and `<` denotes
 `out`. Optional name and tags, and nonzero status come from the same journal-local
 annotations and entry metadata as history. Current-journal results use a plain right-aligned number. Every `--all` result qualifies the
-number with the last four bytes of its journal ULID, including results from the
+number with its journal's complete canonical name, including results from the
 writer's current journal. A final unterminated source line is still searchable.
 
 On a terminal, TJ obtains the width with `TIOCGWINSZ` and emits one physical
@@ -1029,6 +1085,7 @@ structured output in the style of nushell or PowerShell.
 ``` text
 ~/.tj/
 ├── .locks/
+│   ├── .namespace
 │   ├── <journal>
 │   ├── <journal>.mutation
 │   └── <journal>.metadata
@@ -1048,8 +1105,10 @@ Recorded resources remain ordinary files. The embedded journal database is
 created lazily on the first annotation write; it is versioned for future
 journal-local state but version 1 stores only names, tags, and pins. Existing
 legacy annotation manifests are intentionally not migrated. A newly created
-journal that records no entry or log may be removed as noise. A continued
-journal is never deleted by an empty writer run.
+journal that records no entry or log may be removed as noise. A journal used
+again with `tjctl use` is never deleted by an empty writer run. Journal
+directories are canonical names; renaming one atomically changes its identity
+without rewriting its contents.
 
 This immediately enables shell completion.
 

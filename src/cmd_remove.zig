@@ -1,4 +1,4 @@
-//! `tj rm` and `tj journal rm` - removing recorded data.
+//! `tj rm` entry removal plus the journal-removal primitive used by `tjctl`.
 
 const std = @import("std");
 const Io = std.Io;
@@ -16,7 +16,6 @@ const noout = @import("noout.zig");
 const report = @import("report.zig");
 const replay_engine = @import("replay.zig");
 const context = @import("context.zig");
-const cmd_history = @import("cmd_history.zig");
 const cmd_annotate = @import("cmd_annotate.zig");
 
 pub const RemoveRequest = struct {
@@ -27,23 +26,6 @@ pub const RemoveRequest = struct {
 pub fn removeRequest(parsed: *const zecli.Parsed) !RemoveRequest {
     if (parsed.positionals.items.len == 0) return error.BadArguments;
     return .{ .targets = parsed.positionals.items, .force = parsed.present("force") };
-}
-
-pub const JournalRequest = union(enum) {
-    list,
-    remove: struct { selector: []const u8, force: bool },
-};
-
-pub fn journalRequest(parsed: *const zecli.Parsed) !JournalRequest {
-    const args = parsed.positionals.items;
-    if (args.len == 1 and std.mem.eql(u8, args[0], "list")) {
-        if (parsed.present("force")) return error.BadArguments;
-        return .list;
-    }
-    if (args.len == 2 and std.mem.eql(u8, args[0], "rm")) {
-        return .{ .remove = .{ .selector = args[1], .force = parsed.present("force") } };
-    }
-    return error.BadArguments;
 }
 
 test "annotation and removal requests select one semantic mode" {
@@ -76,13 +58,6 @@ test "annotation and removal requests select one semantic mode" {
         try std.testing.expectEqualStrings("@2", (try cmd_annotate.pinRequest(&parsed)).set);
     }
     {
-        var parsed = try context.parseTestCommand(.journal, &.{ "rm", "abcd", "--force" });
-        defer parsed.deinit(gpa);
-        const request = (try journalRequest(&parsed)).remove;
-        try std.testing.expectEqualStrings("abcd", request.selector);
-        try std.testing.expect(request.force);
-    }
-    {
         var parsed = try context.parseTestCommand(.rm, &.{ "--force", "@2", "@4/out", "@6..@8" });
         defer parsed.deinit(gpa);
         const request = try removeRequest(&parsed);
@@ -91,19 +66,6 @@ test "annotation and removal requests select one semantic mode" {
         try std.testing.expectEqualStrings("@4/out", request.targets[1]);
         try std.testing.expectEqualStrings("@6..@8", request.targets[2]);
         try std.testing.expect(request.force);
-    }
-}
-
-pub fn journalCommand(
-    gpa: std.mem.Allocator,
-    io: Io,
-    home: ?[]const u8,
-    parsed: *const zecli.Parsed,
-    out: *Io.Writer,
-) !void {
-    switch (try journalRequest(parsed)) {
-        .list => try cmd_history.listJournals(gpa, io, home, out),
-        .remove => |request| try removeJournal(gpa, io, home, request.selector, request.force, out),
     }
 }
 

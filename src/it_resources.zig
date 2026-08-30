@@ -5,7 +5,7 @@ const posix = std.posix;
 const harness = @import("harness.zig");
 const noout = @import("noout.zig");
 const plain = @import("plain.zig");
-const ulid = @import("ulid.zig");
+const journal_name = @import("journal_name.zig");
 
 const options = @import("build_options");
 const tj = options.tj_exe;
@@ -129,6 +129,9 @@ test "tj noout preserves output argv and child statuses while omitting bytes" {
     try std.testing.expectEqual(@as(u8, 0), try child.finish(gpa, &transcript, support.timeout_ms));
 
     const visible = transcript.items[visible_from..];
+    if (std.mem.indexOf(u8, visible, "WRAPPER-STDOUT:two words|*|--flag|--help") == null) {
+        std.debug.print("noout wrapper transcript follows:\n{s}\n", .{visible});
+    }
     try std.testing.expect(std.mem.indexOf(u8, visible, "WRAPPER-STDOUT:two words|*|--flag|--help") != null);
     try std.testing.expect(std.mem.indexOf(u8, visible, "WRAPPER-STDERR") != null);
     try std.testing.expect(std.mem.indexOf(u8, visible, "WRAPPER-CONTEXT:/|preserved|tty") != null);
@@ -276,7 +279,7 @@ test "native grep searches literal command and output lines with stable statuses
     try std.testing.expectEqual(@as(u8, 1), removed.term.exited);
 }
 
-test "native grep all qualifies journal suffixes and orders newest first" {
+test "native grep all uses complete journal names in lexical order" {
     if (!support.haveZsh()) return error.SkipZigTest;
     const gpa = std.testing.allocator;
     const io = std.testing.io;
@@ -285,15 +288,15 @@ test "native grep all qualifies journal suffixes and orders newest first" {
     try support.recordJournal(gpa, &journal, &.{": SHARED_GREP_012"});
     const older = try journal.journalName(gpa);
     defer gpa.free(older);
-    const newest = ulid.encode(std.math.maxInt(u48), .{0} ** 10);
+    const lexical_last = journal_name.legacy(std.math.maxInt(u48), .{0} ** 10);
 
     var root = try journal.tmp.dir.openDir(io, support.journal_dir, .{});
     defer root.close(io);
-    try root.createDir(io, &newest, @enumFromInt(0o700));
-    var newest_dir = try root.openDir(io, &newest, .{});
-    defer newest_dir.close(io);
-    try newest_dir.createDir(io, "1", @enumFromInt(0o700));
-    var interaction = try newest_dir.openDir(io, "1", .{});
+    try root.createDir(io, &lexical_last, @enumFromInt(0o700));
+    var lexical_last_dir = try root.openDir(io, &lexical_last, .{});
+    defer lexical_last_dir.close(io);
+    try lexical_last_dir.createDir(io, "1", @enumFromInt(0o700));
+    var interaction = try lexical_last_dir.openDir(io, "1", .{});
     defer interaction.close(io);
     try interaction.writeFile(io, .{ .sub_path = "cmd", .data = ": SHARED_GREP_012" });
     try interaction.writeFile(io, .{ .sub_path = "out", .data = "SHARED_GREP_012\n" });
@@ -306,15 +309,16 @@ test "native grep all qualifies journal suffixes and orders newest first" {
     defer gpa.free(result.stdout);
     defer gpa.free(result.stderr);
     try std.testing.expectEqual(@as(u8, 0), result.term.exited);
-    const expected = try std.fmt.allocPrint(
-        gpa,
-        "     @{s}.1 > : SHARED_GREP_012\n" ++
-            "     @{s}.1 < SHARED_GREP_012\n" ++
-            "     @{s}.1 > : SHARED_GREP_012\n",
-        .{ newest[newest.len - 4 ..], newest[newest.len - 4 ..], older[older.len - 4 ..] },
-    );
-    defer gpa.free(expected);
-    try std.testing.expectEqualStrings(expected, result.stdout);
+    const older_ref = try std.fmt.allocPrint(gpa, "@{s}.1 > : SHARED_GREP_012", .{older});
+    defer gpa.free(older_ref);
+    const last_cmd = try std.fmt.allocPrint(gpa, "@{s}.1 > : SHARED_GREP_012", .{&lexical_last});
+    defer gpa.free(last_cmd);
+    const last_out = try std.fmt.allocPrint(gpa, "@{s}.1 < SHARED_GREP_012", .{&lexical_last});
+    defer gpa.free(last_out);
+    const older_at = std.mem.indexOf(u8, result.stdout, older_ref) orelse return error.TestUnexpectedResult;
+    const last_cmd_at = std.mem.indexOf(u8, result.stdout, last_cmd) orelse return error.TestUnexpectedResult;
+    const last_out_at = std.mem.indexOf(u8, result.stdout, last_out) orelse return error.TestUnexpectedResult;
+    try std.testing.expect(older_at < last_cmd_at and last_cmd_at < last_out_at);
 }
 
 test "history and grep never replay stored terminal controls" {
@@ -323,7 +327,7 @@ test "history and grep never replay stored terminal controls" {
     var scratch = try support.Scratch.open();
     defer scratch.close();
 
-    const id = ulid.encode(48, .{8} ** 10);
+    const id = journal_name.legacy(48, .{8} ** 10);
     try scratch.makeJournal(id, &.{"1"});
     var journal = try scratch.tmp.dir.openDir(io, &id, .{});
     defer journal.close(io);
@@ -582,9 +586,13 @@ test "published resources are addressable and completable" {
 test "zsh completion keeps special resource names as one inert argument" {
     if (!support.haveZsh()) return error.SkipZigTest;
     const gpa = std.testing.allocator;
+    const io = std.testing.io;
 
     var journal = try support.Journal.open(gpa);
     defer journal.close();
+    var journal_root = try journal.tmp.dir.openDir(io, support.journal_dir, .{});
+    try journal_root.createDir(io, "release-build", @enumFromInt(0o700));
+    journal_root.close(io);
 
     const child = try support.spawnJournalZsh(gpa, &journal);
     var out: std.ArrayList(u8) = .empty;
@@ -613,8 +621,12 @@ test "zsh completion keeps special resource names as one inert argument" {
     // the just-built binary instead of any older TJ installed on the host.
     try completion_setup.appendSlice(gpa, "tj() { command ");
     try support.appendShellQuoted(gpa, &completion_setup, support.tj);
+    try completion_setup.appendSlice(gpa, " \"$@\"; }; tjctl() { command ");
+    try support.appendShellQuoted(gpa, &completion_setup, support.tjctl);
     try completion_setup.appendSlice(gpa, " \"$@\"; }; autoload -Uz compinit && compinit -D -i && . ");
     try support.appendShellQuoted(gpa, &completion_setup, options.zsh_completion);
+    try completion_setup.appendSlice(gpa, " && . ");
+    try support.appendShellQuoted(gpa, &completion_setup, options.tjctl_zsh_completion);
     try completion_setup.appendSlice(
         gpa,
         " && _tj_register_completion && print -r -- TJ_COMPINIT_\"\"READY\n",
@@ -641,9 +653,9 @@ test "zsh completion keeps special resource names as one inert argument" {
 
     // Zecli's generated script owns static command and option completion.
     from = out.items.len;
-    try child.write("tj journa");
+    try child.write("tjctl repla");
     try child.write("\t");
-    try std.testing.expect(try child.readUntilFrom(gpa, &out, from, "journal", support.timeout_ms));
+    try std.testing.expect(try child.readUntilFrom(gpa, &out, from, "replay", support.timeout_ms));
     try support.cancelZleLine(gpa, child, &out);
 
     from = out.items.len;
@@ -803,6 +815,15 @@ test "zsh completion keeps special resource names as one inert argument" {
         std.debug.print("generated reference completion produced the wrong ZLE buffer; transcript follows:\n{s}\n", .{out.items[from..]});
         return error.CommandReferenceCompletionMismatch;
     }
+    try support.cancelZleLine(gpa, child, &out);
+
+    // Journal operands delegate to tjctl's live canonical-name completer.
+    // Keep this after @1 completion checks because cancelling ZLE lines records
+    // probe entries and can make a numeric prefix ambiguous with @10.
+    from = out.items.len;
+    try child.write("tjctl use rel\t\x18\x14");
+    try std.testing.expect(try child.readUntilFrom(gpa, &out, from, "TJ_BUFFER=", support.timeout_ms));
+    try std.testing.expect(std.mem.indexOf(u8, out.items[from..], "release-build") != null);
     try support.cancelZleLine(gpa, child, &out);
 
     try child.write("exit 0\n");

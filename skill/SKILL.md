@@ -13,7 +13,8 @@ without asking them to paste anything and without running it again.
 
 `$TJ_JOURNAL` is set while the current shell is writing a journal. If it is
 empty, there is no current journal context: answer from what you were told.
-Persisted journals may still exist and are listed by `tj journal list`.
+Persisted journals may still exist and are listed by `tjctl ls`. Use that only
+when evidence outside the current journal is actually relevant.
 
 Run **`tj`** by its plain name, one command per call, with no pipe and no
 `;`. Not `"$TJ"`, not `tj ... | tail`. A wrapper may grant permission to run
@@ -31,7 +32,7 @@ the plain name.
 tj hist
 tj hist @242
 tj hist @2..@10 @15
-tj hist @8wpc.
+tj hist @release-build.
 ```
 
 ```
@@ -149,7 +150,7 @@ older journals and is not part of `out`.
 
 The same integration records the absolute logical command-start directory in
 `cwd`. Use `tjcd @42` to change the calling zsh process back to it. `tjcd`
-keeps the reference literal; qualified references such as `tjcd @8wpc.42`
+keeps the reference literal; qualified references such as `tjcd @release-build.42`
 also work outside the corresponding writer. Do not emulate this with a
 subprocess `cd`, which cannot change its parent shell.
 
@@ -171,12 +172,13 @@ Two things will look wrong and are not:
 
 ## Referring across journals
 
-`@42` means this journal. Another journal is named by a suffix of its id:
-`@pgsd.42/out`. `$TJ_JOURNAL_SHORT` holds the current one's suffix. `tj
-journal list` lists them, newest first.
+`@42` means this journal. Another journal is selected by its complete canonical
+name or an unambiguous suffix: `@release-build.42/out`. `tjctl ls` lists
+complete names in lexical order. Printed cross-journal results use those
+complete names.
 
 An entry may also have a journal-local name, such as
-`@build-failure/out`; `@pgsd.build-failure/out` reads the same name from
+`@build-failure/out`; `@release-build.build-failure/out` reads the same name from
 another journal. Names and numbers resolve through `tj cat` in the same way.
 An unresolved `@name` remains literal in an interactive command so it can
 still be an ordinary `@handle`.

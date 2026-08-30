@@ -5,7 +5,7 @@ const posix = std.posix;
 const harness = @import("harness.zig");
 const noout = @import("noout.zig");
 const plain = @import("plain.zig");
-const ulid = @import("ulid.zig");
+const journal_name = @import("journal_name.zig");
 
 const options = @import("build_options");
 const tj = options.tj_exe;
@@ -468,11 +468,11 @@ test "history accepts ordered entry ranges and trailing-dot journal selectors" {
     try std.testing.expect(four_at < one_at and one_at < two_at);
     try std.testing.expect(std.mem.indexOf(u8, selected.stdout, "HIST_TARGET_THREE") == null);
 
-    const foreign = ulid.encode(std.math.maxInt(u48), .{0} ** 10);
+    const foreign = "release-build";
     var root = try journal.tmp.dir.openDir(io, support.journal_dir, .{});
     defer root.close(io);
-    try root.createDir(io, &foreign, @enumFromInt(0o700));
-    var foreign_dir = try root.openDir(io, &foreign, .{});
+    try root.createDir(io, foreign, @enumFromInt(0o700));
+    var foreign_dir = try root.openDir(io, foreign, .{});
     defer foreign_dir.close(io);
     try foreign_dir.createDir(io, "1", @enumFromInt(0o700));
     var foreign_entry = try foreign_dir.openDir(io, "1", .{});
@@ -497,7 +497,7 @@ test "history accepts ordered entry ranges and trailing-dot journal selectors" {
     const mixed_foreign = std.mem.indexOf(u8, mixed.stdout, "HIST_TARGET_FOREIGN") orelse return error.TestUnexpectedResult;
     const mixed_one = std.mem.indexOf(u8, mixed.stdout, "HIST_TARGET_ONE") orelse return error.TestUnexpectedResult;
     try std.testing.expect(mixed_two < mixed_foreign and mixed_foreign < mixed_one);
-    const qualified = try std.fmt.allocPrint(gpa, "@{s}.1", .{suffix});
+    const qualified = try std.fmt.allocPrint(gpa, "@{s}.1", .{foreign});
     defer gpa.free(qualified);
     try std.testing.expect(std.mem.indexOf(u8, mixed.stdout, qualified) != null);
 
@@ -644,7 +644,7 @@ test "entry mutations reject qualified journals while reads still work" {
     const home = try journal.homeArg(gpa);
     defer gpa.free(home);
 
-    const foreign = ulid.encode(999, .{7} ** 10);
+    const foreign = journal_name.legacy(999, .{7} ** 10);
     var root = try journal.tmp.dir.openDir(io, support.journal_dir, .{ .iterate = true });
     try root.createDir(io, &foreign, @enumFromInt(0o700));
     var foreign_dir = try root.openDir(io, &foreign, .{});
@@ -981,36 +981,103 @@ test "whole-journal removal is outside-writer only and refuses active journals" 
     var pinned = try support.run(gpa, &.{ "--home", home, "pin", "@1" }, 24, 100);
     defer pinned.out.deinit(gpa);
     try std.testing.expectEqual(@as(u8, 0), pinned.code);
-    var inside = try support.run(gpa, &.{ "--home", home, "journal", "rm", id, "--force" }, 24, 100);
+    var inside = try support.runTjctl(gpa, &.{ "--home", home, "rm", id, "--force" }, 24, 100);
     defer inside.out.deinit(gpa);
     try std.testing.expectEqual(@as(u8, 1), inside.code);
+    var inside_rename = try support.runTjctl(gpa, &.{ "--home", home, "mv", id, "renamed-journal" }, 24, 100);
+    defer inside_rename.out.deinit(gpa);
+    try std.testing.expectEqual(@as(u8, 1), inside_rename.code);
+    try std.testing.expect(std.mem.indexOf(u8, inside_rename.out.items, "cannot rename") != null);
 
     support.leaveJournal();
-    const non_tty = try support.runNonTty(gpa, &.{ "--home", home, "journal", "rm", id });
+    const non_tty = try support.runTjctlNonTty(gpa, &.{ "--home", home, "rm", id });
     defer gpa.free(non_tty.stdout);
     defer gpa.free(non_tty.stderr);
     try std.testing.expectEqual(@as(u8, 1), non_tty.term.exited);
-    try std.testing.expect(std.mem.indexOf(u8, non_tty.stderr, "pinned entry protected") != null);
+    try std.testing.expect(std.mem.indexOf(u8, non_tty.stderr, "pinned entries protected") != null);
     try std.testing.expect(std.mem.indexOf(u8, non_tty.stderr, "use --force") != null);
 
-    const writer = try support.spawnTj(gpa, &.{ support.tj, "--home", home, "continue", id, "--", "/bin/sh", "-c", "echo READY; sleep 30" }, 24, 80);
+    const writer = try support.spawnTjctl(gpa, &.{ support.tjctl, "--home", home, "use", id, "--", "/bin/sh", "-c", "echo READY; sleep 30" }, 24, 80);
     var writer_out: std.ArrayList(u8) = .empty;
     defer writer_out.deinit(gpa);
     try std.testing.expect(try writer.readUntil(gpa, &writer_out, "READY", support.timeout_ms));
 
-    var active = try support.run(gpa, &.{ "--home", home, "journal", "rm", id, "--force" }, 24, 100);
+    var active = try support.runTjctl(gpa, &.{ "--home", home, "rm", id, "--force" }, 24, 100);
     defer active.out.deinit(gpa);
     try std.testing.expectEqual(@as(u8, 1), active.code);
-    try std.testing.expect(std.mem.indexOf(u8, active.out.items, "while it is being written") != null);
+    try std.testing.expect(std.mem.indexOf(u8, active.out.items, "already being written") != null);
+    var active_rename = try support.runTjctl(gpa, &.{ "--home", home, "mv", id, "renamed-journal" }, 24, 100);
+    defer active_rename.out.deinit(gpa);
+    try std.testing.expectEqual(@as(u8, 1), active_rename.code);
+    try std.testing.expect(std.mem.indexOf(u8, active_rename.out.items, "already being written") != null);
     _ = std.c.kill(writer.pid, posix.SIG.TERM);
     _ = try writer.finish(gpa, &writer_out, support.timeout_ms);
 
-    var removed = try support.run(gpa, &.{ "--home", home, "journal", "rm", id, "--force" }, 24, 100);
+    var renamed = try support.runTjctl(gpa, &.{ "--home", home, "mv", id, "renamed-journal" }, 24, 100);
+    defer renamed.out.deinit(gpa);
+    try std.testing.expectEqual(@as(u8, 0), renamed.code);
+
+    var removed = try support.runTjctl(gpa, &.{ "--home", home, "rm", "renamed-journal", "--force" }, 24, 100);
     defer removed.out.deinit(gpa);
     try std.testing.expectEqual(@as(u8, 0), removed.code);
     var root = try journal.tmp.dir.openDir(std.testing.io, support.journal_dir, .{});
     defer root.close(std.testing.io);
-    try std.testing.expectError(error.FileNotFound, root.openDir(std.testing.io, id, .{}));
+    try std.testing.expectError(error.FileNotFound, root.openDir(std.testing.io, "renamed-journal", .{}));
+}
+
+test "concurrent namespace operations leave one complete winner" {
+    const gpa = std.testing.allocator;
+    const io = std.testing.io;
+    support.leaveJournal();
+    var scratch = try support.Scratch.open();
+    defer scratch.close();
+
+    try scratch.makeNamedJournal("remove-source", &.{"1"});
+    const removing = try support.spawnTjctl(gpa, &.{ support.tjctl, "--home", scratch.path(), "rm", "remove-source", "--force" }, 24, 80);
+    const moving = try support.spawnTjctl(gpa, &.{ support.tjctl, "--home", scratch.path(), "mv", "remove-source", "remove-destination" }, 24, 80);
+    var remove_out: std.ArrayList(u8) = .empty;
+    defer remove_out.deinit(gpa);
+    var move_out: std.ArrayList(u8) = .empty;
+    defer move_out.deinit(gpa);
+    const remove_status = try removing.finish(gpa, &remove_out, support.timeout_ms);
+    const move_status = try moving.finish(gpa, &move_out, support.timeout_ms);
+    try std.testing.expect((remove_status == 0) != (move_status == 0));
+    try std.testing.expectError(error.FileNotFound, scratch.tmp.dir.openDir(io, "remove-source", .{}));
+    if (move_status == 0) {
+        var destination = try scratch.tmp.dir.openDir(io, "remove-destination", .{});
+        destination.close(io);
+    } else {
+        try std.testing.expectError(error.FileNotFound, scratch.tmp.dir.openDir(io, "remove-destination", .{}));
+    }
+
+    try scratch.makeNamedJournal("new-source", &.{"1"});
+    const creating = try support.spawnTjctl(gpa, &.{
+        support.tjctl,
+        "--home",
+        scratch.path(),
+        "new",
+        "shared-destination",
+        "--",
+        "/bin/sh",
+        "-c",
+        "printf '\\033]5107;tj;bogus\\033\\\\'",
+    }, 24, 80);
+    const renaming = try support.spawnTjctl(gpa, &.{ support.tjctl, "--home", scratch.path(), "mv", "new-source", "shared-destination" }, 24, 80);
+    var create_out: std.ArrayList(u8) = .empty;
+    defer create_out.deinit(gpa);
+    var rename_out: std.ArrayList(u8) = .empty;
+    defer rename_out.deinit(gpa);
+    const create_status = try creating.finish(gpa, &create_out, support.timeout_ms);
+    const rename_status = try renaming.finish(gpa, &rename_out, support.timeout_ms);
+    try std.testing.expect((create_status == 0) != (rename_status == 0));
+    var destination = try scratch.tmp.dir.openDir(io, "shared-destination", .{});
+    destination.close(io);
+    if (create_status == 0) {
+        var source = try scratch.tmp.dir.openDir(io, "new-source", .{});
+        source.close(io);
+    } else {
+        try std.testing.expectError(error.FileNotFound, scratch.tmp.dir.openDir(io, "new-source", .{}));
+    }
 }
 
 test "named shorthand expands only after a name is assigned" {
@@ -1169,7 +1236,7 @@ test "shorthand and canonical references become paths" {
     try std.testing.expect(std.mem.indexOf(u8, leading_zero_out, "alpha-marker") != null);
 }
 
-test "qualified shorthand resolves through a continued journal" {
+test "qualified shorthand resolves through a reused journal" {
     if (!support.haveZsh()) return error.SkipZigTest;
     const gpa = std.testing.allocator;
 
@@ -1179,11 +1246,18 @@ test "qualified shorthand resolves through a continued journal" {
 
     const name = try journal.journalName(gpa);
     defer gpa.free(name);
-    const suffix = name[name.len - 4 ..];
-    const command = try std.fmt.allocPrint(gpa, "cat @{s}.1/out", .{suffix});
+    const home = try journal.homeArg(gpa);
+    defer gpa.free(home);
+    support.leaveJournal();
+    const renamed = try support.runTjctlNonTty(gpa, &.{ "--home", home, "mv", name, "release-build" });
+    defer gpa.free(renamed.stdout);
+    defer gpa.free(renamed.stderr);
+    try std.testing.expectEqual(@as(u8, 0), renamed.term.exited);
+
+    const command = try std.fmt.allocPrint(gpa, "cat @{s}.1/out", .{"release-build"});
     defer gpa.free(command);
 
-    const child = try support.spawnContinuedJournalZsh(gpa, &journal, name);
+    const child = try support.spawnContinuedJournalZsh(gpa, &journal, "release-build");
     var out: std.ArrayList(u8) = .empty;
     defer out.deinit(gpa);
     try support.setupJournalZsh(gpa, child, &out);

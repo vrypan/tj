@@ -15,7 +15,7 @@ Building needs Zig 0.16.0. Running tj needs nothing.
 ```sh
 git clone <this repo> ~/src/tj
 cd ~/src/tj
-make install                          # tj and contrib tools into ~/.local/bin
+make install                          # tj, tjctl, and contrib tools into ~/.local/bin
 ```
 
 `PREFIX=/usr/local make install` to put them elsewhere; anywhere on your
@@ -25,6 +25,7 @@ Check they landed:
 
 ```sh
 tj --version                          # tj 0.3.0
+tjctl --version                       # tjctl 0.3.0
 tj-fence < /dev/null && echo ok       # used by the agent wrappers below
 ```
 
@@ -32,17 +33,22 @@ tj-fence < /dev/null && echo ok       # used by the agent wrappers below
 command and option completions under the selected prefix:
 
 ```text
+bin/tj
+bin/tjctl
 bin/tj-fence
 bin/tj-grep
 bin/tj-tape
 share/tj/tj.plugin.zsh
 share/bash-completion/completions/tj
+share/bash-completion/completions/tjctl
 share/zsh/site-functions/_tj
+share/zsh/site-functions/_tjctl
 share/fish/vendor_completions.d/tj.fish
+share/fish/vendor_completions.d/tjctl.fish
 ```
 
-These complete CLI syntax such as `tj <TAB>`, `tj hist --<TAB>`, and the
-values of `tj grep --color=<TAB>`. For commands that accept entry references,
+These complete CLI syntax such as `tj <TAB>`, `tj hist --<TAB>`, `tjctl
+<TAB>`, and the values of `tj grep --color=<TAB>`. For commands that accept entry references,
 they also invoke `tj complete`, so forms such as `tj cat @42/<TAB>` work in
 bash, zsh, and fish. The zsh integration described below additionally provides
 reference completion in arbitrary commands and the canonical `~[@REF]`
@@ -70,7 +76,7 @@ If your zsh setup does not already include your installation prefix's
 fpath=(~/.local/share/zsh/site-functions $fpath)
 ```
 
-Adjust the path for the prefix passed to `make install`. Outside a tj journal
+Adjust the path for the prefix passed to `make install`. Outside a TJ writer
 writer the recording hooks remain inactive; only the lightweight `tjcd`
 helper is defined. Loading the plugin unconditionally is safe.
 
@@ -101,40 +107,45 @@ harmless. Reconnect after installation so the remote shell initializes with
 the new entry. See [Ghostty's terminfo guidance](https://ghostty.org/docs/help/terminfo)
 for alternatives and platform-specific caveats.
 
-## Create or continue a journal
+## Create or use a journal
 
 Create a journal and attach a writer to it:
 
 ```sh
-tj new                    # run a fresh $SHELL, writing a new journal
-tj new -- zsh -f          # run a specific command instead
+tjctl new                         # generated name such as 260830-k7m4q2
+tjctl new release-build           # choose a canonical name
+tjctl new release-build -- zsh -f # run a specific command instead
 ```
 
 Append a later writer run to an existing journal:
 
 ```sh
-tj continue 01knxf1n5ffvk9jsm8wve1pgsd
-tj continue pgsd -- zsh -f
-tj continue --no-replay pgsd
+tjctl use release-build
+tjctl use k7m4q2 -- zsh -f
+tjctl use --no-replay release-build
 ```
 
-`new` always creates a fresh journal. `continue` requires exactly one existing
-journal: a unique suffix is accepted, but an ambiguous suffix is refused.
+`new` always creates a fresh journal. Names contain 1–63 lowercase letters,
+digits, and internal hyphens. `use` requires exactly one existing journal.
+Selection tries an exact name first, then accepts an unambiguous suffix;
+ambiguous suffixes are refused. Existing ULID-shaped directory names still
+work as ordinary names. Names carry no ordering or retention semantics.
 Only one writer can attach to a journal at a time.
 
-By default, `continue` first replays the journal into the terminal, then starts
+By default, `use` first replays the journal into the terminal, then starts
 the fresh shell or command. This replay is immediate: recorded pauses and
 typing delays are ignored. Use `--no-replay` when the existing transcript is
 already visible or should not be redrawn. Replayed bytes go directly to the
 terminal and are not appended to the journal again.
 
-Continuing is append-only, not process resumption. It starts a fresh shell or
+Using an existing journal is append-only, not process resumption. It starts a fresh shell or
 command with the caller's current directory and environment. It does not
 restore paths, environment mutations, shell state, history, jobs, file
 descriptors, or processes from an earlier writer.
 
-Starting a writer takes an explicit lifecycle command. `tj` on its own prints
-help rather than putting you somewhere you did not mean to be.
+Child commands must follow `--`. Without it, `tjctl new make` creates a journal
+named `make`; it does not execute `make`. Starting a writer takes an explicit
+lifecycle command. `tj` and `tjctl` on their own print help.
 
 Every command has focused help generated from the same command definition used
 to parse it:
@@ -143,6 +154,8 @@ to parse it:
 tj --help
 tj cat --help
 tj grep --help
+tjctl --help
+tjctl use --help
 ```
 
 Everything inside behaves as it always did. Check that recording works:
@@ -159,15 +172,19 @@ Each command becomes a numbered entry:
 tj hist                   # flags, entry reference, output size, date, command metadata
 tj hist @242              # full details for one entry
 tj hist @2..@10 @15       # selected entries, inclusive ranges skip holes
-tj hist @8wpc.            # every entry in the journal ending in 8wpc
-tj usage                  # total logical storage used by this journal
-tj usage --bytes          # each entry reference and its exact byte count
-tj usage --chart          # total plus a terminal-width chart of every entry
-tj usage --chart --bytes  # chart with exact counts instead of compact sizes
-tj journal list           # every journal, newest first
-tj current                # this journal's id
+tj hist @release-build.   # every entry in another journal
 tj last                   # the last entry that completed
+
+tjctl ls                  # journals in canonical lexical order
+tjctl current             # this journal's complete name
+tjctl du                  # total logical storage used by this journal
+tjctl du release-build --chart
 ```
+
+`tj` owns entries and their resources: `hist`, `cat`, `grep`, `name`, `tag`,
+`pin`, `rm`, `last`, `resolve`, `complete`, and `noout`. `tjctl` owns journal
+lifecycle and management: `new`, `use`, `ls`, `mv`, `rm`, `du`, `replay`,
+`current`, and completion plumbing.
 
 ## References
 
@@ -179,8 +196,8 @@ zsh, the canonical filesystem namespace uses dynamic named directories:
 ~[@42]/out                 # entry 42 of this journal
 ~[@build-failure]/out      # a named entry in this journal
 ~[@-]/out                  # the last completed entry
-~[@pgsd.42]/out            # entry 42 of another journal
-~[@pgsd.build-failure]/out # a named entry in another journal
+~[@release-build.42]/out            # entry 42 of another journal
+~[@release-build.build-failure]/out # a named entry in another journal
 ```
 
 For interactive use, `@REF` remains shorthand. When a shorthand reference is
@@ -191,7 +208,7 @@ component to canonical notation:
 @42/out       -> ~[@42]/out
 @build-failure/out -> ~[@build-failure]/out
 @-/out        -> ~[@-]/out
-@pgsd.42/out  -> ~[@pgsd.42]/out
+@release-build.42/out  -> ~[@release-build.42]/out
 ```
 
 zsh then performs its normal named-directory and filesystem expansion while
@@ -209,13 +226,13 @@ cat @-/cmd                                # the last command that completed
 | `@42` | `~[@42]` | entry 42 of this journal |
 | `@build-failure` | `~[@build-failure]` | the entry with that journal-local name |
 | `@-` | `~[@-]` | the last entry that *completed*, never the one running |
-| `@pgsd.42` | `~[@pgsd.42]` | entry 42 of another journal, by a suffix of its id |
-| `@pgsd.build-failure` | `~[@pgsd.build-failure]` | a named entry in another journal |
+| `@release-build.42` | `~[@release-build.42]` | entry 42 of another journal |
+| `@release-build.build-failure` | `~[@release-build.build-failure]` | a named entry in another journal |
 
-Suffixes rather than prefixes, because every journal started in the same
-millisecond shares the ULID's timestamp prefix and only the tail tells them
-apart. The most recent match wins, so short suffixes are for interactive
-use; anything that must stay valid should use the full id.
+Journal selectors resolve by exact name first, then by unique suffix. Printed
+cross-journal references always use the complete canonical name. A rename
+with `tjctl mv` intentionally breaks references containing the old name; no
+alias or redirect is retained.
 
 `~[@<TAB>` completes dynamic entry names and appends `]`.
 `~[@42]/<TAB>` uses ordinary filesystem completion for `cmd`, `cwd`, `out`,
@@ -235,7 +252,7 @@ directory in which an entry ran, use the plugin's shell function:
 
 ```sh
 tjcd @42
-tjcd @pgsd.42             # qualified references also work outside a writer
+tjcd @release-build.42    # qualified references also work outside a writer
 ```
 
 On a simple `tjcd @REF` line, `tjcd` deliberately keeps its reference literal
@@ -291,8 +308,8 @@ with tag filters using AND semantics.
 With no targets, `tj hist` lists the current journal. Otherwise it accepts
 one or more entry references, inclusive current-journal numeric ranges, and
 journal selectors, in argument order. A journal selector is an `@`-prefixed
-ID suffix followed by a dot: `@8wpc.`. Bare IDs and suffixes are not history
-targets. Foreign-journal entries are displayed as `@8wpc.42`, including when
+name or suffix followed by a dot: `@release-build.`. Bare names and suffixes are not history
+targets. Foreign-journal entries are displayed with the complete name, such as `@release-build.42`, including when
 several journals are mixed in one listing.
 
 When history is written directly to a terminal inside a journal writer, TJ
@@ -300,9 +317,10 @@ wraps the listing in a noout region. The listing remains visible, while the
 current entry records only `<tj:noout>` instead of copying the index into the
 journal. Piped and redirected history remains ordinary marker-free output.
 
-`tj usage` sums the logical lengths of all files in the current journal and
+`tjctl du [JOURNAL]` sums the logical lengths of all files in the selected
+journal, or the current journal when no selector is given, and
 prints the total in the same compact base-1024 units used by history. It does
-not report filesystem allocation blocks. `tj usage --chart` also shows every
+not report filesystem allocation blocks. `tjctl du --chart` also shows every
 numeric entry in entry-number order, summing all files below each entry—not
 only `out`—and scales the longest bar to the available terminal width:
 
@@ -351,7 +369,7 @@ control bytes are removed before width calculation, wrapping, and output. Only
 presentation styling generated by TJ itself is emitted.
 
 Qualified references are read-only. You can read and complete
-`@pgsd.build-failure/out`, but names, tags, pins, and entry/output
+`@release-build.build-failure/out`, but names, tags, pins, and entry/output
 deletion may modify only `$TJ_JOURNAL`. Continue that journal first if it needs
 changing; the mutation command is then recorded there like any other command.
 
@@ -363,8 +381,9 @@ tj rm @42/out                # output and resources derived from it
 tj rm @2..@10                # every existing entry in this inclusive range
 tj rm @12 @15/out @20..@25   # mix multiple targets in one invocation
 tj rm --force @42            # override a pin
-tj journal rm pgsd           # prompt before removing an inactive journal
-tj journal rm pgsd --force   # override pins and skip confirmation
+tjctl rm release-build       # prompt before removing an inactive journal
+tjctl rm release-build --force # override pins and skip confirmation
+tjctl mv release-build archive-build # atomic inactive rename
 ```
 
 Entry and output removal are current-journal-only, do not prompt, and
@@ -396,14 +415,14 @@ running anything:
 
 | | |
 |---|---|
-| `TJ_REF` | `@fgpc.43` — a reference to the command about to be typed |
+| `TJ_REF` | `@release-build.43` — a reference to the command about to be typed |
 | `TJ_NEXT` | `43` — just the number |
-| `TJ_JOURNAL_SHORT` | `fgpc` — the shortest suffix naming this journal |
-| `TJ_JOURNAL` | the full 26-character journal id |
+| `TJ_JOURNAL` | the complete canonical journal name |
+| `TJ` | path to the entry/resource binary when discoverable |
+| `TJCTL` | path to the journal-control binary when discoverable |
 
-`TJ_REF` is qualified by journal, so it stays valid when you type it in
-another pane. Four characters of a ULID's random tail separates a handful
-of journals; use `$TJ_JOURNAL` where that is not enough.
+`TJ_REF` is qualified by the complete journal name, so it stays unambiguous
+when you type it in another pane unless that journal is deliberately renamed.
 
 All of them are unset outside a journal writer, so a prompt that uses them is
 unchanged elsewhere.
@@ -426,11 +445,11 @@ style = 'dimmed white'
 `$all` picks it up automatically, so nothing else needs changing:
 
 ```
-tj on git main via zig v0.16.0  @fgpc.43
+tj on git main via zig v0.16.0  @release-build.43
 @43 >
 ```
 
-Outside a tj journal writer the variable is unset and the module renders nothing,
+Outside a TJ writer the variable is unset and the module renders nothing,
 leaving your prompt exactly as it was.
 
 For a plain zsh prompt:
@@ -577,7 +596,7 @@ tj grep --cmd 'docker compose'   # commands only
 tj grep --out 'connection reset' # output only
 tj grep -i 'permission denied'   # ASCII-only case folding
 tj grep --color auto panic       # highlight on a color-capable terminal
-tj grep --all example.com        # every journal, newest first
+tj grep --all example.com        # every journal, canonical lexical order
 tj grep -- --starts-with-a-dash
 ```
 
@@ -591,8 +610,8 @@ the same annotation and failure markers as `tj hist`:
 The four flags have the same meaning as history. `>` marks a command match and
 `<` marks output, following request/response direction. The remaining columns
 are entry reference, matching text, optional name and tags, and a nonzero status. Current-journal rows use a plain number;
-`--all` works outside a writer and qualifies it with the journal's four-byte
-suffix, such as `@8wpc.42`. Use `--cmd` and `--out` together to select both
+`--all` works outside a writer and qualifies it with the complete canonical
+name, such as `@release-build.42`. Use `--cmd` and `--out` together to select both
 explicitly. Exit status 0 means at least one line matched, 1 means no match,
 and 2 means invalid grep arguments or no current journal without `--all`.
 
@@ -764,7 +783,7 @@ mess of it, exactly as they would without tj.
 
 ## Replaying a journal
 
-`tj replay` plays a recording back into the terminal — the prompt, the command
+`tjctl replay` plays a recording back into the terminal — the prompt, the command
 typing itself out, then the output as it was captured, colours and all. With
 the zsh plugin, each entry keeps the exact prompt bytes zsh rendered
 before it: prompt substitutions, Starship output, colours, multiple lines, and
@@ -773,9 +792,8 @@ the right prompt are replayed rather than evaluated again. Older journals use
 are omitted so their terminal replies cannot become shell input:
 
 ```sh
-tj replay                     # the most recent journal
-tj replay fgpc                # another, by a suffix of its id
-tj replay fgpc --from 4 --to 9 --speed 2
+tjctl replay release-build
+tjctl replay build --from 4 --to 9 --speed 2
 ```
 
 **Replay only runs outside a journal writer.** Inside one, the recording would be
@@ -783,7 +801,8 @@ fed back into the journal: the replayed shell-integration markers read as
 real command boundaries, which truncates the recording of the replay itself
 and pins the replayed exit status onto it — and `tj hist` shows a
 plausible-looking entry, so nothing tells you. So exit the writer first, or
-replay from another pane. With no journal named, the most recent one plays.
+replay from another pane. A journal selector is required; exact names take
+precedence over unique suffixes.
 
 Nothing is re-executed. What cannot be reconstructed is *when* each byte
 arrived, since only the start and end of each entry were recorded — so
@@ -805,13 +824,13 @@ For a GIF, [contrib/tj-tape](contrib/tj-tape) emits a
 [vhs](https://github.com/charmbracelet/vhs) tape that records the replay:
 
 ```sh
-tj-tape fgpc demo.gif --speed 2 --from 4 --to 9 > demo.tape
+tj-tape release-build demo.gif --speed 2 --from 4 --to 9 > demo.tape
 vhs demo.tape
 ```
 
 The tape plays the recording rather than re-running the commands, so the GIF
 shows what actually happened — and a journal containing `rm -rf` does not
-re-run it to make a demo. It asks `tj replay --duration` how long the replay
+re-run it to make a demo. It asks `tjctl replay --duration` how long the replay
 takes, since vhs cannot wait for a process to exit.
 
 ## Storage
@@ -821,7 +840,7 @@ with `$TJ_HOME` or `--home`), so ordinary tools can still read commands and
 output directly:
 
 ```
-~/.tj/<journal-ulid>/42/
+~/.tj/<journal-name>/42/
 ├── cmd        the command line as entered
 ├── cwd        absolute logical directory in which the command started
 ├── out        what you could scroll back to, escape sequences and all
@@ -833,7 +852,7 @@ output directly:
 Journal-local mutable metadata is separate from recording-time `meta.json`:
 
 ```text
-~/.tj/<journal-ulid>/journal.sqlite3
+~/.tj/<journal-name>/journal.sqlite3
 ```
 
 TJ embeds SQLite, so no system SQLite library or command is required. Schema
@@ -854,21 +873,25 @@ This release deliberately does not migrate the former `annotations.json`
 format. If that legacy file exists, annotation access fails closed; delete the
 old journal as part of adopting this format break.
 
-Writer coordination uses private `~/.tj/.locks/<journal-ulid>` files. The
-file's held advisory lock—not its mere presence—indicates a live writer.
-Read-only commands remain available while that lock is held.
+Writer coordination uses private `~/.tj/.locks/<journal-name>` lifetime locks,
+plus journal mutation/metadata locks and a root namespace lock. The held
+advisory lock—not its mere presence—indicates activity. Creation, whole-journal
+removal, and rename acquire the namespace lock first; rename then acquires the
+source lifetime and mutation locks and the destination lifetime lock before
+the same-filesystem atomic directory rename. Read-only commands remain
+available while a writer lock is held.
 
 Directories are `0700` and files `0600`: the journal holds whatever
 appeared on your terminal, so treat it like shell history.
 
 Journals outlive every writer process attached to them — that is the point, and
-`@pgsd.42/out` is meant to keep working after the pane it belonged to is
+`@release-build.42/out` is meant to keep working after the pane it belonged to is
 gone. Entry numbering resumes at one greater than the highest existing
 numeric directory. An unfinished entry has no `rc`, but still consumes
 its number; gaps are never filled.
 
-A journal newly created by `tj new` may be removed when that writer records
-nothing. An existing journal opened by `tj continue` is never deleted merely
+A journal newly created by `tjctl new` may be removed when that writer records
+nothing. An existing journal opened by `tjctl use` is never deleted merely
 because the new writer was empty. A journal that logged why it could not
 record is also kept, because that log is the explanation.
 
@@ -888,7 +911,7 @@ Cross-compiles with nothing installed on the host:
 
 ```sh
 make list         # the target list
-make -j6 all      # every target -> dist/<target>/bin/tj
+make -j6 all      # every target -> dist/<target>/bin/{tj,tjctl}
 make package      # complete install trees as dist/tj-<version>-<target>.tar.gz
 ```
 
@@ -908,7 +931,7 @@ self-contained.
 
 ## Status
 
-The proxy is transparent: `tj new -- <command>` is indistinguishable from
+The proxy is transparent: `tjctl new -- <command>` is indistinguishable from
 running the command directly. The pty is allocated and sized from the outer
 terminal, both byte streams are forwarded unchanged, `SIGWINCH` propagates,
 signals sent to `tj` reach the shell, and the terminal is handed back with

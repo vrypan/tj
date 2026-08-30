@@ -6,10 +6,11 @@ const posix = std.posix;
 const harness = @import("harness.zig");
 const noout = @import("noout.zig");
 const plain = @import("plain.zig");
-const ulid = @import("ulid.zig");
+const journal_name = @import("journal_name.zig");
 
 const options = @import("build_options");
 pub const tj = options.tj_exe;
+pub const tjctl = options.tjctl_exe;
 
 pub const timeout_ms = 5000;
 
@@ -48,6 +49,11 @@ pub fn spawnTj(gpa: std.mem.Allocator, args: []const []const u8, rows: u16, cols
     return harness.spawn(gpa, args, rows, cols);
 }
 
+pub fn spawnTjctl(gpa: std.mem.Allocator, args: []const []const u8, rows: u16, cols: u16) !harness.PtyChild {
+    isolateJournal();
+    return harness.spawn(gpa, args, rows, cols);
+}
+
 pub fn run(gpa: std.mem.Allocator, args: []const []const u8, rows: u16, cols: u16) !struct {
     out: std.ArrayList(u8),
     code: u8,
@@ -63,10 +69,36 @@ pub fn run(gpa: std.mem.Allocator, args: []const []const u8, rows: u16, cols: u1
     return .{ .out = out, .code = code };
 }
 
+pub fn runTjctl(gpa: std.mem.Allocator, args: []const []const u8, rows: u16, cols: u16) !struct {
+    out: std.ArrayList(u8),
+    code: u8,
+} {
+    var argv: std.ArrayList([]const u8) = .empty;
+    defer argv.deinit(gpa);
+    try argv.append(gpa, tjctl);
+    try argv.appendSlice(gpa, args);
+    const child = try spawnTjctl(gpa, argv.items, rows, cols);
+    var out: std.ArrayList(u8) = .empty;
+    const code = try child.finish(gpa, &out, timeout_ms);
+    return .{ .out = out, .code = code };
+}
+
 pub fn runNonTty(gpa: std.mem.Allocator, args: []const []const u8) !std.process.RunResult {
     var argv: std.ArrayList([]const u8) = .empty;
     defer argv.deinit(gpa);
     try argv.append(gpa, tj);
+    try argv.appendSlice(gpa, args);
+    return std.process.run(gpa, std.testing.io, .{
+        .argv = argv.items,
+        .stdout_limit = .limited(1 << 20),
+        .stderr_limit = .limited(1 << 20),
+    });
+}
+
+pub fn runTjctlNonTty(gpa: std.mem.Allocator, args: []const []const u8) !std.process.RunResult {
+    var argv: std.ArrayList([]const u8) = .empty;
+    defer argv.deinit(gpa);
+    try argv.append(gpa, tjctl);
     try argv.appendSlice(gpa, args);
     return std.process.run(gpa, std.testing.io, .{
         .argv = argv.items,
@@ -111,6 +143,33 @@ pub fn runWithClosedStdout(gpa: std.mem.Allocator, args: []const []const u8) !st
     };
 }
 
+pub fn runTjctlWithClosedStdout(gpa: std.mem.Allocator, args: []const []const u8) !struct {
+    term: std.process.Child.Term,
+    stderr: []u8,
+} {
+    isolateJournal();
+    const io = std.testing.io;
+    var argv: std.ArrayList([]const u8) = .empty;
+    defer argv.deinit(gpa);
+    try argv.append(gpa, tjctl);
+    try argv.appendSlice(gpa, args);
+    var child = try std.process.spawn(io, .{
+        .argv = argv.items,
+        .stdin = .ignore,
+        .stdout = .pipe,
+        .stderr = .pipe,
+    });
+    defer child.kill(io);
+    child.stdout.?.close(io);
+    child.stdout = null;
+    const stderr_file = child.stderr.?;
+    var stderr_reader: Io.File.Reader = .initStreaming(stderr_file, io, &.{});
+    const stderr = try stderr_reader.interface.allocRemaining(gpa, .limited(1 << 20));
+    stderr_file.close(io);
+    child.stderr = null;
+    return .{ .term = try child.wait(io), .stderr = stderr };
+}
+
 pub fn runNonTtyInJournal(
     gpa: std.mem.Allocator,
     args: []const []const u8,
@@ -128,6 +187,28 @@ pub fn runNonTtyInJournal(
     // The native command must not depend on the optional ripgrep companion.
     try environ.put("PATH", "");
     try environ.put("GREP_COLORS", "mt=01;31");
+    return std.process.run(gpa, std.testing.io, .{
+        .argv = argv.items,
+        .environ_map = &environ,
+        .stdout_limit = .limited(1 << 20),
+        .stderr_limit = .limited(1 << 20),
+    });
+}
+
+pub fn runTjctlNonTtyInJournal(
+    gpa: std.mem.Allocator,
+    args: []const []const u8,
+    journal: []const u8,
+    next: []const u8,
+) !std.process.RunResult {
+    var argv: std.ArrayList([]const u8) = .empty;
+    defer argv.deinit(gpa);
+    try argv.append(gpa, tjctl);
+    try argv.appendSlice(gpa, args);
+    var environ = try std.process.Environ.createMap(std.testing.environ, gpa);
+    defer environ.deinit();
+    try environ.put("TJ_JOURNAL", journal);
+    try environ.put("TJ_NEXT", next);
     return std.process.run(gpa, std.testing.io, .{
         .argv = argv.items,
         .environ_map = &environ,
@@ -236,7 +317,7 @@ pub const Journal = struct {
         defer root.close(io);
         var it = root.iterate();
         while (try it.next(io)) |entry| {
-            if (entry.kind == .directory and ulid.isValid(entry.name)) return gpa.dupe(u8, entry.name);
+            if (entry.kind == .directory and journal_name.isValid(entry.name)) return gpa.dupe(u8, entry.name);
         }
         return error.NoJournal;
     }
@@ -258,7 +339,7 @@ pub const Journal = struct {
         defer root.close(io);
         var it = root.iterate();
         while (try it.next(io)) |entry| {
-            if (entry.kind == .directory and ulid.isValid(entry.name)) return root.openDir(io, entry.name, .{});
+            if (entry.kind == .directory and journal_name.isValid(entry.name)) return root.openDir(io, entry.name, .{});
         }
         return error.NoJournal;
     }
@@ -276,7 +357,7 @@ pub const Journal = struct {
 pub fn spawnJournalZsh(gpa: std.mem.Allocator, journal: *const Journal) !harness.PtyChild {
     const home = try journal.homeArg(gpa);
     defer gpa.free(home);
-    return spawnTj(gpa, &.{ tj, "--home", home, "new", "--", "/bin/zsh", "-f", "-i" }, 24, 80);
+    return spawnTjctl(gpa, &.{ tjctl, "--home", home, "new", "--", "/bin/zsh", "-f", "-i" }, 24, 80);
 }
 
 pub fn spawnContinuedJournalZsh(
@@ -286,7 +367,7 @@ pub fn spawnContinuedJournalZsh(
 ) !harness.PtyChild {
     const home = try journal.homeArg(gpa);
     defer gpa.free(home);
-    return spawnTj(gpa, &.{ tj, "--home", home, "continue", selector, "--", "/bin/zsh", "-f", "-i" }, 24, 80);
+    return spawnTjctl(gpa, &.{ tjctl, "--home", home, "use", selector, "--", "/bin/zsh", "-f", "-i" }, 24, 80);
 }
 
 pub fn appendShellQuoted(gpa: std.mem.Allocator, out: *std.ArrayList(u8), text: []const u8) !void {
@@ -405,10 +486,14 @@ pub const Scratch = struct {
         self.tmp.cleanup();
     }
 
-    pub fn makeJournal(self: *Scratch, id: ulid.Ulid, entries: []const []const u8) !void {
+    pub fn makeJournal(self: *Scratch, id: journal_name.Legacy, entries: []const []const u8) !void {
+        return self.makeNamedJournal(&id, entries);
+    }
+
+    pub fn makeNamedJournal(self: *Scratch, name: []const u8, entries: []const []const u8) !void {
         const io = std.testing.io;
-        try self.tmp.dir.createDir(io, &id, @enumFromInt(0o700));
-        var dir = try self.tmp.dir.openDir(io, &id, .{});
+        try self.tmp.dir.createDir(io, name, @enumFromInt(0o700));
+        var dir = try self.tmp.dir.openDir(io, name, .{});
         defer dir.close(io);
         for (entries) |entry| try dir.createDir(io, entry, @enumFromInt(0o700));
     }
@@ -418,7 +503,7 @@ pub const Scratch = struct {
         var count: usize = 0;
         var it = self.tmp.dir.iterate();
         while (try it.next(std.testing.io)) |entry| {
-            if (entry.kind == .directory and ulid.isValid(entry.name)) count += 1;
+            if (entry.kind == .directory and journal_name.isValid(entry.name)) count += 1;
         }
         return count;
     }

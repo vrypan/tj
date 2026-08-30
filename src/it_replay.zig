@@ -5,7 +5,7 @@ const posix = std.posix;
 const harness = @import("harness.zig");
 const noout = @import("noout.zig");
 const plain = @import("plain.zig");
-const ulid = @import("ulid.zig");
+const journal_name = @import("journal_name.zig");
 
 const options = @import("build_options");
 const tj = options.tj_exe;
@@ -16,12 +16,12 @@ test "invalid replay numeric options exit cleanly" {
     support.leaveJournal();
 
     const cases = [_][]const []const u8{
-        &.{ "replay", "--from", "4294967296" },
-        &.{ "replay", "--speed", "nan" },
-        &.{ "replay", "--typing", "18446744073709551616" },
+        &.{ "replay", "journal", "--from", "4294967296" },
+        &.{ "replay", "journal", "--speed", "nan" },
+        &.{ "replay", "journal", "--typing", "18446744073709551616" },
     };
     for (cases) |args| {
-        var r = try support.run(gpa, args, 24, 80);
+        var r = try support.runTjctl(gpa, args, 24, 80);
         defer r.out.deinit(gpa);
 
         try std.testing.expectEqual(@as(u8, 2), r.code);
@@ -38,7 +38,7 @@ test "replay prefers recorded prompts and permits an explicit override" {
     var scratch = try support.Scratch.open();
     defer scratch.close();
 
-    const id = ulid.encode(44, .{7} ** 10);
+    const id = journal_name.legacy(44, .{7} ** 10);
     try scratch.makeJournal(id, &.{"1"});
     var journal = try scratch.tmp.dir.openDir(io, &id, .{});
     defer journal.close(io);
@@ -48,7 +48,7 @@ test "replay prefers recorded prompts and permits an explicit override" {
     try interaction.writeFile(io, .{ .sub_path = "cmd", .data = "recorded-command" });
     try interaction.writeFile(io, .{ .sub_path = "out", .data = "RECORDED-OUTPUT\r\n" });
 
-    var recorded = try support.run(gpa, &.{
+    var recorded = try support.runTjctl(gpa, &.{
         "--home", scratch.path(), "replay", &id, "--typing", "0", "--max-pause", "0",
     }, 24, 80);
     defer recorded.out.deinit(gpa);
@@ -58,7 +58,7 @@ test "replay prefers recorded prompts and permits an explicit override" {
     try std.testing.expect(prompt_at < command_at);
     try std.testing.expect(std.mem.indexOf(u8, recorded.out.items, "\x1b[36m") != null);
 
-    var overridden = try support.run(gpa, &.{
+    var overridden = try support.runTjctl(gpa, &.{
         "--home", scratch.path(), "replay", &id, "--typing", "0", "--max-pause", "0", "--prompt", "OVERRIDE> ",
     }, 24, 80);
     defer overridden.out.deinit(gpa);
@@ -78,10 +78,12 @@ test "a journal replays the commands and output it recorded" {
 
     const home = try journal.homeArg(gpa);
     defer gpa.free(home);
+    const id = try journal.journalName(gpa);
+    defer gpa.free(id);
 
     // No pacing: a test must not wait for a demo to play out.
-    var r = try support.run(gpa, &.{
-        "--home", home, "replay", "--typing", "0", "--max-pause", "0", "--prompt", "% ",
+    var r = try support.runTjctl(gpa, &.{
+        "--home", home, "replay", id, "--typing", "0", "--max-pause", "0", "--prompt", "% ",
     }, 24, 80);
     defer r.out.deinit(gpa);
 
@@ -107,9 +109,11 @@ test "replay can be narrowed to a range of entries" {
 
     const home = try journal.homeArg(gpa);
     defer gpa.free(home);
+    const id = try journal.journalName(gpa);
+    defer gpa.free(id);
 
-    var r = try support.run(gpa, &.{
-        "--home", home, "replay", "--typing", "0", "--max-pause", "0", "--from", "2", "--to", "2",
+    var r = try support.runTjctl(gpa, &.{
+        "--home", home, "replay", id, "--typing", "0", "--max-pause", "0", "--from", "2", "--to", "2",
     }, 24, 80);
     defer r.out.deinit(gpa);
 
@@ -132,7 +136,7 @@ test "replay names a journal by suffix, like every other reference" {
     const home = try journal.homeArg(gpa);
     defer gpa.free(home);
 
-    var r = try support.run(gpa, &.{
+    var r = try support.runTjctl(gpa, &.{
         "--home", home, "replay", name[name.len - 4 ..], "--typing", "0", "--max-pause", "0",
     }, 24, 80);
     defer r.out.deinit(gpa);
@@ -151,8 +155,10 @@ test "replay refuses to run inside a journal writer" {
 
     const home = try journal.homeArg(gpa);
     defer gpa.free(home);
+    const id = try journal.journalName(gpa);
+    defer gpa.free(id);
 
-    var refused = try support.run(gpa, &.{ "--home", home, "replay", "--typing", "0" }, 24, 80);
+    var refused = try support.runTjctl(gpa, &.{ "--home", home, "replay", id, "--typing", "0" }, 24, 80);
     defer refused.out.deinit(gpa);
     try std.testing.expectEqual(@as(u8, 1), refused.code);
     // The recording must not have been replayed into the live writer.
@@ -160,12 +166,12 @@ test "replay refuses to run inside a journal writer" {
 
     // Asking only how long it would take prints no recording, so it is allowed:
     // support.tj-tape needs it, and is usually support.run from inside a writer.
-    var duration = try support.run(gpa, &.{ "--home", home, "replay", "--duration" }, 24, 80);
+    var duration = try support.runTjctl(gpa, &.{ "--home", home, "replay", id, "--duration" }, 24, 80);
     defer duration.out.deinit(gpa);
     try std.testing.expectEqual(@as(u8, 0), duration.code);
 }
 
-test "replay with no journal named plays the most recent one" {
+test "replay requires a journal selector" {
     if (!support.haveZsh()) return error.SkipZigTest;
     const gpa = std.testing.allocator;
 
@@ -177,8 +183,7 @@ test "replay with no journal named plays the most recent one" {
     const home = try journal.homeArg(gpa);
     defer gpa.free(home);
 
-    // Deliberately not inside a journal writer, which is the only way replay runs.
-    var r = try support.run(gpa, &.{ "--home", home, "replay", "--typing", "0", "--max-pause", "0" }, 24, 80);
+    var r = try support.runTjctl(gpa, &.{ "--home", home, "replay", "--typing", "0", "--max-pause", "0" }, 24, 80);
     defer r.out.deinit(gpa);
-    try std.testing.expect(std.mem.indexOf(u8, r.out.items, "echo only-child") != null);
+    try std.testing.expectEqual(@as(u8, 2), r.code);
 }

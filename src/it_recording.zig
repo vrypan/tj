@@ -5,7 +5,7 @@ const posix = std.posix;
 const harness = @import("harness.zig");
 const noout = @import("noout.zig");
 const plain = @import("plain.zig");
-const ulid = @import("ulid.zig");
+const journal_name = @import("journal_name.zig");
 
 const options = @import("build_options");
 const tj = options.tj_exe;
@@ -53,7 +53,7 @@ test "each entry records the fully rendered zsh prompt" {
     const home = try journal.homeArg(gpa);
     defer gpa.free(home);
     const child = try support.spawnTj(gpa, &.{
-        support.tj, "--home", home, "new", "--", "/usr/bin/env", "TERM=xterm-256color", "/bin/zsh", "-f", "-i",
+        support.tjctl, "--home", home, "new", "--", "/usr/bin/env", "TERM=xterm-256color", "/bin/zsh", "-f", "-i",
     }, 24, 80);
     var out: std.ArrayList(u8) = .empty;
     defer out.deinit(gpa);
@@ -88,7 +88,7 @@ test "each entry records the fully rendered zsh prompt" {
     try std.testing.expect(std.mem.indexOf(u8, prompt, "133;B") == null);
 }
 
-test "continue appends to the same journal at its next unused number" {
+test "use appends to the same journal at its next unused number" {
     if (!support.haveZsh()) return error.SkipZigTest;
     const gpa = std.testing.allocator;
 
@@ -108,11 +108,12 @@ test "continue appends to the same journal at its next unused number" {
     try std.testing.expect(try child.readUntilFrom(gpa, &out, from, support.test_prompt, support.timeout_ms));
 
     const env_from = out.items.len;
-    try child.write("printf 'JENV=%s SHORT=%s NEXT=%s\\n' \"$TJ_JOURNAL\" \"$TJ_JOURNAL_SHORT\" \"$TJ_NEXT\"; command \"$TJ\" current\n");
+    try child.write("printf 'JENV=%s NEXT=%s REF=%s SHORT=%s\\n' \"$TJ_JOURNAL\" \"$TJ_NEXT\" \"$TJ_REF\" \"${TJ_JOURNAL_SHORT-unset}\"; command \"$TJCTL\" current\n");
     try std.testing.expect(try child.readUntilFrom(gpa, &out, env_from, name, support.timeout_ms));
-    var short_buf: [16]u8 = undefined;
-    const expected_short = try std.fmt.bufPrint(&short_buf, "SHORT={s}", .{name[name.len - 4 ..]});
-    try std.testing.expect(std.mem.indexOf(u8, out.items[env_from..], expected_short) != null);
+    try std.testing.expect(std.mem.indexOf(u8, out.items[env_from..], "SHORT=unset") != null);
+    const expected_ref = try std.fmt.allocPrint(gpa, "REF=@{s}.", .{name});
+    defer gpa.free(expected_ref);
+    try std.testing.expect(std.mem.indexOf(u8, out.items[env_from..], expected_ref) != null);
     try std.testing.expect(try child.readUntilFrom(gpa, &out, env_from, support.test_prompt, support.timeout_ms));
 
     try child.write("exit 0\n");
@@ -130,7 +131,7 @@ test "continue appends to the same journal at its next unused number" {
 
     const home = try journal.homeArg(gpa);
     defer gpa.free(home);
-    var listed = try support.run(gpa, &.{ "--home", home, "journal", "list" }, 24, 80);
+    var listed = try support.runTjctl(gpa, &.{ "--home", home, "ls" }, 24, 80);
     defer listed.out.deinit(gpa);
     try std.testing.expectEqual(@as(u8, 0), listed.code);
     try std.testing.expect(std.mem.indexOf(u8, listed.out.items, name) != null);
@@ -141,31 +142,34 @@ test "new exports journal variables and removes the old environment contract" {
     var scratch = try support.Scratch.open();
     defer scratch.close();
 
-    var r = try support.run(gpa, &.{
+    var r = try support.runTjctl(gpa, &.{
         "--home",
         scratch.path(),
         "new",
         "--",
         "/bin/sh",
         "-c",
-        "printf 'J=%s N=%s\\n' \"$TJ_JOURNAL\" \"$TJ_NEXT\"; env | grep '^TJ_' | sort",
+        "printf 'J=%s N=%s TJ=%s TJCTL=%s SHORT=%s\\n' \"$TJ_JOURNAL\" \"$TJ_NEXT\" \"$TJ\" \"$TJCTL\" \"${TJ_JOURNAL_SHORT-unset}\"",
     }, 24, 80);
     defer r.out.deinit(gpa);
     try std.testing.expectEqual(@as(u8, 0), r.code);
     try std.testing.expect(std.mem.indexOf(u8, r.out.items, " N=1") != null);
+    try std.testing.expect(std.mem.indexOf(u8, r.out.items, support.tj) != null);
+    try std.testing.expect(std.mem.indexOf(u8, r.out.items, support.tjctl) != null);
+    try std.testing.expect(std.mem.indexOf(u8, r.out.items, "SHORT=unset") != null);
     try std.testing.expect(std.mem.indexOf(u8, r.out.items, "SESS" ++ "ION") == null);
 }
 
-test "continue preserves unfinished numbers and gaps" {
+test "use preserves unfinished numbers and gaps" {
     if (!support.haveZsh()) return error.SkipZigTest;
     const gpa = std.testing.allocator;
     const io = std.testing.io;
     var scratch = try support.Scratch.open();
     defer scratch.close();
 
-    const id = ulid.encode(20, .{8} ** 10);
+    const id = journal_name.legacy(20, .{8} ** 10);
     try scratch.makeJournal(id, &.{ "1", "3" });
-    const child = try support.spawnTj(gpa, &.{ support.tj, "--home", scratch.path(), "continue", &id, "--", "/bin/zsh", "-f", "-i" }, 24, 80);
+    const child = try support.spawnTjctl(gpa, &.{ support.tjctl, "--home", scratch.path(), "use", &id, "--", "/bin/zsh", "-f", "-i" }, 24, 80);
     var out: std.ArrayList(u8) = .empty;
     defer out.deinit(gpa);
     try support.setupJournalZsh(gpa, child, &out);

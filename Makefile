@@ -31,7 +31,7 @@ build:
 # manifest prevents local installs from quietly containing more than archives.
 install:
 	$(ZIG) build --prefix $(PREFIX)
-	@echo "installed tj, zsh integration, companion tools, and shell completions under $(PREFIX)"
+	@echo "installed tj, tjctl, zsh integration, companion tools, and shell completions under $(PREFIX)"
 
 test:
 	$(ZIG) build test
@@ -58,10 +58,17 @@ $(TARGETS):
 package: all
 	@for t in $(TARGETS); do \
 		test -x $(DIST)/$$t/bin/tj || exit 1; \
+		test -x $(DIST)/$$t/bin/tjctl || exit 1; \
 		test -x $(DIST)/$$t/bin/tj-fence || exit 1; \
 		test -x $(DIST)/$$t/bin/tj-grep || exit 1; \
 		test -x $(DIST)/$$t/bin/tj-tape || exit 1; \
 		test -r $(DIST)/$$t/share/tj/tj.plugin.zsh || exit 1; \
+		test -r $(DIST)/$$t/share/bash-completion/completions/tj || exit 1; \
+		test -r $(DIST)/$$t/share/bash-completion/completions/tjctl || exit 1; \
+		test -r $(DIST)/$$t/share/zsh/site-functions/_tj || exit 1; \
+		test -r $(DIST)/$$t/share/zsh/site-functions/_tjctl || exit 1; \
+		test -r $(DIST)/$$t/share/fish/vendor_completions.d/tj.fish || exit 1; \
+		test -r $(DIST)/$$t/share/fish/vendor_completions.d/tjctl.fish || exit 1; \
 		tar -czf $(DIST)/tj-$(VERSION)-$$t.tar.gz -C $(DIST)/$$t bin share || exit 1; \
 		echo "$(DIST)/tj-$(VERSION)-$$t.tar.gz"; \
 	done

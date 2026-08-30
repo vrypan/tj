@@ -10,6 +10,11 @@ const dir_permissions: File.Permissions = @enumFromInt(0o700);
 
 pub const Mode = enum { shared, exclusive };
 
+/// Serializes short operations that change the root journal namespace.
+pub fn acquireNamespace(io: Io, root: Dir) !File {
+    return acquireNamed(io, root, ".namespace", "", .exclusive);
+}
+
 pub fn acquire(io: Io, root: Dir, journal: []const u8, mode: Mode) !File {
     return acquireNamed(io, root, journal, ".mutation", mode);
 }
@@ -27,7 +32,7 @@ fn acquireNamed(io: Io, root: Dir, journal: []const u8, suffix: []const u8, mode
     };
     var locks = try root.openDir(io, ".locks", .{});
     defer locks.close(io);
-    var name_buf: [64]u8 = undefined;
+    var name_buf: [@import("journal_name.zig").max_len + 16]u8 = undefined;
     const name = try std.fmt.bufPrint(&name_buf, "{s}{s}", .{ journal, suffix });
     return locks.createFile(io, name, .{
         .read = true,

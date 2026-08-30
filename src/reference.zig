@@ -1,16 +1,15 @@
 //! The `@` namespace: names for previous computations, alongside the
 //! filesystem's names for files.
 //!
-//!     @42/out                          interaction 42, current journal
-//!     @build-failure/out               named interaction, current journal
-//!     @-/out                           the last completed interaction
-//!     @01knxf1n5ffvk9jsm8wve1pgsd.42   another journal, by full id
-//!     @pgsd.build-failure/out           named interaction in another journal
-//!     @pgsd.42/files/data.csv          the same, by a suffix of it
+//!     @42/out                           entry 42, current journal
+//!     @build-failure/out                named entry, current journal
+//!     @-/out                            the last completed entry
+//!     @release-build.42                 entry 42 in another journal
+//!     @release-build.build-failure/out  named entry in another journal
+//!     @build.42/files/data.csv          the same, by a unique suffix
 //!
-//! Suffixes rather than prefixes: every journal started in the same
-//! millisecond shares the ULID's timestamp prefix, so only the tail
-//! distinguishes them.
+//! Selectors resolve by exact canonical journal name first, then by a unique
+//! suffix. Dots separate journal selectors from entry selectors.
 //!
 //! This module is only the grammar. Turning a reference into a path is the
 //! store's job, since only it knows what is on disk.
@@ -18,7 +17,7 @@
 const std = @import("std");
 const annotations = @import("annotations.zig");
 
-pub const max_suffix = 26;
+pub const max_suffix = 63;
 
 pub const Target = union(enum) {
     number: u32,
@@ -78,7 +77,7 @@ fn parseBody(text: []const u8) Error!Body {
         const suffix = text[0..dot];
         const target = text[dot + 1 ..];
         if (suffix.len == 0 or suffix.len > max_suffix) return error.NotAReference;
-        for (suffix) |char| if (!isBase32(char)) return error.NotAReference;
+        if (!validJournalSelector(suffix)) return error.NotAReference;
         return .{ .qualified = .{ .suffix = suffix, .target = try parseTarget(target) } };
     }
 
@@ -121,8 +120,13 @@ fn validateSubpath(subpath: []const u8) Error!void {
     if (std.mem.indexOf(u8, subpath, "//") != null) return error.Malformed;
 }
 
-fn isBase32(char: u8) bool {
-    return std.ascii.isDigit(char) or std.ascii.isAlphabetic(char);
+fn validJournalSelector(name: []const u8) bool {
+    if (name.len == 0 or name.len > max_suffix) return false;
+    if (!std.ascii.isAlphanumeric(name[0]) or !std.ascii.isAlphanumeric(name[name.len - 1])) return false;
+    for (name) |char| {
+        if (!(std.ascii.isLower(char) or std.ascii.isDigit(char) or char == '-')) return false;
+    }
+    return true;
 }
 
 /// Whether a word is worth handing to the resolver at all. Used by the shell
@@ -160,8 +164,8 @@ test "the previous entry" {
 }
 
 test "journal-qualified references" {
-    const ref = try parse("@pgsd.42/out");
-    try std.testing.expectEqualStrings("pgsd", ref.body.qualified.suffix);
+    const ref = try parse("@release-build.42/out");
+    try std.testing.expectEqualStrings("release-build", ref.body.qualified.suffix);
     try std.testing.expectEqual(@as(u32, 42), ref.body.qualified.target.number);
     try std.testing.expectEqualStrings("out", ref.subpath);
 
@@ -175,8 +179,8 @@ test "entry names share the reference namespace" {
     try std.testing.expectEqualStrings("build-failure", current.body.current.name);
     try std.testing.expectEqualStrings("out", current.subpath);
 
-    const qualified = try parse("@pgsd.build-failure/out");
-    try std.testing.expectEqualStrings("pgsd", qualified.body.qualified.suffix);
+    const qualified = try parse("@release-build.build-failure/out");
+    try std.testing.expectEqualStrings("release-build", qualified.body.qualified.suffix);
     try std.testing.expectEqualStrings("build-failure", qualified.body.qualified.target.name);
 }
 
@@ -206,8 +210,8 @@ test "ordinary words are left alone" {
 test "references that are shaped right but invalid are reported" {
     // Interactions start at 1, so @0 cannot exist.
     try std.testing.expectError(error.Malformed, parse("@0"));
-    try std.testing.expectError(error.Malformed, parse("@pgsd.0"));
-    try std.testing.expectError(error.Malformed, parse("@pgsd."));
+    try std.testing.expectError(error.Malformed, parse("@release-build.0"));
+    try std.testing.expectError(error.Malformed, parse("@release-build."));
 }
 
 test "subpaths cannot escape the entry directory" {
@@ -218,7 +222,7 @@ test "subpaths cannot escape the entry directory" {
     try std.testing.expectError(error.Malformed, parse("@-/.."));
 }
 
-test "journal suffixes are bounded" {
-    try std.testing.expect(looksLikeReference("@" ++ "a" ** 26 ++ ".1"));
-    try std.testing.expect(!looksLikeReference("@" ++ "a" ** 27 ++ ".1"));
+test "journal selectors are bounded" {
+    try std.testing.expect(looksLikeReference("@" ++ "a" ** 63 ++ ".1"));
+    try std.testing.expect(!looksLikeReference("@" ++ "a" ** 64 ++ ".1"));
 }

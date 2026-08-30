@@ -94,7 +94,7 @@ if $search_all; then
     scopes=(.)
 else
     [[ -n ${TJ_JOURNAL:-} ]] || {
-        echo "tj-grep: not inside a tj journal writer; use --all" >&2
+        echo "tj-grep: not inside a TJ writer; use --all" >&2
         exit 2
     }
 

@@ -1,5 +1,4 @@
 const std = @import("std");
-const builtin = @import("builtin");
 const Io = std.Io;
 const zecli = @import("zecli");
 
@@ -7,37 +6,15 @@ const cli = @import("cli.zig");
 const cli_spec = @import("cli_spec.zig");
 const proxy = @import("proxy.zig");
 const commands = @import("commands.zig");
+const frontend = @import("frontend.zig");
 
-pub const version = "0.3.0";
-
-pub const panic = std.debug.FullPanic(onPanic);
-
-fn onPanic(msg: []const u8, first_trace_addr: ?usize) noreturn {
-    proxy.restoreOnPanic();
-    std.debug.defaultPanic(msg, first_trace_addr);
-}
-
-/// Leak detection for the command allocator, active only in debug builds so
-/// the test suite fails on a leak that a release build would never notice.
-var debug_allocator: std.heap.DebugAllocator(.{}) = .init;
-
-const leak_checked = builtin.mode == .Debug;
-
-/// Commands run on a real allocator, not on `init.arena`. Listing a journal
-/// frees each entry's scratch as it goes, and an arena cannot honor that:
-/// its `free` is a no-op, so peak memory would grow with the entry count.
-/// The arena still owns argv and parsed CLI state, which live for the whole
-/// process by design.
-fn commandAllocator() std.mem.Allocator {
-    return if (leak_checked) debug_allocator.allocator() else std.heap.smp_allocator;
-}
+pub const version = frontend.version;
+pub const panic = frontend.panic;
 
 pub fn main(init: std.process.Init) !u8 {
     const arena = init.arena.allocator();
-    const gpa = commandAllocator();
-    defer if (leak_checked) {
-        if (debug_allocator.deinit() == .leak) @panic("tj leaked memory in a command path");
-    };
+    const gpa = frontend.commandAllocator();
+    defer frontend.deinitAllocator("tj");
     const args = try init.minimal.args.toSlice(arena);
 
     var stdout_buf: [4096]u8 = undefined;
@@ -57,17 +34,17 @@ pub fn main(init: std.process.Init) !u8 {
     switch (routed) {
         .help => {
             zecli.printApplicationHelp(arena, stdout, cli_spec.application) catch |err| {
-                if (isBrokenPipe(&stdout_file, err)) return 0;
+                if (frontend.isBrokenPipe(&stdout_file, err)) return 0;
                 return err;
             };
-            return flushStdout(&stdout_file, 0);
+            return frontend.flushStdout(&stdout_file, 0);
         },
         .version => {
             stdout.writeAll("tj " ++ version ++ "\n") catch |err| {
-                if (isBrokenPipe(&stdout_file, err)) return 0;
+                if (frontend.isBrokenPipe(&stdout_file, err)) return 0;
                 return err;
             };
-            return flushStdout(&stdout_file, 0);
+            return frontend.flushStdout(&stdout_file, 0);
         },
         .command => |command| {
             const spec = command.which.spec();
@@ -80,10 +57,10 @@ pub fn main(init: std.process.Init) !u8 {
 
             if (zecli.helpRequested(parts.owned)) {
                 zecli.printCommandHelp(arena, stdout, spec) catch |err| {
-                    if (isBrokenPipe(&stdout_file, err)) return 0;
+                    if (frontend.isBrokenPipe(&stdout_file, err)) return 0;
                     return err;
                 };
-                return flushStdout(&stdout_file, 0);
+                return frontend.flushStdout(&stdout_file, 0);
             }
 
             cli.preflightCommandArgs(command.which, parts.owned) catch {
@@ -103,7 +80,7 @@ pub fn main(init: std.process.Init) !u8 {
             defer parsed.deinit(arena);
 
             const status = commands.run(gpa, init.io, command, parts.child, &parsed, stdout) catch |err| {
-                if (isBrokenPipe(&stdout_file, err)) return 0;
+                if (frontend.isBrokenPipe(&stdout_file, err)) return 0;
                 stdout.flush() catch {};
                 try stderr.writeAll(commandErrorMessage(command.which, err));
                 if (isUsageError(err)) {
@@ -114,23 +91,9 @@ pub fn main(init: std.process.Init) !u8 {
                 if (isUsageError(err) or err == error.NoSuchInteraction) return 2;
                 return 1;
             };
-            return flushStdout(&stdout_file, status);
+            return frontend.flushStdout(&stdout_file, status);
         },
     }
-}
-
-fn isBrokenPipe(stdout_file: *const Io.File.Writer, err: anyerror) bool {
-    if (err != error.WriteFailed) return false;
-    if (stdout_file.err) |write_err| return write_err == error.BrokenPipe;
-    return false;
-}
-
-fn flushStdout(stdout_file: *Io.File.Writer, status: u8) !u8 {
-    stdout_file.interface.flush() catch |err| {
-        if (isBrokenPipe(stdout_file, err)) return 0;
-        return err;
-    };
-    return status;
 }
 
 fn rootErrorMessage(err: anyerror) []const u8 {
@@ -165,18 +128,9 @@ fn commandErrorMessage(which: cli.CommandName, err: anyerror) []const u8 {
         error.ForkFailed => "tj: cannot fork\n",
         else => "tj: cannot start noout command\n",
     };
-    if (which == .new or which == .@"continue") return switch (err) {
-        error.NoSuchJournal => "tj: no journal matches that id\n",
-        error.AmbiguousJournal => "tj: journal suffix is ambiguous\n",
-        error.JournalLocked => "tj: journal is already being written\n",
-        error.JournalFull => "tj: journal has no entry numbers left\n",
-        error.ForkFailed => "tj: cannot fork\n",
-        error.Syscall => "tj: cannot allocate a pseudo-terminal\n",
-        else => "tj: cannot open the journal\n",
-    };
     return switch (err) {
         error.NotInJournal => "tj: not inside a tj journal writer\n",
-        error.NoSuchJournal => "tj: no journal matches that id\n",
+        error.NoSuchJournal => "tj: no journal matches that name\n",
         error.NothingRecorded, error.NothingCompleted => "tj: nothing recorded yet\n",
         error.MissingArgument => "tj: this subcommand needs an argument\n",
         error.BadReference => "tj: not a journal reference\n",
@@ -216,7 +170,7 @@ fn commandErrorMessage(which: cli.CommandName, err: anyerror) []const u8 {
 test {
     _ = cli;
     _ = cli_spec;
-    _ = @import("ulid.zig");
+    _ = @import("journal_name.zig");
     _ = @import("scanner.zig");
     _ = @import("reference.zig");
     _ = @import("altscreen.zig");

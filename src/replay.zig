@@ -1,6 +1,6 @@
 //! Shared journal replay renderer.
 //!
-//! `tj replay` uses the recorded rhythm by default. `tj continue` uses the
+//! `tjctl replay` uses the recorded rhythm by default. `tjctl use` uses the
 //! same renderer with both delay controls set to zero before its child starts.
 
 const std = @import("std");
@@ -12,7 +12,7 @@ const sys = @import("sys.zig");
 const read_chunk_size = 64 * 1024;
 
 /// Terminal queries are not visual output. Replaying them would make the
-/// terminal send their answers to stdin, where a newly continued shell would
+/// terminal send their answers to stdin, where a newly attached shell would
 /// receive the replies as if the user had typed them.
 const replay_queries = [_][]const u8{
     "\x1b]11;?\x07",
@@ -203,7 +203,7 @@ fn typeOut(
     options: Options,
     out: anytype,
 ) !u64 {
-    var path_buf: [64]u8 = undefined;
+    var path_buf: [std.fs.max_path_bytes]u8 = undefined;
     const sub = try std.fmt.bufPrint(&path_buf, "{s}/{d}/cmd", .{ journal, number });
     const per_char: u64 = if (options.typing_ms == 0) 0 else try scaleMillis(options.typing_ms, options.speed);
     var file = root.openFile(io, sub, .{}) catch |err| switch (err) {
@@ -252,7 +252,7 @@ fn writeResource(
     name: []const u8,
     out: anytype,
 ) !bool {
-    var path_buf: [64]u8 = undefined;
+    var path_buf: [std.fs.max_path_bytes]u8 = undefined;
     const sub = try std.fmt.bufPrint(&path_buf, "{s}/{d}/{s}", .{ journal, number, name });
     var file = root.openFile(io, sub, .{}) catch |err| switch (err) {
         error.FileNotFound => return false,
