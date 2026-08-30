@@ -346,6 +346,7 @@ best-effort. A visible journal is never copied piecemeal.
 The two flat command surfaces are explicit:
 
 ``` text
+tj tui
 tj hist|cat|grep|name|tag|pin|rm|last|resolve|complete|noout ...
 
 tjctl new [options] [NAME] [-- COMMAND...]
@@ -786,6 +787,51 @@ write is restricted to the journal whose complete name is in `TJ_JOURNAL`.
 Syntactically qualified references and canonical paths belonging to another
 journal are rejected before mutation. To annotate another journal, a user
 continues it and runs the annotation command there.
+
+### Interactive entry browser
+
+`tj tui` is the full-screen frontend for entry history and annotations. It
+accepts no operands, requires both stdin and stdout to be terminals, and
+requires a nonempty `TJ_JOURNAL`. It never selects another journal. The
+running entry that invoked the browser is excluded, and the initial cursor is
+the highest remaining entry number.
+
+The browser retains only the numeric index. It reads commands, sizes, status,
+and annotations for visible rows when rendering rather than keeping every
+command resident. Recorded command text passes through the same control-byte
+sanitizer as history before reaching the terminal. Rows use history's four
+annotation/failure flags, entry number, compact output size, command, name,
+tags, and nonzero status.
+
+Arrow keys and `j`/`k` move; Home/`g`, End/`G`, Page Up, and Page Down navigate
+the index. `p` toggles the selected entry's pin. `t` prompts for a tag to add;
+`T` prompts for one to remove. `n` prompts with the current name and assigns
+the submitted value; an empty submission removes it. `r` reloads the numeric
+index. Enter opens the selected entry's detail view. `d` prompts before
+deleting the selected entry; when the entry is pinned, the prompt explicitly
+asks whether the pin should be overridden. Only `y` or `Y` confirms either
+prompt. Removal uses the same operation as `tj rm`, so entry resources and
+annotations are removed consistently and numbering holes remain holes. `q`
+and Ctrl-C exit. Escape cancels an active prompt. Annotation actions
+call the same mutation operations as `tj name`, `tj tag`, and `tj pin`, so
+validation, normalization, idempotency, uniqueness, mutation locking, and
+SQLite transactions are identical.
+
+The detail view contains the complete command, exit status, recorded working
+directory, start and end timestamps, duration, output size, resource names,
+name, tags, pin state, and plain-rendered output. It wraps to the terminal
+width and scrolls with arrows, `j`/`k`, Home/`g`, End/`G`, Page Up, and Page
+Down. Enter, Escape, or `q` returns to the list. The preview renders at most
+2 MiB of recorded output and directs the user to `tj cat @N` when truncated.
+
+Zooi owns raw mode, resize input, retained rendering, synchronized output, and
+the alternate screen. Normal and error returns restore the terminal through
+Zooi teardown; the process panic path and fatal `SIGTERM`/`SIGHUP` paths call
+Zooi's allocation-free restoration hook. The complete terminal session,
+including alternate-screen teardown, is inside one OSC 5107 noout region.
+Consequently the browser remains visible but its entry records one
+`<tj:noout>` placeholder rather than screen frames. After teardown TJ closes
+the region before returning control to the shell.
 
 Journal-local mutable metadata is held in `journal.sqlite3`, separately from
 recording-time `meta.json`. TJ embeds SQLite; users need no system SQLite

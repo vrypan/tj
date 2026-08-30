@@ -78,6 +78,11 @@ const grep_flags = [_]zecli.FlagSpec{
 
 const commands = [_]zecli.CommandSpec{
     .{
+        .name = "tui",
+        .description = "Browse, inspect, annotate, and delete entries",
+        .usage = "tj tui",
+    },
+    .{
         .name = "noout",
         .description = "Run a command whose visible output is omitted from out",
         .usage = "tj noout -- COMMAND...",

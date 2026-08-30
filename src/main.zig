@@ -7,9 +7,16 @@ const cli_spec = @import("cli_spec.zig");
 const proxy = @import("proxy.zig");
 const commands = @import("commands.zig");
 const frontend = @import("frontend.zig");
+const zooi = @import("zooi");
 
 pub const version = frontend.version;
-pub const panic = frontend.panic;
+pub const panic = std.debug.FullPanic(struct {
+    fn restoreThenPanic(msg: []const u8, first_trace_addr: ?usize) noreturn {
+        zooi.restore();
+        proxy.restoreOnPanic();
+        std.debug.defaultPanic(msg, first_trace_addr);
+    }
+}.restoreThenPanic);
 
 pub fn main(init: std.process.Init) !u8 {
     const arena = init.arena.allocator();
@@ -122,6 +129,12 @@ fn isUsageError(err: anyerror) bool {
 }
 
 fn commandErrorMessage(which: cli.CommandName, err: anyerror) []const u8 {
+    if (which == .tui) return switch (err) {
+        error.NotInJournal => "tj: tui must run inside a tj journal writer\n",
+        error.NoControllingTerminal, error.NotATerminal => "tj: tui needs an interactive terminal\n",
+        error.TerminalSetupFailed, error.ReadFailed, error.PollFailed => "tj: tui terminal session failed\n",
+        else => "tj: cannot open the journal browser\n",
+    };
     if (which == .noout) return switch (err) {
         error.NotInJournal => "tj: noout must run inside a tj journal writer\n",
         error.NoControllingTerminal => "tj: noout needs a controlling terminal\n",

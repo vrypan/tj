@@ -25,6 +25,7 @@ const cmd_reference = @import("cmd_reference.zig");
 const cmd_annotate = @import("cmd_annotate.zig");
 const cmd_remove = @import("cmd_remove.zig");
 const cmd_cat = @import("cmd_cat.zig");
+const cmd_tui = @import("cmd_tui.zig");
 
 pub const Error = context.Error;
 
@@ -38,6 +39,7 @@ pub fn run(
 ) !u8 {
     const home = command.root.home;
     switch (command.which) {
+        .tui => try cmd_tui.run(gpa, io, home),
         .noout => {
             const result = try noout.run(gpa, child);
             return result.exit_code;

@@ -8,6 +8,7 @@ const zecli = @import("zecli");
 const cli_spec = @import("cli_spec.zig");
 
 pub const CommandName = enum {
+    tui,
     noout,
     hist,
     last,

@@ -4,8 +4,10 @@ pub fn build(b: *std.Build) void {
     const target = b.standardTargetOptions(.{});
     const optimize = b.standardOptimizeOption(.{});
     const zecli = b.dependency("zecli", .{});
+    const zooi = b.dependency("zooi", .{});
 
     const exe_mod = applicationModule(b, zecli, "src/main.zig", target, optimize);
+    exe_mod.addImport("zooi", zooi.module("zooi"));
     const tjctl_mod = applicationModule(b, zecli, "src/tjctl_main.zig", target, optimize);
 
     const exe = b.addExecutable(.{ .name = "tj", .root_module = exe_mod });

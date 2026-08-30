@@ -30,7 +30,7 @@ test "application and every command expose generated help" {
         try std.testing.expect(std.mem.indexOf(u8, result.stdout, "source /path/to/tj.plugin.zsh") != null);
     }
 
-    const command_names = [_][]const u8{ "noout", "hist", "last", "cat", "resolve", "complete", "name", "tag", "pin", "rm", "grep" };
+    const command_names = [_][]const u8{ "tui", "noout", "hist", "last", "cat", "resolve", "complete", "name", "tag", "pin", "rm", "grep" };
     for (command_names) |name| {
         const result = try support.runNonTty(gpa, &.{ name, "--help" });
         defer gpa.free(result.stdout);
@@ -97,6 +97,25 @@ test "cat reads a plain file before any journal exists" {
     try std.testing.expect(reference.term.exited != 0);
 }
 
+test "tui requires the current journal and an interactive terminal" {
+    const gpa = std.testing.allocator;
+    support.leaveJournal();
+
+    const outside = try support.runNonTty(gpa, &.{"tui"});
+    defer gpa.free(outside.stdout);
+    defer gpa.free(outside.stderr);
+    try std.testing.expectEqual(@as(u8, 1), outside.term.exited);
+    try std.testing.expect(std.mem.indexOf(u8, outside.stderr, "inside a tj journal writer") != null);
+    try std.testing.expect(std.mem.indexOf(u8, outside.stdout, "5107;tj") == null);
+
+    const redirected = try support.runNonTtyInJournal(gpa, &.{"tui"}, "test-journal", "2");
+    defer gpa.free(redirected.stdout);
+    defer gpa.free(redirected.stderr);
+    try std.testing.expectEqual(@as(u8, 1), redirected.term.exited);
+    try std.testing.expect(std.mem.indexOf(u8, redirected.stderr, "interactive terminal") != null);
+    try std.testing.expect(std.mem.indexOf(u8, redirected.stdout, "5107;tj") == null);
+}
+
 test "a closed stdout pipe exits quietly" {
     const gpa = std.testing.allocator;
 
@@ -156,6 +175,7 @@ test "build-time completions expose cli grammar and journal references" {
     defer gpa.free(zsh);
     try std.testing.expect(std.mem.startsWith(u8, zsh, "#compdef tj\n"));
     try std.testing.expect(std.mem.indexOf(u8, zsh, "'hist:List entries with annotations, size, and date'") != null);
+    try std.testing.expect(std.mem.indexOf(u8, zsh, "'tui:Browse, inspect, annotate, and delete entries'") != null);
     try std.testing.expect(std.mem.indexOf(u8, zsh, "_tj__cmd_hist()") != null);
     try std.testing.expect(std.mem.indexOf(u8, zsh, "_tj__cmd_usage()") == null);
     try std.testing.expect(std.mem.indexOf(u8, zsh, "_tj__cmd_ls()") == null);

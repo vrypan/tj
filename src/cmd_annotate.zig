@@ -85,28 +85,48 @@ pub fn nameCommand(
             try metadata.removeName(name);
             return transaction.commit();
         },
-        .set => |request| {
-            var root = try store.openRoot(io, home);
-            defer root.close(io);
-            const target = try context.requireMutationTarget(gpa, io, root, request.ref);
-            defer target.deinit(gpa);
-            try context.requireInteraction(target);
-            var mutation = try context.openCurrentMutation(gpa, io, home, .shared);
-            defer mutation.deinit(io);
-            if (!store.interactionExists(io, mutation.root, mutation.journal, target.number)) return error.NoSuchInteraction;
-            var metadata = try annotations.openWrite(gpa, io, mutation.root, mutation.journal);
-            defer metadata.deinit(gpa);
-            var transaction = try metadata.begin();
-            defer transaction.deinit();
-            if (try metadata.numberForName(request.name)) |owner| {
-                if (!store.interactionExists(io, mutation.root, mutation.journal, owner)) {
-                    try metadata.removeName(request.name);
-                }
-            }
-            try metadata.setName(target.number, request.name);
-            try transaction.commit();
-        },
+        .set => |request| try updateName(gpa, io, home, request.ref, request.name),
     }
+}
+
+/// Changes the name of one current-journal entry. The CLI and interactive
+/// browser share this path so uniqueness, stale-row cleanup, and locking do
+/// not acquire subtly different semantics. A null name removes the entry's
+/// current name, if any.
+pub fn updateName(
+    gpa: std.mem.Allocator,
+    io: Io,
+    home: ?[]const u8,
+    ref: []const u8,
+    new_name: ?[]const u8,
+) !void {
+    var root = try store.openRoot(io, home);
+    defer root.close(io);
+    const target = try context.requireMutationTarget(gpa, io, root, ref);
+    defer target.deinit(gpa);
+    try context.requireInteraction(target);
+
+    var mutation = try context.openCurrentMutation(gpa, io, home, .shared);
+    defer mutation.deinit(io);
+    if (!store.interactionExists(io, mutation.root, mutation.journal, target.number)) return error.NoSuchInteraction;
+    var metadata = try annotations.openWrite(gpa, io, mutation.root, mutation.journal);
+    defer metadata.deinit(gpa);
+    var transaction = try metadata.begin();
+    defer transaction.deinit();
+
+    if (new_name) |name| {
+        if (try metadata.numberForName(name)) |owner| {
+            if (!store.interactionExists(io, mutation.root, mutation.journal, owner)) {
+                try metadata.removeName(name);
+            }
+        }
+        try metadata.setName(target.number, name);
+    } else if (try metadata.get(gpa, target.number)) |owned_entry| {
+        var entry = owned_entry;
+        defer entry.deinit(gpa);
+        if (entry.name) |name| try metadata.removeName(name);
+    }
+    try transaction.commit();
 }
 
 pub const TagRequest = union(enum) {

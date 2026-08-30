@@ -1113,7 +1113,7 @@ fn nowMillis(io: Io) i64 {
 }
 
 /// ISO 8601 with milliseconds, always UTC.
-fn formatTimestamp(millis: i64, buf: []u8) []const u8 {
+pub fn formatTimestamp(millis: i64, buf: []u8) []const u8 {
     const seconds = @divFloor(millis, 1000);
     const remainder: u16 = @intCast(@mod(millis, 1000));
     if (seconds < 0) return "";

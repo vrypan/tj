@@ -173,6 +173,7 @@ tj hist                   # flags, entry reference, output size, date, command m
 tj hist @242              # full details for one entry
 tj hist @2..@10 @15       # selected entries, inclusive ranges skip holes
 tj hist @release-build.   # every entry in another journal
+tj tui                    # browse, inspect, and manage entries interactively
 tj last                   # the last entry that completed
 
 tjctl ls                  # journals in canonical lexical order
@@ -181,7 +182,7 @@ tjctl du                  # total logical storage used by this journal
 tjctl du release-build --chart
 ```
 
-`tj` owns entries and their resources: `hist`, `cat`, `grep`, `name`, `tag`,
+`tj` owns entries and their resources: `tui`, `hist`, `cat`, `grep`, `name`, `tag`,
 `pin`, `rm`, `last`, `resolve`, `complete`, and `noout`. `tjctl` owns journal
 lifecycle and management: `new`, `use`, `ls`, `mv`, `rm`, `du`, `replay`,
 `current`, and completion plumbing.
@@ -300,6 +301,46 @@ tags and pinning or unpinning updates every existing entry in that range
 atomically. `tj tag` accepts a leading list of entry or range targets followed
 by one or more tags. With no trailing tags, it queries every target instead.
 Targets in a list are processed from left to right.
+
+### Interactive browser
+
+`tj tui` opens a full-screen browser for the current journal. It must run
+inside a journal writer with an interactive terminal. The browser starts on
+the newest completed entry and leaves its own running `tj tui` entry out of
+the list.
+
+```text
+↑/↓ or j/k   move                 p   pin or unpin
+Home/g       first entry          t   add a tag
+End/G        last entry           T   remove a tag
+PgUp/PgDn    move one page        n   name or rename
+Enter        show entry details   d   delete
+r            refresh              q   quit
+```
+
+The name prompt starts with the existing name. Submit an empty name to remove
+it. Tag input follows the same validation and lowercase normalization as
+`tj tag`; naming follows the same uniqueness and grammar rules as `tj name`.
+All mutations use the same locking, SQLite transactions, and implementation
+as their command-line counterparts.
+
+Enter opens a scrollable detail view containing the full command, exit status,
+working directory, timing, output size, resources, annotations, and plain-text
+output. Use the navigation keys to scroll and Enter, Escape, or `q` to return.
+The output preview reads at most 2 MiB; `tj cat @N` remains available for the
+complete output.
+
+`d` asks before deleting the focused entry. If it is pinned, the prompt says
+so and asks explicitly whether to delete it anyway. Confirming uses the same
+removal path as `tj rm`, including annotation and resource cleanup; cancelling
+leaves the entry untouched.
+
+The browser uses the alternate screen and restores the screen, cursor, and
+terminal mode on exit, Ctrl-C, fatal signals, errors, and panics. Its screen
+frames are enclosed in a noout region, so the `tj tui` entry contains
+`<tj:noout>` instead of terminal drawing sequences. The explicit command is
+the v1 launcher; a shell key binding can be added later without changing the
+browser or proxy.
 
 `tj hist --tag bug --tag parser` shows entries having every requested
 tag. `tj hist --pinned` (or `--pin`) shows only pinned entries; it combines
@@ -921,9 +962,10 @@ Targets: `{aarch64,x86_64}` × `{macos, linux-musl, linux-gnu}`. The musl
 builds are static. Override `OPTIMIZE` (default `ReleaseSafe`) or `ZIG`
 to change how they are built.
 
-The build fetches the exactly pinned, std-only Zecli 0.2.2 source package on
-first use. Zecli is compiled into both CLI binaries; release binaries remain
-self-contained and have no Zecli runtime dependency.
+The build fetches the exactly pinned, std-only Zecli 0.2.2 and Zooi 0.1.1
+source packages on first use. Zecli provides CLI parsing and generated
+completion; Zooi provides `tj tui` terminal mechanics. Both are build-time
+source dependencies and add no runtime package dependency.
 
 The proxy uses `std.posix` wherever Zig 0.16 provides the call. Process
 control, `ioctl`, and the pty grant/unlock sequence have no `std`
