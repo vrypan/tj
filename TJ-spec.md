@@ -804,18 +804,33 @@ annotation/failure flags, entry number, compact output size, command, name,
 tags, and nonzero status.
 
 Arrow keys and `j`/`k` move; Home/`g`, End/`G`, Page Up, and Page Down navigate
-the index. `p` toggles the selected entry's pin. `t` prompts for a tag to add;
-`T` prompts for one to remove. `n` prompts with the current name and assigns
-the submitted value; an empty submission removes it. `r` reloads the numeric
-index. Enter opens the selected entry's detail view. `d` prompts before
-deleting the selected entry; when the entry is pinned, the prompt explicitly
-asks whether the pin should be overridden. Only `y` or `Y` confirms either
-prompt. Removal uses the same operation as `tj rm`, so entry resources and
-annotations are removed consistently and numbering holes remain holes. `q`
-and Ctrl-C exit. Escape cancels an active prompt. Annotation actions
-call the same mutation operations as `tj name`, `tj tag`, and `tj pin`, so
-validation, normalization, idempotency, uniqueness, mutation locking, and
-SQLite transactions are identical.
+the index. Space toggles the focused entry's selection state. Shift+Up/Down
+starts an inclusive range at the current row and extends or shrinks it as the
+cursor moves. Entries individually selected before the range remain selected.
+Escape clears the complete selection in normal list mode. The header reports
+the selection count. Selected rows use ANSI cyan for their primary text,
+matching Zooi's browser convention; a row that is both focused and selected
+combines cyan text with reverse video. Selection survives refreshes by entry
+number and automatically loses entries that have been removed.
+
+`p`, `t`, `T`, and `d` operate on every selected entry, or on the focused entry
+when the selection is empty. If all targets are pinned, `p` unpins all of them;
+otherwise it pins all of them. `t` prompts for one tag to add to every target;
+`T` removes one tag from every target. Each multi-entry annotation action uses
+one SQLite transaction. `n` remains a focused-entry operation because names
+are unique per entry; it prompts with the current name and an empty submission
+removes it. `r` reloads the numeric index.
+
+Enter opens the focused entry's detail view. `d` removes unpinned targets
+without confirmation. If any target is pinned, a single prompt asks whether
+the pinned entries should also be deleted. `y` removes every target; `n` or
+Enter skips the pinned entries while removing the others. Escape cancels the
+whole operation. Removal uses the same staged, transactional operation as
+`tj rm`, so entry resources and annotations are removed consistently and
+numbering holes remain holes. `q` and Ctrl-C exit. Escape cancels an active
+input prompt. Annotation actions share the command-layer operations used by
+`tj name`, `tj tag`, and `tj pin`, so validation, normalization, idempotency,
+uniqueness, mutation locking, and SQLite transactions are identical.
 
 The detail view contains the complete command, exit status, recorded working
 directory, start and end timestamps, duration, output size, resource names,

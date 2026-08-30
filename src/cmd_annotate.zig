@@ -254,8 +254,39 @@ pub fn updateTags(
     defer metadata.deinit(gpa);
     var transaction = try metadata.begin();
     defer transaction.deinit();
-    for (targets.numbers) |number| {
-        for (normalized) |tag| {
+    try applyTags(&metadata, targets.numbers, normalized, removing);
+    try transaction.commit();
+}
+
+/// Applies tags atomically to an already resolved set of current-journal
+/// entry numbers. Interactive frontends use this instead of manufacturing
+/// reference strings or duplicating annotation transactions.
+pub fn updateTagNumbers(
+    gpa: std.mem.Allocator,
+    io: Io,
+    home: ?[]const u8,
+    numbers: []const u32,
+    tags: []const []const u8,
+    removing: bool,
+) !void {
+    var mutation = try context.openCurrentMutation(gpa, io, home, .shared);
+    defer mutation.deinit(io);
+    for (numbers) |number| {
+        if (!store.interactionExists(io, mutation.root, mutation.journal, number)) return error.NoSuchInteraction;
+    }
+    const normalized = try normalizeTags(gpa, tags);
+    defer freeTags(gpa, normalized);
+    var metadata = try annotations.openWrite(gpa, io, mutation.root, mutation.journal);
+    defer metadata.deinit(gpa);
+    var transaction = try metadata.begin();
+    defer transaction.deinit();
+    try applyTags(&metadata, numbers, normalized, removing);
+    try transaction.commit();
+}
+
+fn applyTags(metadata: *annotations.Connection, numbers: []const u32, tags: []const []const u8, removing: bool) !void {
+    for (numbers) |number| {
+        for (tags) |tag| {
             if (removing) {
                 try metadata.removeTag(number, tag);
             } else {
@@ -263,7 +294,6 @@ pub fn updateTags(
             }
         }
     }
-    try transaction.commit();
 }
 
 pub fn normalizeTags(gpa: std.mem.Allocator, tags: []const []const u8) ![][]u8 {
@@ -341,6 +371,31 @@ pub fn updatePin(
     defer metadata.deinit(gpa);
     var transaction = try metadata.begin();
     defer transaction.deinit();
-    for (targets.numbers) |number| try metadata.setPinned(number, pinned);
+    try applyPins(&metadata, targets.numbers, pinned);
     try transaction.commit();
+}
+
+/// Pins or unpins an already resolved selection in one transaction.
+pub fn updatePinNumbers(
+    gpa: std.mem.Allocator,
+    io: Io,
+    home: ?[]const u8,
+    numbers: []const u32,
+    pinned: bool,
+) !void {
+    var mutation = try context.openCurrentMutation(gpa, io, home, .shared);
+    defer mutation.deinit(io);
+    for (numbers) |number| {
+        if (!store.interactionExists(io, mutation.root, mutation.journal, number)) return error.NoSuchInteraction;
+    }
+    var metadata = try annotations.openWrite(gpa, io, mutation.root, mutation.journal);
+    defer metadata.deinit(gpa);
+    var transaction = try metadata.begin();
+    defer transaction.deinit();
+    try applyPins(&metadata, numbers, pinned);
+    try transaction.commit();
+}
+
+fn applyPins(metadata: *annotations.Connection, numbers: []const u32, pinned: bool) !void {
+    for (numbers) |number| try metadata.setPinned(number, pinned);
 }

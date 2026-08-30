@@ -315,8 +315,20 @@ Home/g       first entry          t   add a tag
 End/G        last entry           T   remove a tag
 PgUp/PgDn    move one page        n   name or rename
 Enter        show entry details   d   delete
-r            refresh              q   quit
+Space        toggle selection     Shift+↑/↓   extend or shrink range
+Escape       clear selection      r   refresh
+q            quit
 ```
+
+Space toggles the focused entry. Shift+Up/Down starts an inclusive range at the
+current row and extends or shrinks it as the cursor moves; entries individually
+selected before the range remain selected. Escape clears the complete
+selection. Selected rows use cyan for their primary text; the focused row
+retains reverse video, with cyan text when it is also selected. When entries are selected, pin, tag,
+untag, and delete apply to all of them. With no selection they apply to the
+focused entry. Pinning uses one target state: if every target is already
+pinned, `p` unpins all of them; otherwise it pins all of them. Naming and
+details always operate on the focused entry.
 
 The name prompt starts with the existing name. Submit an empty name to remove
 it. Tag input follows the same validation and lowercase normalization as
@@ -330,10 +342,11 @@ output. Use the navigation keys to scroll and Enter, Escape, or `q` to return.
 The output preview reads at most 2 MiB; `tj cat @N` remains available for the
 complete output.
 
-`d` asks before deleting the focused entry. If it is pinned, the prompt says
-so and asks explicitly whether to delete it anyway. Confirming uses the same
-removal path as `tj rm`, including annotation and resource cleanup; cancelling
-leaves the entry untouched.
+`d` immediately removes unpinned targets. If any target is pinned, one prompt
+asks whether to delete the pinned entries too. `y` removes every target; `n`
+or Enter removes only the unpinned targets, and Escape cancels the operation.
+Deletion uses the same removal path as `tj rm`, including annotation and
+resource cleanup.
 
 The browser uses the alternate screen and restores the screen, cursor, and
 terminal mode on exit, Ctrl-C, fatal signals, errors, and panics. Its screen

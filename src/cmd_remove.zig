@@ -187,22 +187,47 @@ pub fn removeInteractionRange(
 ) !void {
     var mutation = try context.openCurrentMutation(gpa, io, home, .exclusive);
     defer mutation.deinit(io);
+    const selected = try context.selectedNumbers(gpa, io, mutation.root, mutation.journal, range);
+    defer gpa.free(selected);
+    const result = try removeNumbers(gpa, io, &mutation, selected, force);
+    noteSkippedPins(result.skipped_pinned);
+}
 
-    const numbers = try store.listNumbers(gpa, io, mutation.root, mutation.journal);
-    defer gpa.free(numbers);
+pub const RemovalResult = struct {
+    removed: usize,
+    skipped_pinned: usize,
+};
+
+/// Removes an already resolved, sorted, unique set of current-journal entry
+/// numbers as one operation. Interactive frontends receive the skip count
+/// instead of writing diagnostics over their screen.
+pub fn removeInteractionNumbers(
+    gpa: std.mem.Allocator,
+    io: Io,
+    home: ?[]const u8,
+    numbers: []const u32,
+    force: bool,
+) !RemovalResult {
+    var mutation = try context.openCurrentMutation(gpa, io, home, .exclusive);
+    defer mutation.deinit(io);
+    return removeNumbers(gpa, io, &mutation, numbers, force);
+}
+
+fn removeNumbers(
+    gpa: std.mem.Allocator,
+    io: Io,
+    mutation: *context.Mutation,
+    numbers: []const u32,
+    force: bool,
+) !RemovalResult {
     if (numbers.len == 0) return error.NoSuchInteraction;
-
-    // The highest directory is the running removal command in normal use, or
-    // an unfinished boundary left by the last writer. Validate this before
-    // staging any directory so a protected range cannot partially apply.
-    const highest = numbers[numbers.len - 1];
-    if (range.contains(highest)) return error.CurrentInteraction;
-
-    var selected: usize = 0;
-    for (numbers) |number| {
-        if (range.contains(number)) selected += 1;
+    const highest = try store.highestNumber(gpa, io, mutation.root, mutation.journal) orelse
+        return error.NoSuchInteraction;
+    for (numbers, 0..) |number, index| {
+        if (number >= highest) return error.CurrentInteraction;
+        if (!store.interactionExists(io, mutation.root, mutation.journal, number)) return error.NoSuchInteraction;
+        if (index != 0 and numbers[index - 1] >= number) return error.BadArguments;
     }
-    if (selected == 0) return error.NoSuchInteraction;
 
     var read_metadata = try annotations.openRead(gpa, io, mutation.root, mutation.journal);
     defer read_metadata.deinit(gpa);
@@ -217,11 +242,10 @@ pub fn removeInteractionRange(
         for (staged.items) |item| gpa.free(item.path);
         staged.deinit(gpa);
     }
-    try staged.ensureTotalCapacity(gpa, selected);
+    try staged.ensureTotalCapacity(gpa, numbers.len);
 
     var skipped_pinned: usize = 0;
     for (numbers) |number| {
-        if (!range.contains(number)) continue;
         if (!force and try read_metadata.isPinned(number)) {
             skipped_pinned += 1;
             continue;
@@ -239,11 +263,14 @@ pub fn removeInteractionRange(
         try transaction.commit();
     }
     for (staged.items) |item| try store.finishStagedRemoval(io, mutation.root, item.path);
-    if (skipped_pinned != 0) {
-        context.note("tj: skipped {d} pinned {s}; use --force to remove {s}\n", .{
-            skipped_pinned,
-            if (skipped_pinned == 1) "entry" else "entries",
-            if (skipped_pinned == 1) "it" else "them",
-        });
-    }
+    return .{ .removed = staged.items.len, .skipped_pinned = skipped_pinned };
+}
+
+fn noteSkippedPins(skipped_pinned: usize) void {
+    if (skipped_pinned == 0) return;
+    context.note("tj: skipped {d} pinned {s}; use --force to remove {s}\n", .{
+        skipped_pinned,
+        if (skipped_pinned == 1) "entry" else "entries",
+        if (skipped_pinned == 1) "it" else "them",
+    });
 }

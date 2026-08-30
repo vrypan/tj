@@ -40,6 +40,7 @@ const Effect = enum {
     set_name,
     begin_delete,
     delete,
+    delete_unpinned,
     open_detail,
     close_detail,
 };
@@ -59,6 +60,9 @@ const Model = struct {
     /// entry was removed from the visible index in place.
     numbers: []u32 = &.{},
     count: usize = 0,
+    selected: std.DynamicBitSetUnmanaged = .{},
+    range_base: std.DynamicBitSetUnmanaged = .{},
+    range_anchor: ?usize = null,
     cursor: usize = 0,
     scroll: usize = 0,
     size: zooi.Size = .{ .rows = 24, .cols = 80 },
@@ -67,7 +71,7 @@ const Model = struct {
     input_len: usize = 0,
     status_buf: [256]u8 = undefined,
     status_len: usize = 0,
-    delete_pinned: bool = false,
+    delete_pinned_count: usize = 0,
     detail: ?Detail = null,
     detail_scroll: usize = 0,
     detail_line_count: usize = 0,
@@ -75,6 +79,8 @@ const Model = struct {
 
     fn deinit(self: *Model, gpa: std.mem.Allocator) void {
         if (self.detail) |*detail| detail.deinit(gpa);
+        self.selected.deinit(gpa);
+        self.range_base.deinit(gpa);
         gpa.free(self.numbers);
         self.* = undefined;
     }
@@ -86,6 +92,60 @@ const Model = struct {
     fn currentNumber(self: *const Model) ?u32 {
         if (self.count == 0) return null;
         return self.numbers[self.cursor];
+    }
+
+    fn selectedCount(self: *const Model) usize {
+        return self.selected.count();
+    }
+
+    fn isSelected(self: *const Model, index: usize) bool {
+        return index < self.selected.capacity() and self.selected.isSet(index);
+    }
+
+    fn toggleCurrentSelection(self: *Model) void {
+        if (self.count == 0) return;
+        self.selected.toggle(self.cursor);
+        self.setStatus("{d} selected", .{self.selectedCount()});
+    }
+
+    fn extendSelection(self: *Model, delta: isize) void {
+        if (self.count == 0) return;
+        if (self.range_anchor == null) {
+            self.range_anchor = self.cursor;
+            self.range_base.unsetAll();
+            self.range_base.setUnion(self.selected);
+        }
+        self.selected.unsetAll();
+        self.selected.setUnion(self.range_base);
+        self.moveCursor(delta);
+        const anchor = self.range_anchor.?;
+        const first = @min(anchor, self.cursor);
+        const last = @max(anchor, self.cursor);
+        self.selected.setRangeValue(.{ .start = first, .end = last + 1 }, true);
+        self.setStatus("{d} selected", .{self.selectedCount()});
+    }
+
+    fn clearSelection(self: *Model) void {
+        self.selected.unsetAll();
+        self.range_anchor = null;
+        self.setStatus("selection cleared", .{});
+    }
+
+    fn actionNumbers(self: *const Model, gpa: std.mem.Allocator) ![]u32 {
+        const selected_count = self.selectedCount();
+        const current = if (selected_count == 0) self.currentNumber() orelse return error.NoSuchInteraction else null;
+        const result = try gpa.alloc(u32, if (selected_count == 0) 1 else selected_count);
+        if (selected_count == 0) {
+            result[0] = current.?;
+            return result;
+        }
+        var out: usize = 0;
+        for (self.visibleNumbers(), 0..) |number, index| {
+            if (!self.selected.isSet(index)) continue;
+            result[out] = number;
+            out += 1;
+        }
+        return result;
     }
 
     fn listRows(self: *const Model) usize {
@@ -143,21 +203,41 @@ const Model = struct {
         journal: []const u8,
     ) !void {
         const previous = self.currentNumber();
+        const old_numbers = self.visibleNumbers();
         var root = try store.openRoot(io, home);
         defer root.close(io);
         const numbers = try store.listNumbers(gpa, io, root, journal);
+        errdefer gpa.free(numbers);
 
-        gpa.free(self.numbers);
-        self.numbers = numbers;
-        self.count = 0;
+        var new_count: usize = 0;
         const active = context.activeInteraction();
         for (numbers) |number| {
             if (active) |entry| {
                 if (std.mem.eql(u8, entry.journal, journal) and entry.number == number) continue;
             }
-            self.numbers[self.count] = number;
-            self.count += 1;
+            numbers[new_count] = number;
+            new_count += 1;
         }
+        var new_selected = try std.DynamicBitSetUnmanaged.initEmpty(gpa, new_count);
+        errdefer new_selected.deinit(gpa);
+        var new_range_base = try std.DynamicBitSetUnmanaged.initEmpty(gpa, new_count);
+        errdefer new_range_base.deinit(gpa);
+        var old_index: usize = 0;
+        for (numbers[0..new_count], 0..) |number, new_index| {
+            while (old_index < old_numbers.len and old_numbers[old_index] < number) old_index += 1;
+            if (old_index < old_numbers.len and old_numbers[old_index] == number and self.isSelected(old_index)) {
+                new_selected.set(new_index);
+            }
+        }
+
+        gpa.free(self.numbers);
+        self.selected.deinit(gpa);
+        self.range_base.deinit(gpa);
+        self.numbers = numbers;
+        self.count = new_count;
+        self.selected = new_selected;
+        self.range_base = new_range_base;
+        self.range_anchor = null;
 
         if (self.count == 0) {
             self.cursor = 0;
@@ -279,14 +359,18 @@ fn normalKey(model: *Model, key: zooi.Key) Effect {
         model.quit = true;
         return .quit;
     }
+    if (key != .shift_up and key != .shift_down) model.range_anchor = null;
     const page = @max(model.listRows(), 1);
     switch (key) {
         .up => model.moveCursor(-1),
         .down => model.moveCursor(1),
+        .shift_up => model.extendSelection(-1),
+        .shift_down => model.extendSelection(1),
         .page_up => model.moveCursor(-@as(isize, @intCast(page))),
         .page_down => model.moveCursor(@intCast(page)),
         .home => model.setCursor(0),
         .end => if (model.count != 0) model.setCursor(model.count - 1),
+        .escape => model.clearSelection(),
         .character => |codepoint| switch (codepoint) {
             'k' => model.moveCursor(-1),
             'j' => model.moveCursor(1),
@@ -298,6 +382,7 @@ fn normalKey(model: *Model, key: zooi.Key) Effect {
             },
             'r' => return .refresh,
             'p' => if (model.count != 0) return .toggle_pin,
+            ' ' => if (model.count != 0) model.toggleCurrentSelection(),
             't' => if (model.count != 0) {
                 model.clearInput();
                 model.clearStatus();
@@ -353,12 +438,28 @@ fn deleteConfirmKey(model: *Model, key: zooi.Key) Effect {
         model.quit = true;
         return .quit;
     }
-    model.mode = .normal;
     switch (key) {
-        .character => |codepoint| if (codepoint == 'y' or codepoint == 'Y') return .delete,
+        .character => |codepoint| switch (codepoint) {
+            'y', 'Y' => {
+                model.mode = .normal;
+                return .delete;
+            },
+            'n', 'N' => {
+                model.mode = .normal;
+                return .delete_unpinned;
+            },
+            else => {},
+        },
+        .enter => {
+            model.mode = .normal;
+            return .delete_unpinned;
+        },
+        .escape => {
+            model.mode = .normal;
+            model.setStatus("delete cancelled", .{});
+        },
         else => {},
     }
-    model.setStatus("delete cancelled", .{});
     return .none;
 }
 
@@ -417,25 +518,29 @@ fn executeEffect(
             model.mode = .name;
         },
         .toggle_pin => {
-            const number = model.currentNumber() orelse return;
+            const numbers = try model.actionNumbers(gpa);
+            defer gpa.free(numbers);
             var root = try store.openRoot(io, home);
             defer root.close(io);
             var metadata = try annotations.openRead(gpa, io, root, journal);
             defer metadata.deinit(gpa);
-            const pinned = try metadata.isPinned(number);
-            var ref_buf: [24]u8 = undefined;
-            const ref = try std.fmt.bufPrint(&ref_buf, "@{d}", .{number});
-            try cmd_annotate.updatePin(gpa, io, home, ref, !pinned);
-            model.setStatus("entry {d} {s}", .{ number, if (pinned) "unpinned" else "pinned" });
+            var all_pinned = true;
+            for (numbers) |number| all_pinned = all_pinned and try metadata.isPinned(number);
+            try cmd_annotate.updatePinNumbers(gpa, io, home, numbers, !all_pinned);
+            model.setStatus("{d} {s} {s}", .{
+                numbers.len,
+                if (numbers.len == 1) "entry" else "entries",
+                if (all_pinned) "unpinned" else "pinned",
+            });
         },
         .add_tag, .remove_tag => {
-            const number = model.currentNumber() orelse return;
+            const numbers = try model.actionNumbers(gpa);
+            defer gpa.free(numbers);
             const tag = model.inputText();
-            var ref_buf: [24]u8 = undefined;
-            const ref = try std.fmt.bufPrint(&ref_buf, "@{d}", .{number});
-            try cmd_annotate.updateTags(gpa, io, home, ref, &.{tag}, effect == .remove_tag);
-            model.setStatus("entry {d} {s} #{s}", .{
-                number,
+            try cmd_annotate.updateTagNumbers(gpa, io, home, numbers, &.{tag}, effect == .remove_tag);
+            model.setStatus("{d} {s} {s} #{s}", .{
+                numbers.len,
+                if (numbers.len == 1) "entry" else "entries",
                 if (effect == .remove_tag) "removed" else "tagged",
                 tag,
             });
@@ -453,26 +558,24 @@ fn executeEffect(
             }
         },
         .begin_delete => {
-            const number = model.currentNumber() orelse return;
+            const numbers = try model.actionNumbers(gpa);
+            defer gpa.free(numbers);
             var root = try store.openRoot(io, home);
             defer root.close(io);
             var metadata = try annotations.openRead(gpa, io, root, journal);
             defer metadata.deinit(gpa);
-            model.delete_pinned = try metadata.isPinned(number);
+            var pinned: usize = 0;
+            for (numbers) |number| pinned += @intFromBool(try metadata.isPinned(number));
+            model.delete_pinned_count = pinned;
             model.clearStatus();
-            model.mode = .delete_confirm;
+            if (pinned == 0) {
+                try deleteTargets(gpa, io, home, journal, model, false);
+            } else {
+                model.mode = .delete_confirm;
+            }
         },
-        .delete => {
-            const number = model.currentNumber() orelse return;
-            const old_cursor = model.cursor;
-            var ref_buf: [24]u8 = undefined;
-            const ref = try std.fmt.bufPrint(&ref_buf, "@{d}", .{number});
-            try cmd_remove.removeInteraction(gpa, io, home, ref, model.delete_pinned);
-            try model.reload(gpa, io, home, journal);
-            if (model.count != 0) model.setCursor(@min(old_cursor, model.count - 1));
-            model.setStatus("deleted entry {d}", .{number});
-            model.delete_pinned = false;
-        },
+        .delete => try deleteTargets(gpa, io, home, journal, model, true),
+        .delete_unpinned => try deleteTargets(gpa, io, home, journal, model, false),
         .open_detail => {
             const number = model.currentNumber() orelse return;
             if (model.detail) |*detail| detail.deinit(gpa);
@@ -488,6 +591,33 @@ fn executeEffect(
             model.detail_line_count = 0;
             model.mode = .normal;
         },
+    }
+}
+
+fn deleteTargets(
+    gpa: std.mem.Allocator,
+    io: Io,
+    home: ?[]const u8,
+    journal: []const u8,
+    model: *Model,
+    include_pinned: bool,
+) !void {
+    const numbers = try model.actionNumbers(gpa);
+    defer gpa.free(numbers);
+    const old_cursor = model.cursor;
+    const result = try cmd_remove.removeInteractionNumbers(gpa, io, home, numbers, include_pinned);
+    try model.reload(gpa, io, home, journal);
+    if (model.count != 0) model.setCursor(@min(old_cursor, model.count - 1));
+    model.delete_pinned_count = 0;
+    if (result.removed != 0 and result.skipped_pinned != 0) {
+        model.setStatus("deleted {d}; kept {d} pinned", .{ result.removed, result.skipped_pinned });
+    } else if (result.removed != 0) {
+        model.setStatus("deleted {d} {s}", .{ result.removed, if (result.removed == 1) "entry" else "entries" });
+    } else {
+        model.setStatus("kept {d} pinned {s}", .{
+            result.skipped_pinned,
+            if (result.skipped_pinned == 1) "entry" else "entries",
+        });
     }
 }
 
@@ -638,6 +768,8 @@ fn readPlainOutput(
 
 const header_style: zooi.Style = .{ .reverse = true, .bold = true };
 const cursor_style: zooi.Style = .{ .reverse = true };
+const selected_style: zooi.Style = .{ .fg = .{ .ansi = 6 } };
+const focused_selected_style: zooi.Style = .{ .reverse = true, .fg = .{ .ansi = 6 } };
 const number_style: zooi.Style = .{ .fg = .{ .ansi = 3 } };
 const metadata_style: zooi.Style = .{ .fg = .{ .ansi = 2 } };
 const failure_style: zooi.Style = .{ .fg = .{ .ansi = 1 } };
@@ -694,10 +826,18 @@ fn render(
         defer if (annotation) |*value| value.deinit(gpa);
 
         const line: u16 = @intCast(row + 1);
-        const selected = index == model.cursor;
-        if (selected) fillRow(screen, line, model.size.cols);
+        const focused = index == model.cursor;
+        const picked = model.isSelected(index);
+        const base_style: zooi.Style = if (focused and picked)
+            focused_selected_style
+        else if (focused)
+            cursor_style
+        else if (picked)
+            selected_style
+        else
+            .{};
+        if (focused) fillRow(screen, line, model.size.cols, base_style);
         screen.move(line, 0);
-        const base_style: zooi.Style = if (selected) cursor_style else .{};
 
         const pinned = if (annotation) |value| value.pinned else false;
         const has_name = if (annotation) |value| value.name != null else false;
@@ -706,19 +846,19 @@ fn render(
         screen.writeStyled(if (pinned) "*" else " ", base_style);
         screen.writeStyled(if (has_name) "@" else " ", base_style);
         screen.writeStyled(if (has_tags) "#" else " ", base_style);
-        screen.writeStyled(if (failed) "!" else " ", if (selected) base_style else if (failed) failure_style else base_style);
+        screen.writeStyled(if (failed) "!" else " ", if (focused) base_style else if (failed) failure_style else base_style);
         screen.writeStyled(" ", base_style);
 
         var number_buf: [24]u8 = undefined;
         const number_text = try std.fmt.bufPrint(&number_buf, "{d}", .{number});
         var padding: [24]u8 = @splat(' ');
         screen.writeStyled(padding[0 .. number_width - number_text.len], base_style);
-        screen.writeStyled(number_text, if (selected) base_style else number_style);
+        screen.writeStyled(number_text, if (focused or picked) base_style else number_style);
         screen.writeStyled(" ", base_style);
 
         var size_buf: [24]u8 = undefined;
         const size_text = report.formatEntrySize(info, &size_buf);
-        screen.writeStyled(size_text, if (selected) base_style else metadata_style);
+        screen.writeStyled(size_text, if (focused) base_style else metadata_style);
         screen.writeStyled(" ", base_style);
 
         const command = try report.sanitizeDisplayText(gpa, context.firstLine(info.command));
@@ -727,17 +867,17 @@ fn render(
         if (annotation) |value| {
             if (value.name) |name| {
                 screen.writeStyled(" @", base_style);
-                screen.writeStyled(name, if (selected) base_style else metadata_style);
+                screen.writeStyled(name, if (focused) base_style else metadata_style);
             }
             for (value.tags.items) |tag| {
                 screen.writeStyled(" #", base_style);
-                screen.writeStyled(tag, if (selected) base_style else metadata_style);
+                screen.writeStyled(tag, if (focused) base_style else metadata_style);
             }
         }
         if (failed) {
             var rc_buf: [8]u8 = undefined;
             const rc = try std.fmt.bufPrint(&rc_buf, " !{d}", .{info.exit_code.?});
-            screen.writeStyled(rc, if (selected) base_style else failure_style);
+            screen.writeStyled(rc, if (focused) base_style else failure_style);
         }
     }
 
@@ -803,20 +943,23 @@ fn wrapDocument(gpa: std.mem.Allocator, text: []const u8, columns: u16) !std.Arr
     return result;
 }
 
-fn fillRow(screen: *zooi.Screen, row: u16, columns: u16) void {
+fn fillRow(screen: *zooi.Screen, row: u16, columns: u16, style: zooi.Style) void {
     screen.move(row, 0);
     var spaces: [256]u8 = @splat(' ');
     var remaining: usize = columns;
     while (remaining != 0) {
         const count = @min(remaining, spaces.len);
-        screen.writeStyled(spaces[0..count], cursor_style);
+        screen.writeStyled(spaces[0..count], style);
         remaining -= count;
     }
 }
 
 fn renderHeader(journal: []const u8, model: *const Model, screen: *zooi.Screen) void {
     var buffer: [160]u8 = undefined;
-    const text = std.fmt.bufPrint(&buffer, " tj  {s}  {d} entries ", .{ journal, model.count }) catch " tj ";
+    const text = if (model.selectedCount() == 0)
+        std.fmt.bufPrint(&buffer, " tj  {s}  {d} entries ", .{ journal, model.count }) catch " tj "
+    else
+        std.fmt.bufPrint(&buffer, " tj  {s}  {d} entries  {d} selected ", .{ journal, model.count, model.selectedCount() }) catch " tj ";
     screen.move(0, 0);
     screen.writeStyled(text, header_style);
     var spaces: [256]u8 = @splat(' ');
@@ -847,17 +990,16 @@ fn renderFooter(model: *const Model, screen: *zooi.Screen) void {
             if (model.status_len != 0) {
                 screen.writeStyled(model.status(), .{ .fg = .{ .ansi = 3 } });
             } else {
-                screen.writeStyled("↑↓/jk move  ⏎ details  p pin  t/T tag  n name  d delete  r refresh  q quit", footer_style);
+                screen.writeStyled("space toggle  shift+↑↓ range  esc clear  ⏎ details  p pin  t/T tag  n name  d delete  q quit", footer_style);
             }
         },
         .delete_confirm => {
-            const number = model.currentNumber() orelse return;
             var buffer: [128]u8 = undefined;
-            const text = if (model.delete_pinned)
-                std.fmt.bufPrint(&buffer, "Entry {d} is pinned. Delete it anyway? [y/N] ", .{number}) catch "Delete pinned entry? [y/N] "
+            const text = if (model.delete_pinned_count == 1)
+                std.fmt.bufPrint(&buffer, "Delete pinned entry too? [y/N] ", .{}) catch "Delete pinned entry too? [y/N] "
             else
-                std.fmt.bufPrint(&buffer, "Delete entry {d}? [y/N] ", .{number}) catch "Delete entry? [y/N] ";
-            screen.writeStyled(text, .{ .bold = true, .fg = if (model.delete_pinned) .{ .ansi = 1 } else null });
+                std.fmt.bufPrint(&buffer, "Delete {d} pinned entries too? [y/N] ", .{model.delete_pinned_count}) catch "Delete pinned entries too? [y/N] ";
+            screen.writeStyled(text, .{ .bold = true, .fg = .{ .ansi = 1 } });
         },
         .detail => unreachable,
     }
@@ -912,13 +1054,55 @@ test "browser prompt maps add remove and empty-name removal" {
 
 test "browser deletion requires explicit confirmation" {
     var model: Model = .{ .mode = .delete_confirm };
-    try std.testing.expectEqual(Effect.none, deleteConfirmKey(&model, .{ .character = 'n' }));
+    try std.testing.expectEqual(Effect.delete_unpinned, deleteConfirmKey(&model, .{ .character = 'n' }));
     try std.testing.expectEqual(Mode.normal, model.mode);
-    try std.testing.expectEqualStrings("delete cancelled", model.status());
 
     model.mode = .delete_confirm;
     try std.testing.expectEqual(Effect.delete, deleteConfirmKey(&model, .{ .character = 'Y' }));
     try std.testing.expectEqual(Mode.normal, model.mode);
+
+    model.mode = .delete_confirm;
+    try std.testing.expectEqual(Effect.none, deleteConfirmKey(&model, .escape));
+    try std.testing.expectEqualStrings("delete cancelled", model.status());
+}
+
+test "browser selects individual entries and inclusive ranges" {
+    const gpa = std.testing.allocator;
+    var model: Model = .{
+        .numbers = try gpa.dupe(u32, &.{ 2, 4, 9, 10 }),
+        .count = 4,
+        .selected = try std.DynamicBitSetUnmanaged.initEmpty(gpa, 4),
+        .range_base = try std.DynamicBitSetUnmanaged.initEmpty(gpa, 4),
+    };
+    defer model.deinit(gpa);
+
+    model.setCursor(1);
+    model.toggleCurrentSelection();
+    try std.testing.expect(model.isSelected(1));
+    model.setCursor(3);
+    model.toggleCurrentSelection();
+    try std.testing.expectEqual(@as(usize, 2), model.selectedCount());
+
+    model.clearSelection();
+    model.setCursor(3);
+    model.extendSelection(-1);
+    model.extendSelection(-1);
+    try std.testing.expectEqual(@as(usize, 3), model.selectedCount());
+    try std.testing.expect(!model.isSelected(0));
+    model.extendSelection(1);
+    try std.testing.expectEqual(@as(usize, 2), model.selectedCount());
+    try std.testing.expect(model.isSelected(2));
+    try std.testing.expect(model.isSelected(3));
+
+    const targets = try model.actionNumbers(gpa);
+    defer gpa.free(targets);
+    try std.testing.expectEqualSlices(u32, &.{ 9, 10 }, targets);
+
+    try std.testing.expectEqual(Effect.none, normalKey(&model, .escape));
+    try std.testing.expectEqual(@as(usize, 0), model.selectedCount());
+    const focused = try model.actionNumbers(gpa);
+    defer gpa.free(focused);
+    try std.testing.expectEqualSlices(u32, &.{10}, focused);
 }
 
 test "detail document wrapping preserves explicit lines" {
