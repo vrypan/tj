@@ -351,6 +351,65 @@ test "a new journal that could not record but said why is kept" {
     try std.testing.expectEqual(@as(usize, 1), try scratch.journals());
 }
 
+test "bare command boundaries record empty entries and one journal warning" {
+    const gpa = std.testing.allocator;
+    const io = std.testing.io;
+
+    var scratch = try support.Scratch.open();
+    defer scratch.close();
+
+    var result = try support.runTjctl(gpa, &.{
+        "--home",
+        scratch.path(),
+        "new",
+        "bare-boundaries",
+        "--",
+        "/bin/sh",
+        "-c",
+        "printf '\\033]133;C\\033\\\\first\\n\\033]133;D;0\\033\\\\\\033]133;C\\033\\\\second\\n\\033]133;D;0\\033\\\\'",
+    }, 24, 80);
+    defer result.out.deinit(gpa);
+    try std.testing.expectEqual(@as(u8, 0), result.code);
+
+    var journal = try scratch.tmp.dir.openDir(io, "bare-boundaries", .{});
+    defer journal.close(io);
+    const first_cmd = try journal.readFileAlloc(io, "1/cmd", gpa, .limited(1024));
+    defer gpa.free(first_cmd);
+    const second_cmd = try journal.readFileAlloc(io, "2/cmd", gpa, .limited(1024));
+    defer gpa.free(second_cmd);
+    try std.testing.expectEqualStrings("", first_cmd);
+    try std.testing.expectEqualStrings("", second_cmd);
+
+    const log = try journal.readFileAlloc(io, "log", gpa, .limited(4096));
+    defer gpa.free(log);
+    try std.testing.expectEqualStrings("command boundary received without a TJ command line\n", log);
+}
+
+test "an explicit empty command line is not a missing command marker" {
+    const gpa = std.testing.allocator;
+    const io = std.testing.io;
+
+    var scratch = try support.Scratch.open();
+    defer scratch.close();
+
+    var result = try support.runTjctl(gpa, &.{
+        "--home",
+        scratch.path(),
+        "new",
+        "empty-command",
+        "--",
+        "/bin/sh",
+        "-c",
+        "printf '\\033]5107;tj;cmd;\\033\\\\\\033]133;C\\033\\\\output\\n\\033]133;D;0\\033\\\\'",
+    }, 24, 80);
+    defer result.out.deinit(gpa);
+    try std.testing.expectEqual(@as(u8, 0), result.code);
+
+    var journal = try scratch.tmp.dir.openDir(io, "empty-command", .{});
+    defer journal.close(io);
+    try std.testing.expectError(error.FileNotFound, journal.openFile(io, "log", .{}));
+}
+
 test "use rejects missing ambiguous and full journals before exec" {
     const gpa = std.testing.allocator;
     var scratch = try support.Scratch.open();

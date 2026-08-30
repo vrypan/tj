@@ -321,6 +321,8 @@ const Recorder = struct {
     /// so it waits here until the interaction actually opens.
     command: [scanner.max_osc]u8 = undefined,
     command_len: usize = 0,
+    has_command: bool = false,
+    warned_missing_command: bool = false,
     /// Executable shell text after canonical TJ named-directory tokens were
     /// resolved to paths for metadata, when the integration reports any.
     expanded: [scanner.max_osc]u8 = undefined,
@@ -357,6 +359,7 @@ const Recorder = struct {
                 const n = @min(line.len, self.command.len);
                 @memcpy(self.command[0..n], line[0..n]);
                 self.command_len = n;
+                self.has_command = true;
             },
             .command_expanded => |line| {
                 const n = @min(line.len, self.expanded.len);
@@ -371,12 +374,17 @@ const Recorder = struct {
                 self.has_cwd = true;
             },
             .command_run => {
+                if (!self.has_command and !self.warned_missing_command) {
+                    self.store.warn("command boundary received without a TJ command line", .{});
+                    self.warned_missing_command = true;
+                }
                 self.store.begin(
                     self.command[0..self.command_len],
                     if (self.has_expanded) self.expanded[0..self.expanded_len] else null,
                     if (self.has_cwd) self.cwd[0..self.cwd_len] else null,
                 );
                 self.command_len = 0;
+                self.has_command = false;
                 self.expanded_len = 0;
                 self.has_expanded = false;
                 self.cwd_len = 0;

@@ -459,6 +459,11 @@ At `preexec`, the plugin also base64-encodes the current logical `$PWD` in
 decoded bytes to the entry's `cwd` resource when the following `OSC 133;C`
 opens the entry. Continuing a journal does not restore this directory.
 
+If `OSC 133;C` arrives without a preceding TJ command-line marker, the
+recorder still opens an entry with an empty `cmd` and writes one journal
+warning during that writer run. An explicit marker containing an empty command
+line is present and does not trigger the warning.
+
 The pending prompt is replaced if zsh draws another prompt before a command
 starts, and an unfinished prompt is discarded at the command boundary. The B
 marker itself is not stored in `prompt`. Prompt capture is bounded at 64 KiB;

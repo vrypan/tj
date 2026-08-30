@@ -4,26 +4,6 @@ Things deliberately left undone, with enough context to pick up cold.
 
 ---
 
-## Log a warning when a boundary arrives without a command line
-
-A `133;C` with no preceding `cmd` sequence still opens an entry with an empty
-`cmd`, but nothing is logged.
-
-Verified: a zsh emitting only OSC 133 - somebody else's shell integration,
-with no tj plugin - records entries with `cmd` empty and no `log` file
-written at all.
-
-That is precisely the case where the log is the only signal that tj is
-running under an integration it does not own, so it is worth having.
-
-- Where: `proxy.zig`, `Recorder.event`, the `.command_run` branch. When
-  `command_len == 0`, call `store.warn`.
-- Watch out for: the warning must not fire once per command in a shell that
-  legitimately has no tj plugin, or the log becomes the largest file in the
-  journal. Once per journal is enough.
-
----
-
 ## Larger, and deliberately deferred
 
 ### Retention
