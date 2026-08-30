@@ -4,12 +4,13 @@ const manifest = @import("build.zig.zon");
 pub fn build(b: *std.Build) void {
     const target = b.standardTargetOptions(.{});
     const optimize = b.standardOptimizeOption(.{});
+    const strip = b.option(bool, "strip", "Omit debug information from installed binaries") orelse false;
     const zecli = b.dependency("zecli", .{});
     const zooi = b.dependency("zooi", .{});
 
-    const exe_mod = applicationModule(b, zecli, "src/main.zig", target, optimize);
+    const exe_mod = applicationModule(b, zecli, "src/main.zig", target, optimize, strip);
     exe_mod.addImport("zooi", zooi.module("zooi"));
-    const tjctl_mod = applicationModule(b, zecli, "src/tjctl_main.zig", target, optimize);
+    const tjctl_mod = applicationModule(b, zecli, "src/tjctl_main.zig", target, optimize, strip);
 
     const version_options = b.addOptions();
     version_options.addOption([]const u8, "version", manifest.version);
@@ -140,11 +141,13 @@ fn applicationModule(
     source: []const u8,
     target: std.Build.ResolvedTarget,
     optimize: std.builtin.OptimizeMode,
+    strip: bool,
 ) *std.Build.Module {
     const module = b.createModule(.{
         .root_source_file = b.path(source),
         .target = target,
         .optimize = optimize,
+        .strip = strip,
         .link_libc = true,
     });
     module.addImport("zecli", zecli.module("cli"));

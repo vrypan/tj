@@ -10,7 +10,17 @@ Makes terminal entries persistent, addressable, and reusable. See
 
 ## Install
 
-Building needs Zig 0.16.0. Running tj needs nothing.
+Prebuilt release archives contain one installation tree. Download the archive
+for your platform and extract it under `~/.local`:
+
+```sh
+archive=tj-0.3.1-x86_64-linux-gnu.tar.gz # choose your downloaded archive
+mkdir -p ~/.local
+tar -xzf "$archive" -C ~/.local --strip-components=1
+```
+
+Ensure `~/.local/bin` is on your `$PATH`. To build from source instead, install
+Zig 0.16.0 and run:
 
 ```sh
 git clone <this repo> ~/src/tj
@@ -967,7 +977,7 @@ Cross-compiles with nothing installed on the host:
 
 ```sh
 make list         # the target list
-make -j6 all      # every target -> dist/<target>/bin/{tj,tjctl}
+make -j6 all      # every target -> dist/tj-<version>-<target>/bin/{tj,tjctl}
 make package      # complete install trees as dist/tj-<version>-<target>.tar.gz
 ```
 
@@ -982,11 +992,15 @@ gh run watch RUN_ID --exit-status
 
 The release workflow repeats the checks, builds all six archives through
 `make package`, generates `SHA256SUMS`, and publishes the tag and GitHub release
-with generated notes. It refuses versions whose tag already exists.
+with installation instructions and generated notes. It refuses versions whose
+tag already exists. Each archive has one matching `tj-<version>-<target>` root
+directory; use `--strip-components=1` to extract its `bin` and `share` trees
+directly beneath an installation prefix.
 
 Targets: `{aarch64,x86_64}` × `{macos, linux-musl, linux-gnu}`. The musl
-builds are static. Override `OPTIMIZE` (default `ReleaseSafe`) or `ZIG`
-to change how they are built.
+builds are static. Release packages default to `ReleaseSafe` with debug
+information stripped. Override `OPTIMIZE`, `STRIP`, or `ZIG` to change how
+they are built.
 
 The build fetches the exactly pinned, std-only Zecli 0.2.2 and Zooi 0.1.3
 source packages on first use. Zecli provides CLI parsing and generated

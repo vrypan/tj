@@ -62,7 +62,7 @@ jobs:
         run: make check
 
       - name: Build release archives
-        run: make -j6 package
+        run: make -j6 package OPTIMIZE=ReleaseSafe STRIP=true
 
       - name: Generate checksums
         shell: bash
@@ -117,6 +117,24 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
           TAG: ${{ needs.build.outputs.tag }}
+          INSTALL_NOTES: |
+            ## Install
+
+            Download the archive for your platform, then install it under `~/.local`:
+
+            ```sh
+            archive=tj-${{ needs.build.outputs.version }}-x86_64-linux-gnu.tar.gz # choose your downloaded archive
+            mkdir -p ~/.local
+            tar -xzf "$archive" -C ~/.local --strip-components=1
+            ```
+
+            Ensure `~/.local/bin` is on `PATH`. For zsh recording and reference expansion, add this to `~/.zshrc`:
+
+            ```sh
+            source ~/.local/share/tj/tj.plugin.zsh
+            ```
+
+            See the [README](https://github.com/vrypan/tj#install) for completion setup and source installation.
         shell: bash
         run: |
           set -euo pipefail
@@ -126,6 +144,7 @@ jobs:
             --target "$GITHUB_SHA" \
             --title "$TAG" \
             --generate-notes \
+            --notes "$INSTALL_NOTES" \
             --fail-on-no-commits \
             dist/*.tar.gz \
             dist/SHA256SUMS

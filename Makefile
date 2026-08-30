@@ -6,6 +6,7 @@
 
 ZIG      ?= zig
 OPTIMIZE ?= ReleaseSafe
+STRIP    ?= true
 DIST     ?= dist
 VERSION  := $(shell sed -n 's/.*\.version = "\([^"]*\)".*/\1/p' build.zig.zon)
 
@@ -53,24 +54,26 @@ all: $(TARGETS)
 # completions never overwrite another target's artifacts.
 $(TARGETS):
 	@echo "==> $@"
-	$(ZIG) build -Dtarget=$@ -Doptimize=$(OPTIMIZE) --prefix $(DIST)/$@
+	$(ZIG) build -Dtarget=$@ -Doptimize=$(OPTIMIZE) -Dstrip=$(STRIP) --prefix $(DIST)/tj-$(VERSION)-$@
 
 package: all
 	@for t in $(TARGETS); do \
-		test -x $(DIST)/$$t/bin/tj || exit 1; \
-		test -x $(DIST)/$$t/bin/tjctl || exit 1; \
-		test -x $(DIST)/$$t/bin/tj-fence || exit 1; \
-		test -x $(DIST)/$$t/bin/tj-grep || exit 1; \
-		test -x $(DIST)/$$t/bin/tj-tape || exit 1; \
-		test -r $(DIST)/$$t/share/tj/tj.plugin.zsh || exit 1; \
-		test -r $(DIST)/$$t/share/bash-completion/completions/tj || exit 1; \
-		test -r $(DIST)/$$t/share/bash-completion/completions/tjctl || exit 1; \
-		test -r $(DIST)/$$t/share/zsh/site-functions/_tj || exit 1; \
-		test -r $(DIST)/$$t/share/zsh/site-functions/_tjctl || exit 1; \
-		test -r $(DIST)/$$t/share/fish/vendor_completions.d/tj.fish || exit 1; \
-		test -r $(DIST)/$$t/share/fish/vendor_completions.d/tjctl.fish || exit 1; \
-		tar -czf $(DIST)/tj-$(VERSION)-$$t.tar.gz -C $(DIST)/$$t bin share || exit 1; \
-		echo "$(DIST)/tj-$(VERSION)-$$t.tar.gz"; \
+		root="tj-$(VERSION)-$$t"; \
+		dir="$(DIST)/$$root"; \
+		test -x "$$dir/bin/tj" || exit 1; \
+		test -x "$$dir/bin/tjctl" || exit 1; \
+		test -x "$$dir/bin/tj-fence" || exit 1; \
+		test -x "$$dir/bin/tj-grep" || exit 1; \
+		test -x "$$dir/bin/tj-tape" || exit 1; \
+		test -r "$$dir/share/tj/tj.plugin.zsh" || exit 1; \
+		test -r "$$dir/share/bash-completion/completions/tj" || exit 1; \
+		test -r "$$dir/share/bash-completion/completions/tjctl" || exit 1; \
+		test -r "$$dir/share/zsh/site-functions/_tj" || exit 1; \
+		test -r "$$dir/share/zsh/site-functions/_tjctl" || exit 1; \
+		test -r "$$dir/share/fish/vendor_completions.d/tj.fish" || exit 1; \
+		test -r "$$dir/share/fish/vendor_completions.d/tjctl.fish" || exit 1; \
+		tar -czf "$(DIST)/$$root.tar.gz" -C "$(DIST)" "$$root" || exit 1; \
+		echo "$(DIST)/$$root.tar.gz"; \
 	done
 
 # --- housekeeping -----------------------------------------------------------
