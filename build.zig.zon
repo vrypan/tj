@@ -5,8 +5,8 @@
     .minimum_zig_version = "0.16.0",
     .dependencies = .{
         .zecli = .{
-            .url = "git+https://github.com/vrypan/zecli.git#v0.2.1",
-            .hash = "zecli-0.2.1-j151k_VWAgB0brvSpOyGEtyedqpFkXtykQ-U72cIZRrN",
+            .url = "git+https://github.com/vrypan/zecli.git#v0.2.2",
+            .hash = "zecli-0.2.2-j151k1tuAgCoIYMZsG11x_zDiR0JzKZMUYr84yum9hCj",
         },
     },
     .paths = .{

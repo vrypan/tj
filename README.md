@@ -896,7 +896,7 @@ Targets: `{aarch64,x86_64}` × `{macos, linux-musl, linux-gnu}`. The musl
 builds are static. Override `OPTIMIZE` (default `ReleaseSafe`) or `ZIG`
 to change how they are built.
 
-The build fetches the exactly pinned, std-only Zecli 0.2.1 source package on
+The build fetches the exactly pinned, std-only Zecli 0.2.2 source package on
 first use. Zecli is compiled into `tj`; release binaries remain self-contained
 and have no Zecli runtime dependency.
 

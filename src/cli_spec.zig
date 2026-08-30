@@ -253,37 +253,29 @@ const commands = [_]zecli.CommandSpec{
     },
 };
 
-pub const application = zecli.ApplicationSpec{
-    .name = "tj",
-    .description = "tj - Terminal Journal",
-    .usage = "tj [options] <command>",
-    .flags = &root_flags,
-    .commands = &commands,
-    .extra_help =
-    \\References name previous computations the way paths name files:
-    \\  @42/out             entry 42 of this journal
-    \\  @-/out              the last entry that completed
-    \\  @pgsd.42/out        entry 42 of another journal
-    \\  @build-failure/out  a named entry in this journal
-    \\  @pgsd.build-failure/out  a named entry in another journal
-    \\  ~[@42]/out          canonical zsh form; unquoted @42/out is shorthand
-    \\
-    \\Recording and reference expansion need the shell integration:
-    \\  source /path/to/tj.plugin.zsh   # in ~/.zshrc
-    ++ "\n",
-};
-
-comptime {
+pub const application = application: {
     @setEvalBranchQuota(10_000);
-    zecli.validateApplicationSpec(application) catch |err| {
-        @compileError("invalid TJ command specification: " ++ @errorName(err));
-    };
-}
+    break :application zecli.comptimeValidated(.{
+        .name = "tj",
+        .description = "tj - Terminal Journal",
+        .usage = "tj [options] <command>",
+        .flags = &root_flags,
+        .commands = &commands,
+        .extra_help =
+        \\References name previous computations the way paths name files:
+        \\  @42/out             entry 42 of this journal
+        \\  @-/out              the last entry that completed
+        \\  @pgsd.42/out        entry 42 of another journal
+        \\  @build-failure/out  a named entry in this journal
+        \\  @pgsd.build-failure/out  a named entry in another journal
+        \\  ~[@42]/out          canonical zsh form; unquoted @42/out is shorthand
+        \\
+        \\Recording and reference expansion need the shell integration:
+        \\  source /path/to/tj.plugin.zsh   # in ~/.zshrc
+        ++ "\n",
+    });
+};
 
 pub fn findCommand(name: []const u8) ?zecli.CommandSpec {
     return zecli.findCommand(application, name);
-}
-
-test "the TJ application specification is valid" {
-    try zecli.validateApplicationSpec(application);
 }
