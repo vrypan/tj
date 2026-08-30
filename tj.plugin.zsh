@@ -67,10 +67,15 @@ _tj_emit() {
   printf '\e]%s\e\\' "$1" > /dev/tty 2>/dev/null
 }
 
-_tj_encode() {
-  # Base64 keeps arbitrary command lines - semicolons, newlines, escapes -
-  # from colliding with the sequence framing.
-  print -rn -- "${$(print -rn -- "$1" | base64)//$'\n'/}"
+_tj_encode_context() {
+  emulate -L zsh
+  unsetopt multibyte
+  # One encoded payload keeps cmd, cwd, and optional expanded text from
+  # colliding with the OSC framing without starting base64 for each field.
+  # Byte lengths make arbitrary command text unambiguous; disabling multibyte
+  # locally makes zsh's lengths match the decoded byte slices in Zig.
+  local header="1;${#1};${#2};${3};${#4};"
+  print -rn -- "${$(print -rn -- "${header}${1}${2}${4}" | base64)//$'\n'/}"
 }
 
 _tj_preexec() {
@@ -79,14 +84,15 @@ _tj_preexec() {
   local typed=${_TJ_TYPED:-$1}
   _TJ_TYPED=
 
-  _tj_emit "5107;tj;cmd;$(_tj_encode "$typed")"
-  _tj_emit "5107;tj;cwd;$(_tj_encode "$PWD")"
+  local expanded='' expanded_flag=0
   # preexec runs before filename expansion. $3 is the full executable form
   # (including aliases), but still contains dynamic named directories, so
   # resolve only those known tokens for diagnostic metadata.
   if _tj_expand_canonical_for_metadata "$3"; then
-    _tj_emit "5107;tj;expanded;$(_tj_encode "$_tj_expanded")"
+    expanded=$_tj_expanded
+    expanded_flag=1
   fi
+  _tj_emit "5107;tj;context;$(_tj_encode_context "$typed" "$PWD" "$expanded_flag" "$expanded")"
   _tj_emit "133;C"
 
   (( _tj_count++ ))

@@ -24,10 +24,11 @@ const std = @import("std");
 const esc = 0x1b;
 const bel = 0x07;
 
-/// The largest OSC payload retained for parsing or diagnostics.
-pub const max_osc = 8192;
+/// The largest OSC payload retained for parsing or diagnostics. A context
+/// marker combines three fields which previously had separate envelopes.
+pub const max_osc = 32 * 1024;
 
-const overflow_error = "tj sequence exceeded the 8192-byte limit";
+const overflow_error = "tj sequence exceeded the 32768-byte limit";
 const unterminated_error = "unterminated tj sequence";
 
 const tj_prefix = "5107;tj;";
@@ -41,14 +42,13 @@ pub const Event = union(enum) {
     prompt_start,
     /// `OSC 133;B` - the prompt is drawn and line editing is starting.
     prompt_end,
-    /// `OSC 5107;tj;cmd;<base64>` - the command line as the user typed it.
+    /// The command line as the user typed it, decoded from the context marker.
     command_line: []const u8,
-    /// `OSC 5107;tj;expanded;<base64>` - executable shell text after the zsh
+    /// Executable shell text after the zsh
     /// integration resolved canonical TJ named-directory tokens for metadata.
     /// Only sent when such a token was resolved.
     command_expanded: []const u8,
-    /// `OSC 5107;tj;cwd;<base64>` - the absolute logical working directory at
-    /// the command boundary.
+    /// The absolute logical working directory at the command boundary.
     working_directory: []const u8,
     /// `OSC 133;C` - the command starts running now.
     command_run,
@@ -352,8 +352,10 @@ pub const Scanner = struct {
         }
         const rest = payload[tj_prefix.len..];
 
-        const EncodedKind = enum { command, expanded, cwd };
-        const encoded_kind: ?EncodedKind = if (std.mem.startsWith(u8, rest, "cmd;"))
+        const EncodedKind = enum { context, command, expanded, cwd };
+        const encoded_kind: ?EncodedKind = if (std.mem.startsWith(u8, rest, "context;"))
+            .context
+        else if (std.mem.startsWith(u8, rest, "cmd;"))
             .command
         else if (std.mem.startsWith(u8, rest, "expanded;"))
             .expanded
@@ -363,6 +365,7 @@ pub const Scanner = struct {
             null;
         if (encoded_kind) |kind| {
             const prefix_len = switch (kind) {
+                .context => "context;".len,
                 .command => "cmd;".len,
                 .expanded => "expanded;".len,
                 .cwd => "cwd;".len,
@@ -383,6 +386,7 @@ pub const Scanner = struct {
                 return;
             };
             switch (kind) {
+                .context => emitContext(decoded[0..size], payload, sink),
                 .command => sink.event(.{ .command_line = decoded[0..size] }),
                 .expanded => sink.event(.{ .command_expanded = decoded[0..size] }),
                 .cwd => sink.event(.{ .working_directory = decoded[0..size] }),
@@ -419,6 +423,57 @@ pub const Scanner = struct {
         }
 
         sink.event(.{ .protocol_error = payload });
+    }
+
+    fn emitContext(decoded: []const u8, payload: []const u8, sink: anytype) void {
+        var fields: [5][]const u8 = undefined;
+        var cursor: usize = 0;
+        for (&fields) |*field| {
+            const end = std.mem.indexOfScalar(u8, decoded[cursor..], ';') orelse {
+                sink.event(.{ .protocol_error = payload });
+                return;
+            };
+            field.* = decoded[cursor .. cursor + end];
+            cursor += end + 1;
+        }
+
+        if (!std.mem.eql(u8, fields[0], "1") or
+            (fields[3].len != 1 or (fields[3][0] != '0' and fields[3][0] != '1')))
+        {
+            sink.event(.{ .protocol_error = payload });
+            return;
+        }
+
+        const command_len = std.fmt.parseInt(usize, fields[1], 10) catch {
+            sink.event(.{ .protocol_error = payload });
+            return;
+        };
+        const cwd_len = std.fmt.parseInt(usize, fields[2], 10) catch {
+            sink.event(.{ .protocol_error = payload });
+            return;
+        };
+        const expanded_len = std.fmt.parseInt(usize, fields[4], 10) catch {
+            sink.event(.{ .protocol_error = payload });
+            return;
+        };
+        const cwd_start = command_len;
+        const expanded_start = std.math.add(usize, cwd_start, cwd_len) catch {
+            sink.event(.{ .protocol_error = payload });
+            return;
+        };
+        const expected_len = std.math.add(usize, expanded_start, expanded_len) catch {
+            sink.event(.{ .protocol_error = payload });
+            return;
+        };
+        const body = decoded[cursor..];
+        if (expected_len != body.len or (fields[3][0] == '0' and expanded_len != 0)) {
+            sink.event(.{ .protocol_error = payload });
+            return;
+        }
+
+        sink.event(.{ .command_line = body[0..cwd_start] });
+        sink.event(.{ .working_directory = body[cwd_start..expanded_start] });
+        if (fields[3][0] == '1') sink.event(.{ .command_expanded = body[expanded_start..] });
     }
 
     fn finishPassthrough(self: *Scanner, sink: anytype) void {
@@ -538,6 +593,61 @@ test "working directory sequences are stripped and survive split reads" {
         try std.testing.expectEqualStrings("beforeafter", r.recorded.items);
         try std.testing.expectEqual(@as(usize, 1), r.events.items.len);
         try std.testing.expectEqualStrings("/tmp/work dir", r.events.items[0].working_directory);
+    }
+}
+
+test "one context sequence carries command cwd and optional expansion" {
+    const gpa = std.testing.allocator;
+    const cases = [_]struct {
+        encoded: []const u8,
+        command: []const u8,
+        cwd: []const u8,
+        expanded: ?[]const u8,
+    }{
+        .{
+            .encoded = "MTs3OzEzOzA7MDtlY2hvIGhpL3RtcC93b3JrIGRpcg==",
+            .command = "echo hi",
+            .cwd = "/tmp/work dir",
+            .expanded = null,
+        },
+        .{
+            .encoded = "MTsxMzs4OzE7MjI7Y2F0IH5bQDFdL291dC90bXAvYSBiY2F0IC90bXAvam91cm5hbC8xL291dA==",
+            .command = "cat ~[@1]/out",
+            .cwd = "/tmp/a b",
+            .expanded = "cat /tmp/journal/1/out",
+        },
+    };
+
+    for (cases) |case| {
+        const input = try std.fmt.allocPrint(gpa, "before\x1b]5107;tj;context;{s}\x1b\\after", .{case.encoded});
+        defer gpa.free(input);
+        for ([_]usize{ 1, 5, input.len }) |chunk| {
+            var r = run(gpa, input, chunk, false);
+            defer r.deinit();
+            try std.testing.expectEqualStrings("beforeafter", r.forwarded.items);
+            try std.testing.expectEqualStrings("beforeafter", r.recorded.items);
+            try std.testing.expectEqual(@as(usize, if (case.expanded == null) 2 else 3), r.events.items.len);
+            try std.testing.expectEqualStrings(case.command, r.events.items[0].command_line);
+            try std.testing.expectEqualStrings(case.cwd, r.events.items[1].working_directory);
+            if (case.expanded) |expanded| try std.testing.expectEqualStrings(expanded, r.events.items[2].command_expanded);
+        }
+    }
+}
+
+test "malformed context envelopes are rejected atomically" {
+    const gpa = std.testing.allocator;
+    for ([_][]const u8{
+        "bm8gaGVhZGVy",
+        "MjsxOzE7MDswO2Fi",
+        "MTsxOzE7eDswO2Fi",
+        "MTsxOzE7MDsxO2FiYw==",
+    }) |encoded| {
+        const input = try std.fmt.allocPrint(gpa, "\x1b]5107;tj;context;{s}\x1b\\", .{encoded});
+        defer gpa.free(input);
+        var r = run(gpa, input, 2, false);
+        defer r.deinit();
+        try std.testing.expectEqual(@as(usize, 1), r.events.items.len);
+        try std.testing.expect(r.events.items[0] == .protocol_error);
     }
 }
 

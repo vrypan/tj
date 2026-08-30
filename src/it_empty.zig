@@ -400,7 +400,7 @@ test "an explicit empty command line is not a missing command marker" {
         "--",
         "/bin/sh",
         "-c",
-        "printf '\\033]5107;tj;cmd;\\033\\\\\\033]133;C\\033\\\\output\\n\\033]133;D;0\\033\\\\'",
+        "printf '\\033]5107;tj;context;MTswOzQ7MDswOy90bXA=\\033\\\\\\033]133;C\\033\\\\output\\n\\033]133;D;0\\033\\\\'",
     }, 24, 80);
     defer result.out.deinit(gpa);
     try std.testing.expectEqual(@as(u8, 0), result.code);

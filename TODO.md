@@ -32,10 +32,6 @@ What is wanted instead is deliberate: something like `tjctl prune --older-than
 
 ## Smaller notes
 
-- `tj.plugin.zsh` can fork `base64` three times per command in `preexec`, for
-  `cmd`, `cwd`, and `expanded`. Encoding is needed so semicolons and newlines
-  cannot break the sequence framing. Find a way to preserve that framing
-  without several subprocesses on every interactive command.
 - Arbitrary-command shorthand completion does not offer journal selectors:
   `@rel<TAB>` produces nothing. Static `tjctl` journal operands complete
   canonical names, and qualified references resolve exact names or

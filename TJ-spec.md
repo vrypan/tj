@@ -454,10 +454,19 @@ the next command that actually starts. It does not read or re-evaluate prompt
 variables, so prompt substitutions and external engines such as Starship are
 captured exactly as displayed.
 
-At `preexec`, the plugin also base64-encodes the current logical `$PWD` in
-`OSC 5107;tj;cwd;DATA ST`. The recorder strips this marker and writes the
-decoded bytes to the entry's `cwd` resource when the following `OSC 133;C`
-opens the entry. Continuing a journal does not restore this directory.
+At `preexec`, the plugin emits one `OSC 5107;tj;context;DATA ST` marker. `DATA`
+is the base64 encoding of an ASCII header followed by its three concatenated
+fields:
+
+``` text
+1;<cmd-bytes>;<cwd-bytes>;<expanded-flag>;<expanded-bytes>;<cmd><cwd><expanded>
+```
+
+Lengths count bytes; the flag is `0` or `1`. This preserves arbitrary command
+text without letting field contents collide with the envelope. The recorder
+strips the marker, uses the decoded fields when the following `OSC 133;C` opens
+the entry, and writes `cwd` without a trailing newline. Continuing a journal
+does not restore this directory.
 
 If `OSC 133;C` arrives without a preceding TJ command-line marker, the
 recorder still opens an entry with an empty `cmd` and writes one journal
