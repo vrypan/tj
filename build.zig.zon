@@ -1,6 +1,6 @@
 .{
     .name = .tj,
-    .version = "0.3.1",
+    .version = "0.4.0",
     .fingerprint = 0xa7ed264b7d33ad20,
     .minimum_zig_version = "0.16.0",
     .dependencies = .{
