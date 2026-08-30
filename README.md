@@ -10,6 +10,16 @@ Makes terminal entries persistent, addressable, and reusable. See
 
 ## Install
 
+With Homebrew, TJ is compiled locally from the tagged source release:
+
+```sh
+brew install vrypan/tap/tj
+```
+
+The formula installs `tj`, `tjctl`, the companion shell tools, the zsh plugin,
+and generated bash, zsh, and fish completions. It prints the plugin line to add
+to `~/.zshrc` after installation.
+
 Prebuilt release archives contain one installation tree. Download the archive
 for your platform and extract it under `~/.local`:
 
@@ -996,6 +1006,13 @@ with installation instructions and generated notes. It refuses versions whose
 tag already exists. Each archive has one matching `tj-<version>-<target>` root
 directory; use `--strip-components=1` to extract its `bin` and `share` trees
 directly beneath an installation prefix.
+
+After publishing, the release workflow updates the source-building formula in
+`vrypan/homebrew-tap`. To publish or retry the formula independently:
+
+```sh
+gh workflow run update-homebrew-formula.yml -f tag=v0.3.1
+```
 
 Targets: `{aarch64,x86_64}` × `{macos, linux-musl, linux-gnu}`. The musl
 builds are static. Release packages default to `ReleaseSafe` with debug

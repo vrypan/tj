@@ -120,7 +120,13 @@ jobs:
           INSTALL_NOTES: |
             ## Install
 
-            Download the archive for your platform, then install it under `~/.local`:
+            Homebrew compiles TJ locally from this tagged source release:
+
+            ```sh
+            brew install vrypan/tap/tj
+            ```
+
+            Alternatively, download the archive for your platform and install it under `~/.local`:
 
             ```sh
             archive=tj-${{ needs.build.outputs.version }}-x86_64-linux-gnu.tar.gz # choose your downloaded archive
@@ -148,3 +154,11 @@ jobs:
             --fail-on-no-commits \
             dist/*.tar.gz \
             dist/SHA256SUMS
+
+  update-homebrew-formula:
+    name: Update Homebrew formula
+    needs: [build, publish]
+    uses: ./.github/workflows/update-homebrew-formula.yml
+    with:
+      tag: ${{ needs.build.outputs.tag }}
+    secrets: inherit
