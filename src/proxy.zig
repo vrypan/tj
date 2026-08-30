@@ -101,9 +101,23 @@ pub fn run(gpa: std.mem.Allocator, io: std.Io, opts: Options) !Result {
     const title_env = try gpa.dupeZ(u8, opts.title);
     defer gpa.free(title_env);
 
-    // Continuation reconstructs the journal's visible transcript before a
-    // fresh child starts. Write directly to the outer terminal so replayed
-    // shell-integration sequences never pass through this writer's scanner.
+    // Confirm the selected journal before the fresh child takes ownership of
+    // the terminal. Zooi restores the exact screen contents on exit, after
+    // which a continuation reconstructs its transcript without hiding any of
+    // it behind the splash. Redirected and otherwise non-interactive starts
+    // never wait for input.
+    if (opts.splash and sys.isTty(stdin_fd)) {
+        const choice = splash.show(gpa, store.journalId(), store.next_number.?) catch blk: {
+            warnStartup("tjctl: recording journal {s}; next entry @{d}\r\n", .{ store.journalId(), store.next_number.? });
+            break :blk splash.Choice.proceed;
+        };
+        if (choice == .cancel) return error.StartupCancelled;
+    }
+
+    // Continuation reconstructs the journal's visible transcript after the
+    // splash and before a fresh child starts. Write directly to the outer
+    // terminal so replayed shell-integration sequences never pass through this
+    // writer's scanner.
     if (opts.replay_before_start) {
         var root = try journal_store.openRoot(io, opts.home);
         defer root.close(io);
@@ -114,19 +128,6 @@ pub fn run(gpa: std.mem.Allocator, io: std.Io, opts: Options) !Result {
             .max_pause_ms = 0,
         }, &stdout_file.interface);
         try stdout_file.interface.flush();
-    }
-
-    // Confirm the selected journal before the fresh child takes ownership of
-    // the terminal. Zooi restores the exact screen contents on exit, so a
-    // continuation returns to the replayed transcript rather than leaving a
-    // banner in scrollback. Redirected and otherwise non-interactive starts
-    // never wait for input.
-    if (opts.splash and sys.isTty(stdin_fd)) {
-        const choice = splash.show(gpa, store.journalId(), store.next_number.?) catch blk: {
-            warnStartup("tjctl: recording journal {s}; next entry @{d}\r\n", .{ store.journalId(), store.next_number.? });
-            break :blk splash.Choice.proceed;
-        };
-        if (choice == .cancel) return error.StartupCancelled;
     }
     // Seed the inner pty with the outer terminal's settings so programs that
     // query them (line width, control characters) see the truth from the start.

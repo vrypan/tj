@@ -310,8 +310,9 @@ Interactive writers show the startup splash unless `--no-splash` is present
 or a non-empty inherited `TJ_NO_SPLASH` is set. Non-interactive writers do not
 show it.
 
-Before launching that fresh child, `tjctl use` replays the selected journal
-to the outer terminal by default. It uses the ordinary replay rendering, but
+After the startup splash has been dismissed and before launching that fresh
+child, `tjctl use` replays the selected journal to the outer terminal by
+default. It uses the ordinary replay rendering, but
 with command typing delays, recorded command durations, and gaps all set to
 zero. Non-visual background-colour and cursor-position queries are suppressed
 so their terminal replies cannot become input to the fresh child. OSC 0, OSC 1,

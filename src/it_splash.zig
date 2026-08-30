@@ -49,6 +49,31 @@ test "journal writers show a restorable splash unless disabled" {
     try std.testing.expect(std.mem.indexOf(u8, env_quiet_out.items, "Recording journal") == null);
     try std.testing.expect(std.mem.indexOf(u8, env_quiet_out.items, "ENV_QUIET_STARTED") != null);
     support.sys.setEnv("TJ_NO_SPLASH", "");
+
+    const seed_script =
+        "printf '\\033]5107;tj;cmd;c2VlZC1yZXBsYXk=\\033\\\\" ++
+        "\\033]5107;tj;cwd;L3RtcA==\\033\\\\" ++
+        "\\033]133;C\\033\\\\REPLAY_ORDER_PAYLOAD\\n\\033]133;D;0\\033\\\\'";
+    const seed = try support.spawnTjctlWithSplash(gpa, &.{
+        support.tjctl, "--home", scratch.path(), "new", "replay-order", "--no-splash", "--", "/bin/sh", "-c", seed_script,
+    }, 24, 80);
+    var seed_out: std.ArrayList(u8) = .empty;
+    defer seed_out.deinit(gpa);
+    try std.testing.expectEqual(@as(u8, 0), try seed.finish(gpa, &seed_out, support.timeout_ms));
+
+    const continued = try support.spawnTjctlWithSplash(gpa, &.{
+        support.tjctl, "--home", scratch.path(), "use", "replay-order", "--", "/bin/sh", "-c", "printf 'FRESH_CHILD\n'",
+    }, 24, 80);
+    var continued_out: std.ArrayList(u8) = .empty;
+    defer continued_out.deinit(gpa);
+    try std.testing.expect(try continued.readUntil(gpa, &continued_out, "Press ENTER to continue", support.timeout_ms));
+    try std.testing.expect(std.mem.indexOf(u8, continued_out.items, "REPLAY_ORDER_PAYLOAD") == null);
+    try std.testing.expect(std.mem.indexOf(u8, continued_out.items, "FRESH_CHILD") == null);
+    try continued.write("\r");
+    try std.testing.expectEqual(@as(u8, 0), try continued.finish(gpa, &continued_out, support.timeout_ms));
+    const replay_at = std.mem.indexOf(u8, continued_out.items, "REPLAY_ORDER_PAYLOAD") orelse return error.TestUnexpectedResult;
+    const child_at = std.mem.indexOf(u8, continued_out.items, "FRESH_CHILD") orelse return error.TestUnexpectedResult;
+    try std.testing.expect(replay_at < child_at);
 }
 
 test "journal writers manage terminal titles without changing recorded bytes" {

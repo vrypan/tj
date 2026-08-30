@@ -201,8 +201,9 @@ disables all title behavior regardless of the inherited blink setting.
 
 Only one writer can attach to a journal at a time.
 
-By default, `use` first replays the journal into the terminal, then starts
-the fresh shell or command. This replay is immediate: recorded pauses and
+By default, `use` shows the splash first, then replays the journal into the
+restored terminal before starting the fresh shell or command. This replay is
+immediate: recorded pauses and
 typing delays are ignored. Use `--no-replay` when the existing transcript is
 already visible or should not be redrawn. Replayed bytes go directly to the
 terminal and are not appended to the journal again. Window-title changes,
