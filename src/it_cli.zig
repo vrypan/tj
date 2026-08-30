@@ -220,6 +220,7 @@ test "build-time completions expose cli grammar and journal references" {
     try std.testing.expect(std.mem.startsWith(u8, ctl_zsh, "#compdef tjctl\n"));
     try std.testing.expect(std.mem.indexOf(u8, ctl_zsh, "_tjctl__cmd_use()") != null);
     try std.testing.expect(std.mem.indexOf(u8, ctl_zsh, "--no-replay[") != null);
+    try std.testing.expect(std.mem.indexOf(u8, ctl_zsh, "--no-splash[") != null);
     try std.testing.expect(std.mem.indexOf(u8, ctl_zsh, "'tjctl' 'complete'") != null);
 
     // Positional entry-reference slots use the same runtime resolver as the
@@ -324,7 +325,7 @@ test "input typed at the outer terminal reaches the shell" {
 
 test "resizing the outer terminal resizes the inner one" {
     const gpa = std.testing.allocator;
-    const child = try support.spawnTj(
+    const child = try support.spawnTjctl(
         gpa,
         &.{ support.tjctl, "new", "--", "/bin/sh", "-c", "trap 'stty size; exit 0' WINCH; echo READY; while :; do sleep 1; done" },
         24,
@@ -344,7 +345,7 @@ test "resizing the outer terminal resizes the inner one" {
 
 test "signals sent to tj are forwarded to the shell" {
     const gpa = std.testing.allocator;
-    const child = try support.spawnTj(
+    const child = try support.spawnTjctl(
         gpa,
         &.{ support.tjctl, "new", "--", "/bin/sh", "-c", "trap 'echo GOTTERM; exit 9' TERM; echo READY; while :; do sleep 1; done" },
         24,

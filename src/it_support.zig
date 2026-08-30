@@ -51,6 +51,35 @@ pub fn spawnTj(gpa: std.mem.Allocator, args: []const []const u8, rows: u16, cols
 
 pub fn spawnTjctl(gpa: std.mem.Allocator, args: []const []const u8, rows: u16, cols: u16) !harness.PtyChild {
     isolateJournal();
+    // Most integration tests exercise the writer or its child rather than the
+    // deliberate startup pause. Keep those fixtures non-interactive; splash
+    // tests call spawnTjctlWithSplash directly.
+    var adjusted: std.ArrayList([]const u8) = .empty;
+    defer adjusted.deinit(gpa);
+    var inserted = false;
+    var skip_value = false;
+    for (args) |arg| {
+        try adjusted.append(gpa, arg);
+        if (inserted) continue;
+        if (skip_value) {
+            skip_value = false;
+            continue;
+        }
+        if (std.mem.eql(u8, arg, "--home")) {
+            skip_value = true;
+            continue;
+        }
+        if (std.mem.startsWith(u8, arg, "-")) continue;
+        if (std.mem.eql(u8, arg, "new") or std.mem.eql(u8, arg, "use")) {
+            try adjusted.append(gpa, "--no-splash");
+            inserted = true;
+        }
+    }
+    return harness.spawn(gpa, adjusted.items, rows, cols);
+}
+
+pub fn spawnTjctlWithSplash(gpa: std.mem.Allocator, args: []const []const u8, rows: u16, cols: u16) !harness.PtyChild {
+    isolateJournal();
     return harness.spawn(gpa, args, rows, cols);
 }
 

@@ -19,6 +19,7 @@ const scanner = @import("scanner.zig");
 const journal_store = @import("store.zig");
 const Store = journal_store.Store;
 const replay = @import("replay.zig");
+const splash = @import("splash.zig");
 
 const io_buf_size = 64 * 1024;
 const max_protocol_error_log_bytes = 384;
@@ -68,6 +69,7 @@ pub const Options = struct {
     argv: []const []const u8 = &.{},
     keep_osc: bool = false,
     replay_before_start: bool = false,
+    splash: bool = false,
     home: ?[]const u8 = null,
 };
 
@@ -102,6 +104,19 @@ pub fn run(gpa: std.mem.Allocator, io: std.Io, opts: Options) !Result {
             .max_pause_ms = 0,
         }, &stdout_file.interface);
         try stdout_file.interface.flush();
+    }
+
+    // Confirm the selected journal before the fresh child takes ownership of
+    // the terminal. Zooi restores the exact screen contents on exit, so a
+    // continuation returns to the replayed transcript rather than leaving a
+    // banner in scrollback. Redirected and otherwise non-interactive starts
+    // never wait for input.
+    if (opts.splash and sys.isTty(stdin_fd)) {
+        const choice = splash.show(gpa, store.journalId(), store.next_number.?) catch blk: {
+            warnStartup("tjctl: recording journal {s}; next entry @{d}\r\n", .{ store.journalId(), store.next_number.? });
+            break :blk splash.Choice.proceed;
+        };
+        if (choice == .cancel) return error.StartupCancelled;
     }
 
     // Seed the inner pty with the outer terminal's settings so programs that

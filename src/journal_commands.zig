@@ -27,6 +27,7 @@ pub fn run(
                 .journal = .{ .new = if (parsed.positionals.items.len == 0) null else parsed.positionals.items[0] },
                 .argv = child,
                 .keep_osc = parsed.present("keep-osc"),
+                .splash = !parsed.present("no-splash"),
                 .home = home,
             });
             return result.exit_code;
@@ -37,6 +38,7 @@ pub fn run(
                 .argv = child,
                 .keep_osc = parsed.present("keep-osc"),
                 .replay_before_start = !parsed.present("no-replay"),
+                .splash = !parsed.present("no-splash"),
                 .home = home,
             });
             return result.exit_code;

@@ -11,6 +11,7 @@ pub fn build(b: *std.Build) void {
     const exe_mod = applicationModule(b, zecli, "src/main.zig", target, optimize, strip);
     exe_mod.addImport("zooi", zooi.module("zooi"));
     const tjctl_mod = applicationModule(b, zecli, "src/tjctl_main.zig", target, optimize, strip);
+    tjctl_mod.addImport("zooi", zooi.module("zooi"));
 
     const version_options = b.addOptions();
     version_options.addOption([]const u8, "version", manifest.version);
@@ -121,6 +122,15 @@ pub fn build(b: *std.Build) void {
     const unit_tests = b.addTest(.{ .root_module = exe_mod });
     const integration_tests = b.addTest(.{ .root_module = integration_mod });
 
+    const splash_integration_mod = b.createModule(.{
+        .root_source_file = b.path("src/it_splash.zig"),
+        .target = target,
+        .optimize = optimize,
+        .link_libc = true,
+    });
+    splash_integration_mod.addOptions("build_options", integration_options);
+    const splash_integration_tests = b.addTest(.{ .root_module = splash_integration_mod });
+
     // The integration fixture changes process-wide environment variables and
     // uses PTYs. Run its test binary directly so Zig's terminal runner invokes
     // its test functions serially, rather than the build-server runner which
@@ -128,10 +138,18 @@ pub fn build(b: *std.Build) void {
     const run_integration_tests = b.addSystemCommand(&.{"env"});
     run_integration_tests.addFileArg(integration_tests.getEmittedBin());
     run_integration_tests.step.dependOn(b.getInstallStep());
+    const run_splash_integration_tests = b.addSystemCommand(&.{"env"});
+    run_splash_integration_tests.addFileArg(splash_integration_tests.getEmittedBin());
+    run_splash_integration_tests.step.dependOn(b.getInstallStep());
+    // Both suites allocate controlling PTYs. Serialize them: concurrent
+    // session-leader probes make macOS deny /dev/tty to otherwise unrelated
+    // children even though each suite uses independent descriptors.
+    run_splash_integration_tests.step.dependOn(&run_integration_tests.step);
 
     const test_step = b.step("test", "Run tests");
     test_step.dependOn(&b.addRunArtifact(unit_tests).step);
     test_step.dependOn(&run_integration_tests.step);
+    test_step.dependOn(&run_splash_integration_tests.step);
     for (completion_runs) |generate| test_step.dependOn(&generate.step);
 }
 

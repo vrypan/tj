@@ -52,7 +52,7 @@ test "each entry records the fully rendered zsh prompt" {
     // than legitimately having zsh omit it for a dumb terminal.
     const home = try journal.homeArg(gpa);
     defer gpa.free(home);
-    const child = try support.spawnTj(gpa, &.{
+    const child = try support.spawnTjctl(gpa, &.{
         support.tjctl, "--home", home, "new", "--", "/usr/bin/env", "TERM=xterm-256color", "/bin/zsh", "-f", "-i",
     }, 24, 80);
     var out: std.ArrayList(u8) = .empty;

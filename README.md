@@ -136,6 +136,7 @@ Create a journal and attach a writer to it:
 tjctl new                         # generated name such as 260830-k7m4q2
 tjctl new release-build           # choose a canonical name
 tjctl new release-build -- zsh -f # run a specific command instead
+tjctl new --no-splash             # start immediately without confirmation
 ```
 
 Append a later writer run to an existing journal:
@@ -144,12 +145,20 @@ Append a later writer run to an existing journal:
 tjctl use release-build
 tjctl use k7m4q2 -- zsh -f
 tjctl use --no-replay release-build
+tjctl use --no-splash release-build
 ```
 
 `new` always creates a fresh journal. Names contain 1–63 lowercase letters,
 digits, and internal hyphens. `use` requires exactly one existing journal.
 Selection tries an exact name first, then accepts an unambiguous suffix;
 ambiguous suffixes are refused. Names carry no ordering or retention semantics.
+
+On an interactive terminal, `new` and `use` briefly take over the screen to
+show the selected journal and next entry number. Press Enter to restore the
+previous screen exactly and start the writer. This makes recording visible
+without taking ownership of the shell prompt. `--no-splash` skips the screen
+and pause; non-interactive starts skip it automatically.
+
 Only one writer can attach to a journal at a time.
 
 By default, `use` first replays the journal into the terminal, then starts

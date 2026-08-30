@@ -6,8 +6,16 @@ const frontend = @import("frontend.zig");
 const cli = @import("tjctl_cli.zig");
 const cli_spec = @import("tjctl_spec.zig");
 const commands = @import("journal_commands.zig");
+const proxy = @import("proxy.zig");
+const zooi = @import("zooi");
 
-pub const panic = frontend.panic;
+pub const panic = std.debug.FullPanic(struct {
+    fn restoreThenPanic(msg: []const u8, first_trace_addr: ?usize) noreturn {
+        zooi.restore();
+        proxy.restoreOnPanic();
+        std.debug.defaultPanic(msg, first_trace_addr);
+    }
+}.restoreThenPanic);
 
 pub fn main(init: std.process.Init) !u8 {
     const arena = init.arena.allocator();
@@ -109,6 +117,7 @@ fn commandErrorMessage(err: anyerror) []const u8 {
         error.PinnedInteraction => "tjctl: pinned entries protected; use --force to remove the journal\n",
         error.ConfirmationRequired => "tjctl: use --force to remove a journal non-interactively\n",
         error.Cancelled => "tjctl: journal removal cancelled\n",
+        error.StartupCancelled => "tjctl: journal start cancelled\n",
         error.InsideJournal => "tjctl: cannot replay inside a live journal writer\n",
         error.MissingArgument => "tjctl: this subcommand needs an argument\n",
         error.BadReplayOption => "tjctl: invalid replay numeric option\n",
