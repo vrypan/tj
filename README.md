@@ -24,8 +24,8 @@ make install                          # tj, tjctl, and contrib tools into ~/.loc
 Check they landed:
 
 ```sh
-tj --version                          # tj 0.3.0
-tjctl --version                       # tjctl 0.3.0
+tj --version                          # tj 0.3.1
+tjctl --version                       # tjctl 0.3.1
 tj-fence < /dev/null && echo ok       # used by the agent wrappers below
 ```
 
@@ -971,8 +971,8 @@ make -j6 all      # every target -> dist/<target>/bin/{tj,tjctl}
 make package      # complete install trees as dist/tj-<version>-<target>.tar.gz
 ```
 
-To publish a release, update the version in `build.zig.zon` and
-`src/frontend.zig`, commit and push it to `main`, then run:
+To publish a release, update the version in `build.zig.zon`, commit and push it
+to `main`, then run:
 
 ```sh
 gh workflow run release.yml --ref main

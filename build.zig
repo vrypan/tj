@@ -1,4 +1,5 @@
 const std = @import("std");
+const manifest = @import("build.zig.zon");
 
 pub fn build(b: *std.Build) void {
     const target = b.standardTargetOptions(.{});
@@ -9,6 +10,11 @@ pub fn build(b: *std.Build) void {
     const exe_mod = applicationModule(b, zecli, "src/main.zig", target, optimize);
     exe_mod.addImport("zooi", zooi.module("zooi"));
     const tjctl_mod = applicationModule(b, zecli, "src/tjctl_main.zig", target, optimize);
+
+    const version_options = b.addOptions();
+    version_options.addOption([]const u8, "version", manifest.version);
+    exe_mod.addOptions("build_options", version_options);
+    tjctl_mod.addOptions("build_options", version_options);
 
     const exe = b.addExecutable(.{ .name = "tj", .root_module = exe_mod });
     const tjctl_exe = b.addExecutable(.{ .name = "tjctl", .root_module = tjctl_mod });
@@ -93,6 +99,7 @@ pub fn build(b: *std.Build) void {
     // to export TJ and TJCTL from the proxy.
     integration_options.addOption([]const u8, "tj_exe", b.getInstallPath(.bin, "tj"));
     integration_options.addOption([]const u8, "tjctl_exe", b.getInstallPath(.bin, "tjctl"));
+    integration_options.addOption([]const u8, "version", manifest.version);
     integration_options.addOptionPath("selftest_exe", selftest.getEmittedBin());
     integration_options.addOptionPath("plugin", b.path("tj.plugin.zsh"));
     integration_options.addOptionPath("bash_completion", completion_outputs[0]);

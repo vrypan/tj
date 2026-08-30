@@ -11,6 +11,28 @@ const options = @import("build_options");
 const tj = options.tj_exe;
 const support = @import("it_support.zig");
 
+test "both binaries report the manifest version" {
+    const gpa = std.testing.allocator;
+
+    const tj_version = try support.runNonTty(gpa, &.{"--version"});
+    defer gpa.free(tj_version.stdout);
+    defer gpa.free(tj_version.stderr);
+    try std.testing.expectEqual(@as(u8, 0), tj_version.term.exited);
+    try std.testing.expectEqualStrings("", tj_version.stderr);
+    const expected_tj = try std.fmt.allocPrint(gpa, "tj {s}\n", .{options.version});
+    defer gpa.free(expected_tj);
+    try std.testing.expectEqualStrings(expected_tj, tj_version.stdout);
+
+    const tjctl_version = try support.runTjctlNonTty(gpa, &.{"--version"});
+    defer gpa.free(tjctl_version.stdout);
+    defer gpa.free(tjctl_version.stderr);
+    try std.testing.expectEqual(@as(u8, 0), tjctl_version.term.exited);
+    try std.testing.expectEqualStrings("", tjctl_version.stderr);
+    const expected_tjctl = try std.fmt.allocPrint(gpa, "tjctl {s}\n", .{options.version});
+    defer gpa.free(expected_tjctl);
+    try std.testing.expectEqualStrings(expected_tjctl, tjctl_version.stdout);
+}
+
 test "application and every command expose generated help" {
     const gpa = std.testing.allocator;
     support.leaveJournal();

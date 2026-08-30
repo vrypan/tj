@@ -2,9 +2,10 @@
 
 const std = @import("std");
 const builtin = @import("builtin");
+const build_options = @import("build_options");
 const proxy = @import("proxy.zig");
 
-pub const version = "0.3.0";
+pub const version = build_options.version;
 pub const panic = std.debug.FullPanic(onPanic);
 
 fn onPanic(msg: []const u8, first_trace_addr: ?usize) noreturn {

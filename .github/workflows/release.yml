@@ -48,12 +48,6 @@ jobs:
             exit 1
           fi
 
-          binary_version="$(sed -n 's/^pub const version = "\([^"]*\)";$/\1/p' src/frontend.zig)"
-          if [[ "$binary_version" != "$version" ]]; then
-            echo "version mismatch: build.zig.zon has $version, src/frontend.zig has ${binary_version:-<empty>}" >&2
-            exit 1
-          fi
-
           tag="v${version}"
           remote_tag="$(git ls-remote --tags origin "refs/tags/${tag}")"
           if [[ -n "$remote_tag" ]]; then
