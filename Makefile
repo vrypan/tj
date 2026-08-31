@@ -19,7 +19,7 @@ TARGETS := \
 	x86_64-linux-gnu
 
 .DEFAULT_GOAL := build
-.PHONY: build install test fmt fmt-check check all package clean list $(TARGETS)
+.PHONY: build install uninstall test fmt fmt-check check all package clean list $(TARGETS)
 
 PREFIX ?= $(HOME)/.local
 
@@ -33,6 +33,36 @@ build:
 install:
 	$(ZIG) build --prefix $(PREFIX)
 	@echo "installed tj, tjctl, zsh integration, companion tools, and shell completions under $(PREFIX)"
+
+# Remove only files owned by TJ. Directory cleanup is best-effort and succeeds
+# only when a directory is empty, so other software under PREFIX is untouched.
+uninstall:
+	rm -f \
+		"$(PREFIX)/bin/tj" \
+		"$(PREFIX)/bin/tjctl" \
+		"$(PREFIX)/bin/tj-fence" \
+		"$(PREFIX)/bin/tj-grep" \
+		"$(PREFIX)/bin/tj-tape" \
+		"$(PREFIX)/share/tj/tj.plugin.zsh" \
+		"$(PREFIX)/share/bash-completion/completions/tj" \
+		"$(PREFIX)/share/bash-completion/completions/tjctl" \
+		"$(PREFIX)/share/zsh/site-functions/_tj" \
+		"$(PREFIX)/share/zsh/site-functions/_tjctl" \
+		"$(PREFIX)/share/fish/vendor_completions.d/tj.fish" \
+		"$(PREFIX)/share/fish/vendor_completions.d/tjctl.fish"
+	@rmdir \
+		"$(PREFIX)/share/tj" \
+		"$(PREFIX)/share/bash-completion/completions" \
+		"$(PREFIX)/share/zsh/site-functions" \
+		"$(PREFIX)/share/fish/vendor_completions.d" \
+		2>/dev/null || true
+	@rmdir \
+		"$(PREFIX)/share/bash-completion" \
+		"$(PREFIX)/share/zsh" \
+		"$(PREFIX)/share/fish" \
+		2>/dev/null || true
+	@rmdir "$(PREFIX)/bin" "$(PREFIX)/share" 2>/dev/null || true
+	@echo "uninstalled tj from $(PREFIX); journal data was not removed"
 
 test:
 	$(ZIG) build test

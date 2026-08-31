@@ -41,6 +41,16 @@ make install                          # tj, tjctl, and contrib tools into ~/.loc
 `PREFIX=/usr/local make install` to put them elsewhere; anywhere on your
 `$PATH` will do.
 
+To remove an installation made this way, use the same prefix:
+
+```sh
+make uninstall                         # remove TJ from ~/.local
+PREFIX=/usr/local make uninstall       # remove a custom-prefix installation
+```
+
+This removes only TJ's installed programs, plugin, and completion files. It
+does not remove journals from `$TJ_HOME` or `~/.tj`.
+
 Check they landed:
 
 ```sh
