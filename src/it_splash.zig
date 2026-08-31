@@ -10,7 +10,7 @@ test "journal writers show a restorable splash unless disabled" {
     const gpa = std.testing.allocator;
     support.sys.setEnv("TJ_TITLE", "TJ | %3~");
     support.sys.setEnv("TJ_TITLE_BLINK", "1500");
-    support.sys.setEnv("TJ_NO_SPLASH", "");
+    support.sys.setEnv("TJ_NO_SPLASH", "false");
     var scratch = try support.Scratch.open();
     defer scratch.close();
 
@@ -48,7 +48,7 @@ test "journal writers show a restorable splash unless disabled" {
     try std.testing.expectEqual(@as(u8, 0), try env_quiet.finish(gpa, &env_quiet_out, support.timeout_ms));
     try std.testing.expect(std.mem.indexOf(u8, env_quiet_out.items, "Recording journal") == null);
     try std.testing.expect(std.mem.indexOf(u8, env_quiet_out.items, "ENV_QUIET_STARTED") != null);
-    support.sys.setEnv("TJ_NO_SPLASH", "");
+    support.sys.setEnv("TJ_NO_SPLASH", "false");
 
     const seed_script =
         "printf '\\033]5107;tj;cmd;c2VlZC1yZXBsYXk=\\033\\\\" ++
@@ -81,7 +81,7 @@ test "journal writers manage terminal titles without changing recorded bytes" {
     const io = std.testing.io;
     support.sys.setEnv("TJ_TITLE", "TJ | %3~");
     support.sys.setEnv("TJ_TITLE_BLINK", "1500");
-    support.sys.setEnv("TJ_NO_SPLASH", "");
+    support.sys.setEnv("TJ_NO_SPLASH", "false");
     var scratch = try support.Scratch.open();
     defer scratch.close();
 
@@ -166,5 +166,5 @@ test "journal writers manage terminal titles without changing recorded bytes" {
     try std.testing.expect(std.mem.indexOf(u8, plain_out.items, "TITLE_OPTIONS=none:0") != null);
     support.sys.setEnv("TJ_TITLE", "TJ | %3~");
     support.sys.setEnv("TJ_TITLE_BLINK", "1500");
-    support.sys.setEnv("TJ_NO_SPLASH", "");
+    support.sys.setEnv("TJ_NO_SPLASH", "false");
 }

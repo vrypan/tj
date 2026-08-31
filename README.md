@@ -160,7 +160,8 @@ On an interactive terminal, `new` and `use` briefly take over the screen to
 show the selected journal and next entry number. Press Enter to restore the
 previous screen exactly and start the writer. This makes recording visible
 without taking ownership of the shell prompt. `--no-splash` skips the screen
-and pause; a non-empty `$TJ_NO_SPLASH` does the same when the option is absent.
+and pause. When the option is absent, `$TJ_NO_SPLASH=true` (also `yes` or `1`)
+does the same; `false`, `no`, or `0` leaves the splash enabled.
 Non-interactive starts skip it automatically.
 
 TJ initially sets the window and tab title to `JOURNAL`; the blinking marker

@@ -25,7 +25,7 @@ pub const RemoveRequest = struct {
 
 pub fn removeRequest(parsed: *const zecli.Parsed) !RemoveRequest {
     if (parsed.positionals.items.len == 0) return error.BadArguments;
-    return .{ .targets = parsed.positionals.items, .force = parsed.present("force") };
+    return .{ .targets = parsed.positionals.items, .force = parsed.enabled("force") };
 }
 
 test "annotation and removal requests select one semantic mode" {

@@ -34,7 +34,7 @@ pub fn replayRequest(parsed: *const zecli.Parsed) !ReplayRequest {
         request.replay.use_recorded_prompt = false;
     }
     if (parsed.last("speed")) |text| request.replay.speed = parseReplaySpeed(text) catch return error.BadReplayOption;
-    request.replay.duration_only = parsed.present("duration");
+    request.replay.duration_only = parsed.enabled("duration");
     if (parsed.positionals.items.len == 1) request.wanted = parsed.positionals.items[0];
     return request;
 }

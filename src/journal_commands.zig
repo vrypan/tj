@@ -23,7 +23,7 @@ pub fn run(
 ) !u8 {
     const home = if (parsed.present("home")) parsed.last("home") else root_home orelse parsed.last("home");
     const title = parsed.last("title") orelse "TJ | %3~";
-    const splash_enabled = !parsed.present("no-splash") and sys.env("TJ_NO_SPLASH") == null;
+    const splash_enabled = !parsed.enabled("no-splash");
     const title_blink_ms = if (which == .new or which == .use) blk: {
         const configured = try parseTitleBlink(parsed.last("title-blink").?);
         if (std.mem.eql(u8, title, "none")) {
@@ -36,7 +36,7 @@ pub fn run(
             const result = try proxy.run(gpa, io, .{
                 .journal = .{ .new = if (parsed.positionals.items.len == 0) null else parsed.positionals.items[0] },
                 .argv = child,
-                .keep_osc = parsed.present("keep-osc"),
+                .keep_osc = parsed.enabled("keep-osc"),
                 .splash = splash_enabled,
                 .title = title,
                 .title_blink_ms = title_blink_ms,
@@ -48,8 +48,8 @@ pub fn run(
             const result = try proxy.run(gpa, io, .{
                 .journal = .{ .existing = parsed.positionals.items[0] },
                 .argv = child,
-                .keep_osc = parsed.present("keep-osc"),
-                .replay_before_start = !parsed.present("no-replay"),
+                .keep_osc = parsed.enabled("keep-osc"),
+                .replay_before_start = !parsed.enabled("no-replay"),
                 .splash = splash_enabled,
                 .title = title,
                 .title_blink_ms = title_blink_ms,
@@ -64,7 +64,7 @@ pub fn run(
             defer root.close(io);
             try store.renameJournal(gpa, io, root, parsed.positionals.items[0], parsed.positionals.items[1]);
         },
-        .rm => try cmd_remove.removeJournal(gpa, io, home, parsed.positionals.items[0], parsed.present("force"), out),
+        .rm => try cmd_remove.removeJournal(gpa, io, home, parsed.positionals.items[0], parsed.enabled("force"), out),
         .du => try cmd_history.usageJournal(
             gpa,
             io,

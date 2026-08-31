@@ -307,7 +307,8 @@ shell options, functions, history, jobs, file descriptors, processes, or
 other state from previous writers.
 
 Interactive writers show the startup splash unless `--no-splash` is present
-or a non-empty inherited `TJ_NO_SPLASH` is set. Non-interactive writers do not
+or inherited `TJ_NO_SPLASH` parses as true (`true`, `yes`, or `1`; false forms
+are `false`, `no`, and `0`). Non-interactive writers do not
 show it.
 
 After the startup splash has been dismissed and before launching that fresh

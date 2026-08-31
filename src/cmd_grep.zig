@@ -36,12 +36,12 @@ pub const GrepRequest = struct {
 
 pub fn grepRequest(parsed: *const zecli.Parsed) !GrepRequest {
     var request: GrepRequest = .{
-        .all = parsed.present("all"),
-        .ignore_case = parsed.present("ignore-case"),
+        .all = parsed.enabled("all"),
+        .ignore_case = parsed.enabled("ignore-case"),
     };
-    if (parsed.present("cmd") or parsed.present("out")) {
-        request.commands = parsed.present("cmd");
-        request.output = parsed.present("out");
+    if (parsed.enabled("cmd") or parsed.enabled("out")) {
+        request.commands = parsed.enabled("cmd");
+        request.output = parsed.enabled("out");
     }
     if (parsed.last("color")) |value| {
         request.color = std.meta.stringToEnum(ColorWhen, value) orelse return error.BadArguments;

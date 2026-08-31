@@ -46,7 +46,7 @@ pub fn main(init: std.process.Init) !u8 {
     };
     if (help_printed) return frontend.flushStdout(&stdout_file, 0);
 
-    if (invocation.present("version")) {
+    if (invocation.enabled("version")) {
         stdout.writeAll("tj " ++ version ++ "\n") catch |err| {
             if (frontend.isBrokenPipe(&stdout_file, err)) return 0;
             return err;

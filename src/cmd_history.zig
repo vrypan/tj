@@ -222,7 +222,7 @@ pub fn listInteractions(
         if (!std.mem.eql(u8, flag.name, "tag")) continue;
         try filters.append(gpa, annotations.normalizeTag(gpa, flag.value.?) catch return error.InvalidTag);
     }
-    const pinned_only = parsed.present("pinned");
+    const pinned_only = parsed.enabled("pinned");
 
     var journals: std.ArrayList(HistoryJournal) = .empty;
     defer {
@@ -442,13 +442,13 @@ pub fn usageJournal(
     try noout_region.begin();
 
     var total_buf: [24]u8 = undefined;
-    const exact_bytes = parsed.present("bytes");
+    const exact_bytes = parsed.enabled("bytes");
     const total_text = formatUsageSize(measured.total_bytes, exact_bytes, &total_buf);
-    if (!parsed.present("chart") and !exact_bytes) {
+    if (!parsed.enabled("chart") and !exact_bytes) {
         try out.print("{s}\n", .{total_text});
         return;
     }
-    if (!parsed.present("chart")) {
+    if (!parsed.enabled("chart")) {
         for (measured.entries) |entry| {
             if (sys.env("TJ_JOURNAL")) |current| {
                 if (std.mem.eql(u8, current, journal)) {

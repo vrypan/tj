@@ -5,8 +5,8 @@
     .minimum_zig_version = "0.16.0",
     .dependencies = .{
         .zecli = .{
-            .url = "git+https://github.com/vrypan/zecli.git#v0.3.0",
-            .hash = "zecli-0.2.3-j151k1HlAgBsElwUipk9b1gjm9ke0laRLuHiHR0BjZNY",
+            .url = "git+https://github.com/vrypan/zecli.git#v0.3.2",
+            .hash = "zecli-0.3.2-j151k2cQAwCWyvhowi_1Dx3jeec5mw_ROP8O-0m8neFo",
         },
         .zooi = .{
             .url = "git+https://github.com/vrypan/zooi.git?ref=v0.1.3#825649ca5108dcc9a26660e0ac0b9b786944cd85",

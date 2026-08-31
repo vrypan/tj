@@ -26,7 +26,7 @@ pub const NameRequest = union(enum) {
 
 pub fn nameRequest(parsed: *const zecli.Parsed) !NameRequest {
     const args = parsed.positionals.items;
-    if (parsed.present("remove")) {
+    if (parsed.enabled("remove")) {
         if (args.len != 1) return error.BadArguments;
         return .{ .remove = args[0] };
     }
@@ -139,13 +139,13 @@ pub const TagRequest = union(enum) {
 pub fn tagRequest(parsed: *const zecli.Parsed, target_count: usize) !TagRequest {
     const args = parsed.positionals.items;
     if (args.len == 0) {
-        if (parsed.present("remove")) return error.MissingArgument;
+        if (parsed.enabled("remove")) return error.MissingArgument;
         return .list;
     }
     if (target_count == 0 or target_count > args.len) return error.BadArguments;
     const targets = args[0..target_count];
     const tags = args[target_count..];
-    if (parsed.present("remove")) {
+    if (parsed.enabled("remove")) {
         if (tags.len == 0) return error.MissingArgument;
         return .{ .remove = .{ .targets = targets, .tags = tags } };
     }
@@ -321,7 +321,7 @@ pub const PinRequest = union(enum) {
 
 pub fn pinRequest(parsed: *const zecli.Parsed) !PinRequest {
     const args = parsed.positionals.items;
-    if (parsed.present("remove")) {
+    if (parsed.enabled("remove")) {
         if (args.len != 1) return error.BadArguments;
         return .{ .remove = args[0] };
     }
