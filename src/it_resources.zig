@@ -158,12 +158,19 @@ test "tj noout syntax and journal preconditions fail without emitting OSC" {
     const gpa = std.testing.allocator;
     support.leaveJournal();
 
-    const missing_separator = try support.runNonTty(gpa, &.{ "noout", "/bin/true" });
+    const missing_separator = try support.runNonTty(gpa, &.{"noout"});
     defer gpa.free(missing_separator.stdout);
     defer gpa.free(missing_separator.stderr);
     try std.testing.expectEqual(@as(u8, 2), missing_separator.term.exited);
     try std.testing.expect(std.mem.indexOf(u8, missing_separator.stdout, "5107;tj") == null);
     try std.testing.expect(std.mem.indexOf(u8, missing_separator.stderr, "requires `--`") != null);
+
+    const misplaced_command = try support.runNonTty(gpa, &.{ "noout", "/bin/true" });
+    defer gpa.free(misplaced_command.stdout);
+    defer gpa.free(misplaced_command.stderr);
+    try std.testing.expectEqual(@as(u8, 2), misplaced_command.term.exited);
+    try std.testing.expect(std.mem.indexOf(u8, misplaced_command.stdout, "5107;tj") == null);
+    try std.testing.expect(std.mem.indexOf(u8, misplaced_command.stderr, "too many arguments") != null);
 
     const outside = try support.runNonTty(gpa, &.{ "noout", "--", "/bin/true" });
     defer gpa.free(outside.stdout);

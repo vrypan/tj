@@ -32,13 +32,13 @@ pub const Error = context.Error;
 pub fn run(
     gpa: std.mem.Allocator,
     io: Io,
-    command: cli.RoutedCommand,
+    which: cli.CommandName,
+    home: ?[]const u8,
     child: []const [:0]const u8,
     parsed: *const zecli.Parsed,
     out: *Io.Writer,
 ) !u8 {
-    const home = command.root.home;
-    switch (command.which) {
+    switch (which) {
         .tui => try cmd_tui.run(gpa, io, home),
         .noout => {
             const result = try noout.run(gpa, child);

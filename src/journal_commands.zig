@@ -15,23 +15,23 @@ const cmd_replay = @import("cmd_replay.zig");
 pub fn run(
     gpa: std.mem.Allocator,
     io: Io,
-    command: cli.RoutedCommand,
+    which: cli.CommandName,
+    root_home: ?[]const u8,
     child: []const [:0]const u8,
     parsed: *const zecli.Parsed,
     out: *Io.Writer,
 ) !u8 {
-    const home = parsed.last("home") orelse command.home;
-    const title = parsed.last("title") orelse sys.env("TJ_TITLE") orelse "TJ | %3~";
+    const home = if (parsed.present("home")) parsed.last("home") else root_home orelse parsed.last("home");
+    const title = parsed.last("title") orelse "TJ | %3~";
     const splash_enabled = !parsed.present("no-splash") and sys.env("TJ_NO_SPLASH") == null;
-    const title_blink_ms = if (command.which == .new or command.which == .use) blk: {
+    const title_blink_ms = if (which == .new or which == .use) blk: {
+        const configured = try parseTitleBlink(parsed.last("title-blink").?);
         if (std.mem.eql(u8, title, "none")) {
-            if (parsed.last("title-blink")) |explicit| _ = try parseTitleBlink(explicit);
             break :blk 0;
         }
-        if (parsed.last("title-blink")) |explicit| break :blk try parseTitleBlink(explicit);
-        break :blk try parseTitleBlink(sys.env("TJ_TITLE_BLINK") orelse "1500");
+        break :blk configured;
     } else 0;
-    switch (command.which) {
+    switch (which) {
         .new => {
             const result = try proxy.run(gpa, io, .{
                 .journal = .{ .new = if (parsed.positionals.items.len == 0) null else parsed.positionals.items[0] },

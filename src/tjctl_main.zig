@@ -30,68 +30,77 @@ pub fn main(init: std.process.Init) !u8 {
     const stdout = &stdout_file.interface;
     const stderr = &stderr_file.interface;
 
-    const routed = cli.parse(arena, args[1..]) catch |err| {
-        try stderr.writeAll(rootErrorMessage(err));
-        try zecli.printApplicationHelp(arena, stderr, cli_spec.application);
-        try stderr.flush();
-        return 2;
+    var invocation = zecli.Invocation.init(arena, stderr, cli_spec.application, args[1..], init.environ_map) catch |err| {
+        if (err == error.ReportedCliError) {
+            try stderr.flush();
+            return 2;
+        }
+        return err;
     };
-    switch (routed) {
-        .help => {
-            zecli.printApplicationHelp(arena, stdout, cli_spec.application) catch |err| {
-                if (frontend.isBrokenPipe(&stdout_file, err)) return 0;
-                return err;
-            };
-            return frontend.flushStdout(&stdout_file, 0);
-        },
-        .version => {
-            stdout.print("tjctl {s}\n", .{frontend.version}) catch |err| {
-                if (frontend.isBrokenPipe(&stdout_file, err)) return 0;
-                return err;
-            };
-            return frontend.flushStdout(&stdout_file, 0);
-        },
-        .command => |command| {
-            const command_spec = command.which.spec();
-            const parts = cli.splitCommandArgs(command) catch |err| {
-                try stderr.writeAll(rootErrorMessage(err));
+    defer invocation.deinit(arena);
+
+    const help_printed = invocation.printHelpIfRequested(arena, stdout) catch |err| {
+        if (frontend.isBrokenPipe(&stdout_file, err)) return 0;
+        return err;
+    };
+    if (help_printed) return frontend.flushStdout(&stdout_file, 0);
+
+    if (invocation.present("version")) {
+        stdout.print("tjctl {s}\n", .{frontend.version}) catch |err| {
+            if (frontend.isBrokenPipe(&stdout_file, err)) return 0;
+            return err;
+        };
+        return frontend.flushStdout(&stdout_file, 0);
+    }
+
+    const command = invocation.getCommand() orelse {
+        zecli.printApplicationHelp(arena, stdout, cli_spec.application) catch |err| {
+            if (frontend.isBrokenPipe(&stdout_file, err)) return 0;
+            return err;
+        };
+        return frontend.flushStdout(&stdout_file, 0);
+    };
+    const which = try command.as(cli.CommandName);
+    const command_spec = command.spec;
+
+    var child: []const [:0]const u8 = &.{};
+    if (which == .new or which == .use) {
+        if (command.passthrough()) |passthrough| {
+            if (passthrough.len == 0) {
+                try stderr.writeAll(rootErrorMessage(error.MissingChildCommand));
                 try zecli.printCommandHelp(arena, stderr, command_spec);
                 try stderr.flush();
                 return 2;
-            };
-            if (zecli.helpRequested(parts.owned)) {
-                zecli.printCommandHelp(arena, stdout, command_spec) catch |err| {
-                    if (frontend.isBrokenPipe(&stdout_file, err)) return 0;
-                    return err;
-                };
-                return frontend.flushStdout(&stdout_file, 0);
             }
-            var parsed = zecli.parseCommand(arena, stderr, parts.owned, command_spec) catch |err| {
-                if (err == error.ReportedCliError) {
-                    try stderr.flush();
-                    return 2;
-                }
-                return err;
-            };
-            defer parsed.deinit(arena);
-
-            const status = commands.run(gpa, init.io, command, parts.child, &parsed, stdout) catch |err| {
-                if (frontend.isBrokenPipe(&stdout_file, err)) return 0;
-                stdout.flush() catch {};
-                try stderr.writeAll(commandErrorMessage(err));
-                try stderr.flush();
-                return if (isUsageError(err)) 2 else 1;
-            };
-            return frontend.flushStdout(&stdout_file, status);
-        },
+            child = passthrough;
+        }
+    } else if (command.passthrough() != null) {
+        try stderr.writeAll("tjctl: invalid arguments for this subcommand\n\n");
+        try zecli.printCommandHelp(arena, stderr, command_spec);
+        try stderr.flush();
+        return 2;
     }
+
+    const status = commands.run(
+        gpa,
+        init.io,
+        which,
+        invocation.getValue([]const u8, "home"),
+        child,
+        &command.parsed,
+        stdout,
+    ) catch |err| {
+        if (frontend.isBrokenPipe(&stdout_file, err)) return 0;
+        stdout.flush() catch {};
+        try stderr.writeAll(commandErrorMessage(err));
+        try stderr.flush();
+        return if (isUsageError(err)) 2 else 1;
+    };
+    return frontend.flushStdout(&stdout_file, status);
 }
 
 fn rootErrorMessage(err: anyerror) []const u8 {
     return switch (err) {
-        error.UnknownFlag => "tjctl: unrecognised flag\n\n",
-        error.MissingFlagValue => "tjctl: --home needs a directory\n\n",
-        error.UnknownSubcommand => "tjctl: unknown subcommand\n\n",
         error.MissingChildCommand => "tjctl: a command is required after `--`\n\n",
         else => "tjctl: invalid command line\n\n",
     };

@@ -20,12 +20,14 @@ const title = zecli.FlagSpec{
     .value = .string,
     .value_name = "FORMAT",
     .description = "Override the shell-evaluated terminal-title format, or use none",
+    .default_value = "TJ | %3~",
 };
 const title_blink = zecli.FlagSpec{
     .name = "title-blink",
     .value = .string,
     .value_name = "MS",
     .description = "Alternate the title recording marker every MS (0 disables)",
+    .default_value = "1500",
 };
 const lifecycle_flags = [_]zecli.FlagSpec{ home_flag, keep_osc, no_splash, title, title_blink };
 const use_flags = [_]zecli.FlagSpec{ home_flag, keep_osc, no_splash, title, title_blink, .{ .name = "no-replay", .description = "Start without replaying the journal" } };
@@ -109,6 +111,7 @@ pub const application = application: {
     @setEvalBranchQuota(10_000);
     break :application zecli.comptimeValidated(.{
         .name = "tjctl",
+        .prefix = "TJ",
         .description = "tjctl - Terminal Journal control",
         .usage = "tjctl [options] <command>",
         .flags = &root_flags,

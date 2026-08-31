@@ -167,7 +167,7 @@ TJ initially sets the window and tab title to `JOURNAL`; the blinking marker
 makes recording visible without shell integration. The bundled zsh plugin then
 evaluates the `-t`/`--title` format at every prompt and uses the result as the
 exact title.
-Without `--title`, `tjctl` inherits a non-empty `$TJ_TITLE` from its environment;
+Without `--title`, `tjctl` reads `$TJ_TITLE` from its environment;
 if none is set, the default format is `TJ | %3~`. `--title=none`
 disables all TJ title handling. TJ asks xterm-compatible terminals to restore
 the previous title on exit.
@@ -195,7 +195,7 @@ titles from the shell and applications, preserves the last window and tab
 titles, and alternates a fixed-width `●`/`○` recording marker every 1500 ms.
 `--title-blink=MS` changes the interval; `--title-blink=0` forwards titles
 unchanged and disables the marker and periodic refresh. Without an explicit
-option, `tjctl` inherits `$TJ_TITLE_BLINK`, then defaults to `1500`. Original
+option, `tjctl` reads `$TJ_TITLE_BLINK`, then defaults to `1500`. Original
 application title sequences are still retained in `out`. `TJ_TITLE=none`
 disables all title behavior regardless of the inherited blink setting.
 

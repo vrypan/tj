@@ -324,7 +324,7 @@ bypasses the new writer's scanner and is not recorded again. `--no-replay`
 suppresses this startup replay.
 
 `tjctl new` and `tjctl use` accept one `-t`/`--title FORMAT`. An explicit format
-takes precedence; otherwise a non-empty inherited `TJ_TITLE` is used, followed
+takes precedence; otherwise `TJ_TITLE` is read from the environment, followed
 by the default literal format `TJ | %3~`. `none` disables all TJ title
 handling. The writer exports the selected literal format as `TJ_TITLE`. On a
 terminal, an enabled writer pushes the previous title and initially displays
@@ -343,7 +343,7 @@ normal, signal, and panic exits. `none` emits no fallback, performs no
 title-stack operation, and makes the plugin leave titles alone.
 
 Title handling defaults to a 1500 ms recording-marker interval. An explicit
-`--title-blink=MS` takes precedence over a non-empty inherited
+`--title-blink=MS` takes precedence over
 `TJ_TITLE_BLINK`, followed by `1500`; the selected decimal value is exported
 as `TJ_TITLE_BLINK`. A positive interval makes the proxy intercept complete,
 bounded OSC 0, OSC 1, and OSC 2 sequences, retain separate last window and

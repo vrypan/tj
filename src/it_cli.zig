@@ -247,6 +247,9 @@ test "schema errors use status two and command help" {
         .{ .args = &.{"resolve"}, .diagnostic = "missing required argument", .usage = "Usage: tj resolve" },
         .{ .args = &.{ "complete", "@1", "@2" }, .diagnostic = "too many arguments", .usage = "Usage: tj complete" },
         .{ .args = &.{ "grep", "--color=sometimes", "x" }, .diagnostic = "invalid value", .usage = "Usage: tj grep" },
+        .{ .args = &.{"grep"}, .diagnostic = "invalid arguments", .usage = "Usage: tj grep" },
+        .{ .args = &.{ "grep", "needle", "--", "other" }, .diagnostic = "invalid arguments", .usage = "Usage: tj grep" },
+        .{ .args = &.{ "grep", "--", "one", "two" }, .diagnostic = "invalid arguments", .usage = "Usage: tj grep" },
     };
     for (cases) |case| {
         const result = try support.runNonTty(gpa, case.args);
@@ -259,6 +262,18 @@ test "schema errors use status two and command help" {
     }
 }
 
+test "lifecycle passthrough requires a non-empty child command" {
+    const gpa = std.testing.allocator;
+    for ([_][]const []const u8{ &.{ "new", "--" }, &.{ "use", "journal", "--" } }) |args| {
+        const result = try support.runTjctlNonTty(gpa, args);
+        defer gpa.free(result.stdout);
+        defer gpa.free(result.stderr);
+        try std.testing.expectEqual(@as(u8, 2), result.term.exited);
+        try std.testing.expectEqualStrings("", result.stdout);
+        try std.testing.expect(std.mem.indexOf(u8, result.stderr, "command is required after `--`") != null);
+    }
+}
+
 test "removed journal commands are unknown under tj" {
     const gpa = std.testing.allocator;
     support.leaveJournal();
@@ -268,7 +283,7 @@ test "removed journal commands are unknown under tj" {
         defer gpa.free(result.stderr);
         try std.testing.expectEqual(@as(u8, 2), result.term.exited);
         try std.testing.expectEqualStrings("", result.stdout);
-        try std.testing.expect(std.mem.indexOf(u8, result.stderr, "unknown subcommand") != null);
+        try std.testing.expect(std.mem.indexOf(u8, result.stderr, "unknown command") != null);
     }
 }
 

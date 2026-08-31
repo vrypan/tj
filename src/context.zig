@@ -7,6 +7,7 @@ const Io = std.Io;
 const zecli = @import("zecli");
 
 const cli = @import("cli.zig");
+const cli_spec = @import("cli_spec.zig");
 const store = @import("store.zig");
 const sys = @import("sys.zig");
 const reference = @import("reference.zig");
@@ -54,7 +55,8 @@ pub const Error = error{
 pub fn parseTestCommand(which: cli.CommandName, args: []const [:0]const u8) !zecli.Parsed {
     var discard_buf: [1024]u8 = undefined;
     var discarding = Io.Writer.Discarding.init(&discard_buf);
-    return zecli.parseCommand(std.testing.allocator, &discarding.writer, args, which.spec());
+    const spec = cli_spec.findCommand(@tagName(which)) orelse unreachable;
+    return zecli.parseCommand(std.testing.allocator, &discarding.writer, args, spec);
 }
 
 pub fn currentJournal() Error![]const u8 {

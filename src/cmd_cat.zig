@@ -200,13 +200,13 @@ pub const Window = union(enum) {
 test "cat request preserves option occurrence order" {
     const gpa = std.testing.allocator;
     var parsed = try context.parseTestCommand(.cat, &.{
-        "--raw", "--plain", "--head", "10", "--tail=3", "--head=1", "--", "-recording",
+        "--raw", "--plain", "--head", "10", "--tail=3", "--head=1", "recording",
     });
     defer parsed.deinit(gpa);
     const request = catRequest(&parsed, true);
     try std.testing.expect(!request.as_written);
     try std.testing.expectEqual(@as(usize, 1), request.window.head);
-    try std.testing.expectEqualStrings("-recording", request.refs[0]);
+    try std.testing.expectEqualStrings("recording", request.refs[0]);
 
     try std.testing.expectError(error.ReportedCliError, context.parseTestCommand(.cat, &.{ "--head", "bad", "@1" }));
 }

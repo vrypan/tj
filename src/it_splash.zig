@@ -8,8 +8,8 @@ const support = @import("it_support.zig");
 
 test "journal writers show a restorable splash unless disabled" {
     const gpa = std.testing.allocator;
-    support.sys.setEnv("TJ_TITLE", "");
-    support.sys.setEnv("TJ_TITLE_BLINK", "");
+    support.sys.setEnv("TJ_TITLE", "TJ | %3~");
+    support.sys.setEnv("TJ_TITLE_BLINK", "1500");
     support.sys.setEnv("TJ_NO_SPLASH", "");
     var scratch = try support.Scratch.open();
     defer scratch.close();
@@ -79,8 +79,8 @@ test "journal writers show a restorable splash unless disabled" {
 test "journal writers manage terminal titles without changing recorded bytes" {
     const gpa = std.testing.allocator;
     const io = std.testing.io;
-    support.sys.setEnv("TJ_TITLE", "");
-    support.sys.setEnv("TJ_TITLE_BLINK", "");
+    support.sys.setEnv("TJ_TITLE", "TJ | %3~");
+    support.sys.setEnv("TJ_TITLE_BLINK", "1500");
     support.sys.setEnv("TJ_NO_SPLASH", "");
     var scratch = try support.Scratch.open();
     defer scratch.close();
@@ -164,7 +164,7 @@ test "journal writers manage terminal titles without changing recorded bytes" {
     try std.testing.expect(std.mem.indexOf(u8, plain_out.items, "TJ | ") == null);
     try std.testing.expect(std.mem.indexOf(u8, plain_out.items, "\x1b[22;0t") == null);
     try std.testing.expect(std.mem.indexOf(u8, plain_out.items, "TITLE_OPTIONS=none:0") != null);
-    support.sys.setEnv("TJ_TITLE", "");
-    support.sys.setEnv("TJ_TITLE_BLINK", "");
+    support.sys.setEnv("TJ_TITLE", "TJ | %3~");
+    support.sys.setEnv("TJ_TITLE_BLINK", "1500");
     support.sys.setEnv("TJ_NO_SPLASH", "");
 }

@@ -180,7 +180,9 @@ const commands = [_]zecli.CommandSpec{
         .description = "Search journal commands and output for a literal",
         .usage = "tj grep [options] [--] <PATTERN>",
         .flags = &grep_flags,
-        .arguments = &.{.{ .name = "PATTERN", .description = "One non-empty literal byte string", .required = true }},
+        // Application validation accepts this one value either before or
+        // after `--`; Zecli keeps those two namespaces separate.
+        .arguments = &.{.{ .name = "PATTERN", .description = "One non-empty literal byte string" }},
     },
 };
 
@@ -188,6 +190,7 @@ pub const application = application: {
     @setEvalBranchQuota(10_000);
     break :application zecli.comptimeValidated(.{
         .name = "tj",
+        .prefix = "TJ",
         .description = "tj - Terminal Journal",
         .usage = "tj [options] <command>",
         .flags = &root_flags,

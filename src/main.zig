@@ -31,84 +31,98 @@ pub fn main(init: std.process.Init) !u8 {
     const stdout = &stdout_file.interface;
     const stderr = &stderr_file.interface;
 
-    const routed = cli.parse(arena, args[1..]) catch |err| {
-        try stderr.writeAll(rootErrorMessage(err));
-        try zecli.printApplicationHelp(arena, stderr, cli_spec.application);
+    var invocation = zecli.Invocation.init(arena, stderr, cli_spec.application, args[1..], init.environ_map) catch |err| {
+        if (err == error.ReportedCliError) {
+            try stderr.flush();
+            return 2;
+        }
+        return err;
+    };
+    defer invocation.deinit(arena);
+
+    const help_printed = invocation.printHelpIfRequested(arena, stdout) catch |err| {
+        if (frontend.isBrokenPipe(&stdout_file, err)) return 0;
+        return err;
+    };
+    if (help_printed) return frontend.flushStdout(&stdout_file, 0);
+
+    if (invocation.present("version")) {
+        stdout.writeAll("tj " ++ version ++ "\n") catch |err| {
+            if (frontend.isBrokenPipe(&stdout_file, err)) return 0;
+            return err;
+        };
+        return frontend.flushStdout(&stdout_file, 0);
+    }
+
+    const command = invocation.getCommand() orelse {
+        zecli.printApplicationHelp(arena, stdout, cli_spec.application) catch |err| {
+            if (frontend.isBrokenPipe(&stdout_file, err)) return 0;
+            return err;
+        };
+        return frontend.flushStdout(&stdout_file, 0);
+    };
+    const which = try command.as(cli.CommandName);
+    const spec = command.spec;
+
+    cli.validateRemoveOrdering(which, args[1..]) catch {
+        try stderr.writeAll("tj: invalid arguments for this subcommand\n\n");
+        try zecli.printCommandHelp(arena, stderr, spec);
         try stderr.flush();
         return 2;
     };
 
-    switch (routed) {
-        .help => {
-            zecli.printApplicationHelp(arena, stdout, cli_spec.application) catch |err| {
-                if (frontend.isBrokenPipe(&stdout_file, err)) return 0;
-                return err;
-            };
-            return frontend.flushStdout(&stdout_file, 0);
-        },
-        .version => {
-            stdout.writeAll("tj " ++ version ++ "\n") catch |err| {
-                if (frontend.isBrokenPipe(&stdout_file, err)) return 0;
-                return err;
-            };
-            return frontend.flushStdout(&stdout_file, 0);
-        },
-        .command => |command| {
-            const spec = command.which.spec();
-            const parts = cli.splitCommandArgs(command) catch |err| {
-                try stderr.writeAll(rootErrorMessage(err));
-                try zecli.printCommandHelp(arena, stderr, spec);
-                try stderr.flush();
-                return 2;
-            };
-
-            if (zecli.helpRequested(parts.owned)) {
-                zecli.printCommandHelp(arena, stdout, spec) catch |err| {
-                    if (frontend.isBrokenPipe(&stdout_file, err)) return 0;
-                    return err;
-                };
-                return frontend.flushStdout(&stdout_file, 0);
-            }
-
-            cli.preflightCommandArgs(command.which, parts.owned) catch {
-                try stderr.writeAll("tj: invalid arguments for this subcommand\n\n");
-                try zecli.printCommandHelp(arena, stderr, spec);
-                try stderr.flush();
-                return 2;
-            };
-
-            var parsed = zecli.parseCommand(arena, stderr, parts.owned, spec) catch |err| {
-                if (err == error.ReportedCliError) {
-                    try stderr.flush();
-                    return 2;
-                }
-                return err;
-            };
-            defer parsed.deinit(arena);
-
-            const status = commands.run(gpa, init.io, command, parts.child, &parsed, stdout) catch |err| {
-                if (frontend.isBrokenPipe(&stdout_file, err)) return 0;
-                stdout.flush() catch {};
-                try stderr.writeAll(commandErrorMessage(command.which, err));
-                if (isUsageError(err)) {
-                    try stderr.writeByte('\n');
-                    try zecli.printCommandHelp(arena, stderr, spec);
-                }
-                try stderr.flush();
-                if (isUsageError(err) or err == error.NoSuchInteraction) return 2;
-                return 1;
-            };
-            return frontend.flushStdout(&stdout_file, status);
-        },
+    var child: []const [:0]const u8 = &.{};
+    if (which == .noout) {
+        if (command.positionals().len != 0) {
+            try stderr.writeAll(rootErrorMessage(error.MissingNooutSeparator));
+            try zecli.printCommandHelp(arena, stderr, spec);
+            try stderr.flush();
+            return 2;
+        }
+        child = command.passthrough() orelse {
+            try stderr.writeAll(rootErrorMessage(error.MissingNooutSeparator));
+            try zecli.printCommandHelp(arena, stderr, spec);
+            try stderr.flush();
+            return 2;
+        };
+        if (child.len == 0) {
+            try stderr.writeAll(rootErrorMessage(error.MissingNooutCommand));
+            try zecli.printCommandHelp(arena, stderr, spec);
+            try stderr.flush();
+            return 2;
+        }
+    } else if (which != .grep and command.passthrough() != null) {
+        try stderr.writeAll("tj: invalid arguments for this subcommand\n\n");
+        try zecli.printCommandHelp(arena, stderr, spec);
+        try stderr.flush();
+        return 2;
     }
+
+    const status = commands.run(
+        gpa,
+        init.io,
+        which,
+        invocation.getValue([]const u8, "home"),
+        child,
+        &command.parsed,
+        stdout,
+    ) catch |err| {
+        if (frontend.isBrokenPipe(&stdout_file, err)) return 0;
+        stdout.flush() catch {};
+        try stderr.writeAll(commandErrorMessage(which, err));
+        if (isUsageError(err)) {
+            try stderr.writeByte('\n');
+            try zecli.printCommandHelp(arena, stderr, spec);
+        }
+        try stderr.flush();
+        if (isUsageError(err) or err == error.NoSuchInteraction) return 2;
+        return 1;
+    };
+    return frontend.flushStdout(&stdout_file, status);
 }
 
 fn rootErrorMessage(err: anyerror) []const u8 {
     return switch (err) {
-        error.UnknownFlag => "tj: unrecognised flag\n\n",
-        error.MissingFlagValue => "tj: --home needs a directory\n\n",
-        error.UnknownSubcommand => "tj: unknown subcommand\n\n",
-        error.MissingLifecycle => "tj: choose a subcommand before the command\n\n",
         error.MissingNooutSeparator => "tj: noout requires `--` before the command\n\n",
         error.MissingNooutCommand => "tj: noout needs a command after `--`\n\n",
         else => "tj: invalid command line\n\n",

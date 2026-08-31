@@ -46,7 +46,15 @@ pub fn grepRequest(parsed: *const zecli.Parsed) !GrepRequest {
     if (parsed.last("color")) |value| {
         request.color = std.meta.stringToEnum(ColorWhen, value) orelse return error.BadArguments;
     }
-    request.pattern = parsed.positionals.items[0];
+    const positionals = parsed.positionals.items;
+    const passthrough = if (parsed.has_passthrough) parsed.passthrough.items else null;
+    request.pattern = if (passthrough) |literal| blk: {
+        if (positionals.len != 0 or literal.len != 1) return error.BadArguments;
+        break :blk literal[0];
+    } else blk: {
+        if (positionals.len != 1) return error.BadArguments;
+        break :blk positionals[0];
+    };
     if (request.pattern.len == 0 or std.mem.indexOfScalar(u8, request.pattern, '\n') != null) {
         return error.BadArguments;
     }
@@ -545,10 +553,12 @@ test "grep arguments select resources and preserve literal syntax" {
 }
 
 test "grep rejects missing multiline extra and unknown patterns" {
-    try std.testing.expectError(error.ReportedCliError, grepRequestFromArgs(&.{}));
+    try std.testing.expectError(error.BadArguments, grepRequestFromArgs(&.{}));
     try std.testing.expectError(error.BadArguments, grepRequestFromArgs(&.{""}));
     try std.testing.expectError(error.BadArguments, grepRequestFromArgs(&.{"a\nb"}));
     try std.testing.expectError(error.ReportedCliError, grepRequestFromArgs(&.{ "a", "b" }));
+    try std.testing.expectError(error.BadArguments, grepRequestFromArgs(&.{ "--", "a", "b" }));
+    try std.testing.expectError(error.BadArguments, grepRequestFromArgs(&.{ "a", "--", "b" }));
     try std.testing.expectError(error.ReportedCliError, grepRequestFromArgs(&.{ "--wat", "a" }));
     try std.testing.expectError(error.ReportedCliError, grepRequestFromArgs(&.{"--color"}));
     try std.testing.expectError(error.ReportedCliError, grepRequestFromArgs(&.{ "--color", "a" }));
