@@ -24,7 +24,7 @@ Prebuilt release archives contain one installation tree. Download the archive
 for your platform and extract it under `~/.local`:
 
 ```sh
-archive=tj-0.3.1-x86_64-linux-gnu.tar.gz # choose your downloaded archive
+archive=tj-0.4.1-x86_64-linux-gnu.tar.gz # choose your downloaded archive
 mkdir -p ~/.local
 tar -xzf "$archive" -C ~/.local --strip-components=1
 ```
@@ -44,8 +44,8 @@ make install                          # tj, tjctl, and contrib tools into ~/.loc
 Check they landed:
 
 ```sh
-tj --version                          # tj 0.3.1
-tjctl --version                       # tjctl 0.3.1
+tj --version                          # tj 0.4.1
+tjctl --version                       # tjctl 0.4.1
 tj-fence < /dev/null && echo ok       # used by the agent wrappers below
 ```
 
@@ -1067,7 +1067,7 @@ After publishing, the release workflow updates the source-building formula in
 `vrypan/homebrew-tap`. To publish or retry the formula independently:
 
 ```sh
-gh workflow run update-homebrew-formula.yml -f tag=v0.3.1
+gh workflow run update-homebrew-formula.yml -f tag=v0.4.1
 ```
 
 Targets: `{aarch64,x86_64}` × `{macos, linux-musl, linux-gnu}`. The musl
