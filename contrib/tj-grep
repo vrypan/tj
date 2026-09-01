@@ -132,8 +132,8 @@ fi
 noout_begin=
 noout_end=
 if [[ -n $current_journal && -t 1 ]]; then
-    noout_begin=$'\033]5107;tj;noout\033\\'
-    noout_end=$'\033]5107;tj;end\033\\'
+    noout_begin=$'\033]5107;NOOUT\033\\'
+    noout_end=$'\033]5107;END\033\\'
 fi
 
 (

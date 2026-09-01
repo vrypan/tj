@@ -75,7 +75,7 @@ test "tui shows details, confirms deletion, and shares annotation semantics" {
 
     try child.write("exit 0\r");
     try std.testing.expectEqual(@as(u8, 0), try child.finish(gpa, &transcript, support.timeout_ms));
-    try std.testing.expect(std.mem.indexOf(u8, transcript.items, "5107;tj") == null);
+    try std.testing.expect(std.mem.indexOf(u8, transcript.items, "5107;") == null);
 
     const home = try journal.homeArg(gpa);
     defer gpa.free(home);

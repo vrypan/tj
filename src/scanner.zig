@@ -3,7 +3,7 @@
 //! It recognises exactly two OSC families and treats everything else as
 //! opaque bytes:
 //!
-//!   * `OSC 5107 ; tj ; ...`  the tj protocol - consumed, not shown to the
+//!   * `OSC 5107 ; ...`       the SLOT protocol - consumed, not shown to the
 //!     terminal (unless `keep_osc`), and turned into events.
 //!   * `OSC 133 ; ...`        shell integration boundaries - turned into
 //!     events *and* forwarded, since the outer terminal may implement them too.
@@ -11,11 +11,11 @@
 //! Two rules drive the design. Any sequence may be split across reads, so all
 //! partial-match state lives in the struct rather than on the stack. And no
 //! byte from an unknown sequence may ever be swallowed: a sequence that is
-//! not tj's is replayed or passed through verbatim. Once the tj prefix is
+//! not SLOT is replayed or passed through verbatim. Once the SLOT prefix is
 //! confirmed, however, the bytes are protocol and never become recorded data.
 //!
-//! Only sequences that might still turn out to be tj's are withheld. The
-//! moment the payload cannot match `tj_prefix`, everything buffered so far is
+//! Only sequences that might still turn out to be SLOT are withheld. The
+//! moment the payload cannot match `slot_prefix`, everything buffered so far is
 //! released and the rest streams straight through, so a terminal emitting a
 //! megabyte inline image is never held up.
 
@@ -28,10 +28,10 @@ const bel = 0x07;
 /// marker combines three fields which previously had separate envelopes.
 pub const max_osc = 32 * 1024;
 
-const overflow_error = "tj sequence exceeded the 32768-byte limit";
-const unterminated_error = "unterminated tj sequence";
+const overflow_error = "SLOT sequence exceeded the 32768-byte limit";
+const unterminated_error = "unterminated SLOT sequence";
 
-const tj_prefix = "5107;tj;";
+const slot_prefix = "5107;";
 
 /// What a resource is assumed to hold when the program does not say.
 pub const default_mime = "application/octet-stream";
@@ -54,14 +54,14 @@ pub const Event = union(enum) {
     command_run,
     /// `OSC 133;D[;rc]` - the command finished.
     command_end: ?u8,
-    /// `OSC 5107;tj;begin;<path>[;<mime>]` - the output that follows is also a
+    /// `OSC 5107;RESOURCE;<path>[;<mime>]` - the output that follows is also a
     /// named resource of this interaction.
     resource_begin: struct { path: []const u8, mime: []const u8 },
-    /// `OSC 5107;tj;noout` - output stays visible but is omitted from `out`.
+    /// `OSC 5107;NOOUT` - output stays visible but is omitted from `out`.
     noout_begin,
-    /// `OSC 5107;tj;end` - the current resource or noout region is complete.
+    /// `OSC 5107;END` - the current resource or noout region is complete.
     region_end,
-    /// A malformed or unsupported tj sequence. Carries a bounded payload or
+    /// A malformed or unsupported SLOT sequence. Carries a bounded payload or
     /// diagnostic for the journal log; the sequence itself is dropped.
     protocol_error: []const u8,
 };
@@ -71,21 +71,21 @@ const State = enum {
     ground,
     /// Saw ESC, waiting to see whether it opens an OSC.
     esc,
-    /// Inside an OSC whose payload still matches `tj_prefix`. Withheld.
+    /// Inside an OSC whose payload still matches `slot_prefix`. Withheld.
     probe,
-    /// Inside a confirmed tj sequence. Withheld.
+    /// Inside a confirmed SLOT sequence. Withheld.
     capture,
-    /// A confirmed tj sequence exceeded `max_osc`. Its remaining bytes are
+    /// A confirmed SLOT sequence exceeded `max_osc`. Its remaining bytes are
     /// discarded until the terminator, or forwarded as control under
     /// `keep_osc`, but can never become terminal output recorded in `out`.
-    discard_tj,
-    /// Inside an OSC that is not tj's. Already forwarded; still buffered so
+    discard_slot,
+    /// Inside an OSC that is not SLOT. Already forwarded; still buffered so
     /// the payload can be parsed for OSC 133 events.
     pass,
 };
 
 pub const Scanner = struct {
-    /// Forward tj's own sequences to the terminal instead of consuming them.
+    /// Forward SLOT sequences to the terminal instead of consuming them.
     keep_osc: bool = false,
 
     state: State = .ground,
@@ -132,7 +132,7 @@ pub const Scanner = struct {
                 }
             },
             .probe, .capture => i = self.scanWithheld(bytes, i, sink),
-            .discard_tj => i = self.scanDiscardedTj(bytes, i, sink),
+            .discard_slot => i = self.scanDiscardedSlot(bytes, i, sink),
             .pass => i = self.scanPassthrough(bytes, i, sink),
         };
     }
@@ -142,7 +142,7 @@ pub const Scanner = struct {
         switch (self.state) {
             .esc => sink.data(&[_]u8{esc}),
             // An unknown partial OSC may still be another program's, so give
-            // it back. A confirmed tj sequence remains protocol even without
+            // it back. A confirmed SLOT sequence remains protocol even without
             // its terminator and must not leak into `out`.
             .probe => self.abandon(sink, if (self.esc_pending) &[_]u8{esc} else &.{}),
             .capture => {
@@ -153,7 +153,7 @@ pub const Scanner = struct {
                 }
                 sink.event(.{ .protocol_error = unterminated_error });
             },
-            .discard_tj => sink.event(.{ .protocol_error = overflow_error }),
+            .discard_slot => sink.event(.{ .protocol_error = overflow_error }),
             .ground, .pass => {},
         }
         self.state = .ground;
@@ -161,7 +161,7 @@ pub const Scanner = struct {
         self.esc_pending = false;
     }
 
-    /// Inside a sequence that might be tj's, so bytes are held back until we
+    /// Inside a sequence that might be SLOT, so bytes are held back until we
     /// know whether the terminal should see them.
     fn scanWithheld(self: *Scanner, bytes: []const u8, from: usize, sink: anytype) usize {
         var i = from;
@@ -173,15 +173,15 @@ pub const Scanner = struct {
                 self.esc_pending = false;
                 if (byte == '\\') {
                     self.terminator = esc;
-                    self.finishTj(sink);
+                    self.finishSlot(sink);
                     return i;
                 }
                 if (!self.push(esc)) {
-                    self.discardTj(sink, &[_]u8{ esc, byte });
+                    self.discardSlot(sink, &[_]u8{ esc, byte });
                     return i;
                 }
                 if (!self.push(byte)) {
-                    self.discardTj(sink, &[_]u8{byte});
+                    self.discardSlot(sink, &[_]u8{byte});
                     return i;
                 }
             } else if (byte == esc) {
@@ -189,10 +189,10 @@ pub const Scanner = struct {
                 continue;
             } else if (byte == bel) {
                 self.terminator = bel;
-                self.finishTj(sink);
+                self.finishSlot(sink);
                 return i;
             } else if (!self.push(byte)) {
-                self.discardTj(sink, &[_]u8{byte});
+                self.discardSlot(sink, &[_]u8{byte});
                 return i;
             }
 
@@ -204,10 +204,10 @@ pub const Scanner = struct {
         return i;
     }
 
-    /// Scans the tail of an oversized, confirmed tj sequence without ever
+    /// Scans the tail of an oversized, confirmed SLOT sequence without ever
     /// handing it to `sink.data`. Under `keep_osc` the bytes still reach the
     /// terminal through the control-only path, including an exact terminator.
-    fn scanDiscardedTj(self: *Scanner, bytes: []const u8, from: usize, sink: anytype) usize {
+    fn scanDiscardedSlot(self: *Scanner, bytes: []const u8, from: usize, sink: anytype) usize {
         var i = from;
         const start = i;
         var terminated = false;
@@ -241,7 +241,7 @@ pub const Scanner = struct {
         return i;
     }
 
-    /// Inside a sequence that is not tj's. Bytes go straight out; a copy is
+    /// Inside a sequence that is not SLOT. Bytes go straight out; a copy is
     /// kept only so OSC 133 can be parsed at the terminator.
     fn scanPassthrough(self: *Scanner, bytes: []const u8, from: usize, sink: anytype) usize {
         var i = from;
@@ -286,11 +286,11 @@ pub const Scanner = struct {
         return i;
     }
 
-    /// Decide whether the payload so far can still be a tj sequence.
+    /// Decide whether the payload so far can still be a SLOT sequence.
     fn classify(self: *Scanner, sink: anytype) void {
-        const shared = @min(self.len, tj_prefix.len);
-        if (std.mem.eql(u8, self.buf[0..shared], tj_prefix[0..shared])) {
-            if (self.len >= tj_prefix.len) self.state = .capture;
+        const shared = @min(self.len, slot_prefix.len);
+        if (std.mem.eql(u8, self.buf[0..shared], slot_prefix[0..shared])) {
+            if (self.len >= slot_prefix.len) self.state = .capture;
             return;
         }
         // Not ours. Release what was withheld and stream the remainder.
@@ -321,17 +321,17 @@ pub const Scanner = struct {
         self.esc_pending = false;
     }
 
-    fn discardTj(self: *Scanner, sink: anytype, pending: []const u8) void {
+    fn discardSlot(self: *Scanner, sink: anytype, pending: []const u8) void {
         if (self.keep_osc) {
             sink.control(&[_]u8{ esc, ']' });
             sink.control(self.buf[0..self.len]);
             if (pending.len > 0) sink.control(pending);
         }
-        self.state = .discard_tj;
+        self.state = .discard_slot;
         self.esc_pending = false;
     }
 
-    fn finishTj(self: *Scanner, sink: anytype) void {
+    fn finishSlot(self: *Scanner, sink: anytype) void {
         if (self.keep_osc) {
             sink.control(&[_]u8{ esc, ']' });
             sink.control(self.buf[0..self.len]);
@@ -346,31 +346,14 @@ pub const Scanner = struct {
         self.state = .ground;
         self.len = 0;
 
-        if (self.overflowed or payload.len < tj_prefix.len) {
+        if (self.overflowed or payload.len < slot_prefix.len) {
             sink.event(.{ .protocol_error = payload });
             return;
         }
-        const rest = payload[tj_prefix.len..];
+        const rest = payload[slot_prefix.len..];
 
-        const EncodedKind = enum { context, command, expanded, cwd };
-        const encoded_kind: ?EncodedKind = if (std.mem.startsWith(u8, rest, "context;"))
-            .context
-        else if (std.mem.startsWith(u8, rest, "cmd;"))
-            .command
-        else if (std.mem.startsWith(u8, rest, "expanded;"))
-            .expanded
-        else if (std.mem.startsWith(u8, rest, "cwd;"))
-            .cwd
-        else
-            null;
-        if (encoded_kind) |kind| {
-            const prefix_len = switch (kind) {
-                .context => "context;".len,
-                .command => "cmd;".len,
-                .expanded => "expanded;".len,
-                .cwd => "cwd;".len,
-            };
-            const encoded = rest[prefix_len..];
+        if (std.mem.startsWith(u8, rest, "CONTEXT;")) {
+            const encoded = rest["CONTEXT;".len..];
             var decoded: [max_osc]u8 = undefined;
             const decoder = std.base64.standard.Decoder;
             const size = decoder.calcSizeForSlice(encoded) catch {
@@ -385,17 +368,12 @@ pub const Scanner = struct {
                 sink.event(.{ .protocol_error = payload });
                 return;
             };
-            switch (kind) {
-                .context => emitContext(decoded[0..size], payload, sink),
-                .command => sink.event(.{ .command_line = decoded[0..size] }),
-                .expanded => sink.event(.{ .command_expanded = decoded[0..size] }),
-                .cwd => sink.event(.{ .working_directory = decoded[0..size] }),
-            }
+            emitContext(decoded[0..size], payload, sink);
             return;
         }
 
-        if (std.mem.startsWith(u8, rest, "begin;")) {
-            const fields = rest["begin;".len..];
+        if (std.mem.startsWith(u8, rest, "RESOURCE;")) {
+            const fields = rest["RESOURCE;".len..];
             // Everything past the first separator is the mime type, which may
             // itself contain separators.
             const cut = std.mem.indexOfScalar(u8, fields, ';');
@@ -412,12 +390,12 @@ pub const Scanner = struct {
             return;
         }
 
-        if (std.mem.eql(u8, rest, "noout")) {
+        if (std.mem.eql(u8, rest, "NOOUT")) {
             sink.event(.noout_begin);
             return;
         }
 
-        if (std.mem.eql(u8, rest, "end")) {
+        if (std.mem.eql(u8, rest, "END")) {
             sink.event(.region_end);
             return;
         }
@@ -571,28 +549,29 @@ test "ordinary output passes through untouched" {
     try std.testing.expectEqual(@as(usize, 0), r.events.items.len);
 }
 
-test "tj sequences are stripped from the stream" {
+test "SLOT context sequences are stripped from the stream" {
     const gpa = std.testing.allocator;
-    // "ls -l" base64 encodes to bHMgLWw=
-    const input = "a\x1b]5107;tj;cmd;bHMgLWw=\x1b\\b";
+    const input = "a\x1b]5107;CONTEXT;MTs3OzEzOzA7MDtlY2hvIGhpL3RtcC93b3JrIGRpcg==\x1b\\b";
     var r = run(gpa, input, input.len, false);
     defer r.deinit();
     try std.testing.expectEqualStrings("ab", r.forwarded.items);
     try std.testing.expectEqualStrings("ab", r.recorded.items);
-    try std.testing.expectEqual(@as(usize, 1), r.events.items.len);
-    try std.testing.expectEqualStrings("ls -l", r.events.items[0].command_line);
+    try std.testing.expectEqual(@as(usize, 2), r.events.items.len);
+    try std.testing.expectEqualStrings("echo hi", r.events.items[0].command_line);
+    try std.testing.expectEqualStrings("/tmp/work dir", r.events.items[1].working_directory);
 }
 
-test "working directory sequences are stripped and survive split reads" {
+test "context sequences survive split reads" {
     const gpa = std.testing.allocator;
-    const input = "before\x1b]5107;tj;cwd;L3RtcC93b3JrIGRpcg==\x1b\\after";
+    const input = "before\x1b]5107;CONTEXT;MTs3OzEzOzA7MDtlY2hvIGhpL3RtcC93b3JrIGRpcg==\x1b\\after";
     for ([_]usize{ 1, 3, input.len }) |chunk| {
         var r = run(gpa, input, chunk, false);
         defer r.deinit();
         try std.testing.expectEqualStrings("beforeafter", r.forwarded.items);
         try std.testing.expectEqualStrings("beforeafter", r.recorded.items);
-        try std.testing.expectEqual(@as(usize, 1), r.events.items.len);
-        try std.testing.expectEqualStrings("/tmp/work dir", r.events.items[0].working_directory);
+        try std.testing.expectEqual(@as(usize, 2), r.events.items.len);
+        try std.testing.expectEqualStrings("echo hi", r.events.items[0].command_line);
+        try std.testing.expectEqualStrings("/tmp/work dir", r.events.items[1].working_directory);
     }
 }
 
@@ -619,7 +598,7 @@ test "one context sequence carries command cwd and optional expansion" {
     };
 
     for (cases) |case| {
-        const input = try std.fmt.allocPrint(gpa, "before\x1b]5107;tj;context;{s}\x1b\\after", .{case.encoded});
+        const input = try std.fmt.allocPrint(gpa, "before\x1b]5107;CONTEXT;{s}\x1b\\after", .{case.encoded});
         defer gpa.free(input);
         for ([_]usize{ 1, 5, input.len }) |chunk| {
             var r = run(gpa, input, chunk, false);
@@ -642,7 +621,7 @@ test "malformed context envelopes are rejected atomically" {
         "MTsxOzE7eDswO2Fi",
         "MTsxOzE7MDsxO2FiYw==",
     }) |encoded| {
-        const input = try std.fmt.allocPrint(gpa, "\x1b]5107;tj;context;{s}\x1b\\", .{encoded});
+        const input = try std.fmt.allocPrint(gpa, "\x1b]5107;CONTEXT;{s}\x1b\\", .{encoded});
         defer gpa.free(input);
         var r = run(gpa, input, 2, false);
         defer r.deinit();
@@ -651,9 +630,9 @@ test "malformed context envelopes are rejected atomically" {
     }
 }
 
-test "keep_osc forwards tj sequences but never records them" {
+test "keep_osc forwards SLOT sequences but never records them" {
     const gpa = std.testing.allocator;
-    const input = "a\x1b]5107;tj;cmd;bHMgLWw=\x1b\\b";
+    const input = "a\x1b]5107;CONTEXT;MTs3OzEzOzA7MDtlY2hvIGhpL3RtcC93b3JrIGRpcg==\x1b\\b";
     var r = run(gpa, input, input.len, true);
     defer r.deinit();
     try std.testing.expectEqualStrings(input, r.forwarded.items);
@@ -682,30 +661,45 @@ test "OSC 133;D without a status reports no status" {
     try std.testing.expectEqual(@as(?u8, null), r.events.items[0].command_end);
 }
 
-test "other OSC consumers are left alone" {
+test "other OSC numbers are left alone" {
     const gpa = std.testing.allocator;
-    // Same OSC number, different second field: not ours, must not be stripped.
-    const input = "\x1b]5107;other;stuff\x1b\\\x1b]0;window title\x07";
+    const input = "\x1b]5108;other;stuff\x1b\\\x1b]0;window title\x07";
     var r = run(gpa, input, input.len, false);
     defer r.deinit();
     try std.testing.expectEqualStrings(input, r.forwarded.items);
     try std.testing.expectEqual(@as(usize, 0), r.events.items.len);
 }
 
-test "a tj-lookalike prefix is not stripped" {
+test "unsupported and legacy SLOT messages are stripped and reported" {
     const gpa = std.testing.allocator;
-    const input = "\x1b]5107;tjunk;x\x1b\\";
+    for ([_][]const u8{
+        "\x1b]5107;OTHER;stuff\x1b\\",
+        "\x1b]5107;tj;noout\x1b\\",
+        "\x1b]5107;noout\x1b\\",
+    }) |input| {
+        var r = run(gpa, input, 1, false);
+        defer r.deinit();
+        try std.testing.expectEqual(@as(usize, 0), r.forwarded.items.len);
+        try std.testing.expectEqual(@as(usize, 0), r.recorded.items.len);
+        try std.testing.expectEqual(@as(usize, 1), r.events.items.len);
+        try std.testing.expect(r.events.items[0] == .protocol_error);
+    }
+}
+
+test "a SLOT-lookalike number is not stripped" {
+    const gpa = std.testing.allocator;
+    const input = "\x1b]51070;CONTEXT;x\x1b\\";
     var r = run(gpa, input, input.len, false);
     defer r.deinit();
     try std.testing.expectEqualStrings(input, r.forwarded.items);
 }
 
-test "an oversized confirmed tj sequence is dropped through its terminator" {
+test "an oversized confirmed SLOT sequence is dropped through its terminator" {
     const gpa = std.testing.allocator;
     for ([_][]const u8{ "\x1b\\", "\x07" }) |terminator| {
         var input: std.ArrayList(u8) = .empty;
         defer input.deinit(gpa);
-        try input.appendSlice(gpa, "before\x1b]5107;tj;cmd;");
+        try input.appendSlice(gpa, "before\x1b]5107;CONTEXT;");
         try input.appendSlice(gpa, "A" ** (max_osc + 100));
         try input.appendSlice(gpa, terminator);
         try input.appendSlice(gpa, "after");
@@ -721,11 +715,11 @@ test "an oversized confirmed tj sequence is dropped through its terminator" {
     }
 }
 
-test "keep_osc forwards an oversized tj sequence as control only" {
+test "keep_osc forwards an oversized SLOT sequence as control only" {
     const gpa = std.testing.allocator;
     var input: std.ArrayList(u8) = .empty;
     defer input.deinit(gpa);
-    try input.appendSlice(gpa, "before\x1b]5107;tj;expanded;");
+    try input.appendSlice(gpa, "before\x1b]5107;CONTEXT;");
     try input.appendSlice(gpa, "A" ** (max_osc + 100));
     try input.appendSlice(gpa, "\x1b\\after");
 
@@ -741,7 +735,7 @@ test "an oversized foreign OSC still passes through byte for byte" {
     const gpa = std.testing.allocator;
     var input: std.ArrayList(u8) = .empty;
     defer input.deinit(gpa);
-    try input.appendSlice(gpa, "\x1b]5107;other;");
+    try input.appendSlice(gpa, "\x1b]5108;other;");
     try input.appendSlice(gpa, "A" ** (max_osc + 100));
     try input.appendSlice(gpa, "\x1b\\");
 
@@ -752,9 +746,9 @@ test "an oversized foreign OSC still passes through byte for byte" {
     try std.testing.expectEqual(@as(usize, 0), r.events.items.len);
 }
 
-test "a stream ending mid-confirmed tj sequence is dropped and reported" {
+test "a stream ending mid-confirmed SLOT sequence is dropped and reported" {
     const gpa = std.testing.allocator;
-    const input = "x\x1b]5107;tj;cm";
+    const input = "x\x1b]5107;CON";
     var r = run(gpa, input, input.len, false);
     defer r.deinit();
     try std.testing.expectEqualStrings("x", r.forwarded.items);
@@ -765,7 +759,7 @@ test "a stream ending mid-confirmed tj sequence is dropped and reported" {
 
 test "a stream ending while probing an unknown OSC releases what was withheld" {
     const gpa = std.testing.allocator;
-    const input = "x\x1b]5107;t";
+    const input = "x\x1b]510";
     var r = run(gpa, input, input.len, false);
     defer r.deinit();
     try std.testing.expectEqualStrings(input, r.forwarded.items);
@@ -792,7 +786,7 @@ test "results are identical however the stream is chunked" {
     const gpa = std.testing.allocator;
     const input =
         "prompt$ \x1b]133;A\x1b\\" ++
-        "\x1b]5107;tj;cmd;ZWNobyBoaQ==\x1b\\" ++
+        "\x1b]5107;CONTEXT;MTs3OzQ7MDswO2VjaG8gaGkvdG1w\x1b\\" ++
         "\x1b]133;C\x07" ++
         "hi\r\n\x1b[32mgreen\x1b[0m" ++
         "\x1b]0;title\x07" ++
@@ -834,7 +828,7 @@ test "the forwarded stream is byte-identical to the input when nothing is ours" 
 
 test "a published resource is announced and stripped" {
     const gpa = std.testing.allocator;
-    const input = "a\x1b]5107;tj;begin;files/data.csv;text/csv\x1b\\1,2\r\n\x1b]5107;tj;end\x1b\\b";
+    const input = "a\x1b]5107;RESOURCE;files/data.csv;text/csv\x1b\\1,2\r\n\x1b]5107;END\x1b\\b";
     var r = run(gpa, input, input.len, false);
     defer r.deinit();
 
@@ -848,7 +842,7 @@ test "a published resource is announced and stripped" {
 
 test "a resource with no mime type gets the default" {
     const gpa = std.testing.allocator;
-    const input = "\x1b]5107;tj;begin;err\x1b\\oops\x1b]5107;tj;end\x1b\\";
+    const input = "\x1b]5107;RESOURCE;err\x1b\\oops\x1b]5107;END\x1b\\";
     var r = run(gpa, input, input.len, false);
     defer r.deinit();
     try std.testing.expectEqualStrings("err", r.events.items[0].resource_begin.path);
@@ -856,9 +850,9 @@ test "a resource with no mime type gets the default" {
     try std.testing.expectEqualStrings("oops", r.forwarded.items);
 }
 
-test "begin without a path is a protocol error" {
+test "RESOURCE without a path is a protocol error" {
     const gpa = std.testing.allocator;
-    const input = "\x1b]5107;tj;begin;\x1b\\";
+    const input = "\x1b]5107;RESOURCE;\x1b\\";
     var r = run(gpa, input, input.len, false);
     defer r.deinit();
     try std.testing.expectEqual(@as(usize, 1), r.events.items.len);
@@ -868,7 +862,7 @@ test "begin without a path is a protocol error" {
 test "resource markers survive any chunking" {
     const gpa = std.testing.allocator;
     const input =
-        "before\x1b]5107;tj;begin;files/a.txt;text/plain\x1b\\content\x1b]5107;tj;end\x1b\\after";
+        "before\x1b]5107;RESOURCE;files/a.txt;text/plain\x1b\\content\x1b]5107;END\x1b\\after";
     var whole = run(gpa, input, input.len, false);
     defer whole.deinit();
 
@@ -888,7 +882,7 @@ test "resource markers survive any chunking" {
 test "noout markers are exact, stripped, and survive any chunking" {
     const gpa = std.testing.allocator;
     const input =
-        "before\x1b]5107;tj;noout\x1b\\omitted\x1b]5107;tj;end\x1b\\after";
+        "before\x1b]5107;NOOUT\x1b\\omitted\x1b]5107;END\x1b\\after";
     var whole = run(gpa, input, input.len, false);
     defer whole.deinit();
 
@@ -910,7 +904,7 @@ test "noout markers are exact, stripped, and survive any chunking" {
 
 test "keep_osc forwards noout markers only as control bytes" {
     const gpa = std.testing.allocator;
-    const input = "a\x1b]5107;tj;noout\x1b\\hidden\x1b]5107;tj;end\x1b\\b";
+    const input = "a\x1b]5107;NOOUT\x1b\\hidden\x1b]5107;END\x1b\\b";
     var r = run(gpa, input, 1, true);
     defer r.deinit();
     try std.testing.expectEqualStrings(input, r.forwarded.items);
@@ -919,9 +913,9 @@ test "keep_osc forwards noout markers only as control bytes" {
     try std.testing.expect(r.events.items[1] == .region_end);
 }
 
-test "noout with fields is a protocol error" {
+test "NOOUT with fields is a protocol error" {
     const gpa = std.testing.allocator;
-    var r = run(gpa, "\x1b]5107;tj;noout;extra\x1b\\", 1, false);
+    var r = run(gpa, "\x1b]5107;NOOUT;extra\x1b\\", 1, false);
     defer r.deinit();
     try std.testing.expectEqual(@as(usize, 1), r.events.items.len);
     try std.testing.expect(r.events.items[0] == .protocol_error);

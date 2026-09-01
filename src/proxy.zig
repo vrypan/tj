@@ -454,9 +454,9 @@ const Recorder = struct {
             .protocol_error => |payload| {
                 const shown = payload[0..@min(payload.len, max_protocol_error_log_bytes)];
                 if (shown.len == payload.len) {
-                    self.store.warn("ignored tj sequence: {s}", .{shown});
+                    self.store.warn("ignored SLOT sequence: {s}", .{shown});
                 } else {
-                    self.store.warn("ignored tj sequence (truncated): {s}", .{shown});
+                    self.store.warn("ignored SLOT sequence (truncated): {s}", .{shown});
                 }
             },
         }

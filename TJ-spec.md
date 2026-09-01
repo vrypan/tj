@@ -499,10 +499,6 @@ the next command that actually starts. It does not read or re-evaluate prompt
 variables, so prompt substitutions and external engines such as Starship are
 captured exactly as displayed.
 
-The OSC SLOT forms in this specification define the agreed next wire format.
-TJ 0.4.1 still implements the earlier `OSC 5107;tj;...` form; the implementation
-will move to OSC SLOT in a separate change.
-
 At `preexec`, the plugin emits one `OSC SLOT;CONTEXT;PAYLOAD ST` marker, where
 `SLOT` is numeric OSC code 5107. `PAYLOAD` is the base64 encoding of an ASCII
 header followed by its three concatenated fields:

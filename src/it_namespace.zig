@@ -5,6 +5,7 @@ const posix = std.posix;
 const harness = @import("harness.zig");
 const noout = @import("noout.zig");
 const plain = @import("plain.zig");
+const report = @import("report.zig");
 const journal_name = @import("journal_name.zig");
 
 const options = @import("build_options");
@@ -274,7 +275,11 @@ test "history wraps to terminal width and pipes remain one entry per line" {
     var physical_lines = std.mem.splitScalar(u8, visible, '\n');
     while (physical_lines.next()) |raw_line| {
         const line = std.mem.trimEnd(u8, raw_line, "\r");
-        if (line.len != 0) try std.testing.expect(line.len <= 48);
+        if (line.len != 0) {
+            const displayed = try report.sanitizeDisplayText(gpa, line);
+            defer gpa.free(displayed);
+            try std.testing.expect(displayed.len <= 48);
+        }
     }
 
     var empty = try support.run(gpa, &.{ "--home", home, "hist", "--tag", "not-present" }, 24, 48);
@@ -325,13 +330,13 @@ test "terminal history omits its listing while piped history remains recordable"
     defer gpa.free(direct_out);
     try std.testing.expect(std.mem.indexOf(u8, direct_out, "<tj:noout>") != null);
     try std.testing.expect(std.mem.indexOf(u8, direct_out, "HIST_NOOUT_PAYLOAD_012") == null);
-    try std.testing.expect(std.mem.indexOf(u8, direct_out, "5107;tj") == null);
+    try std.testing.expect(std.mem.indexOf(u8, direct_out, "5107;") == null);
 
     const piped_out = try journal.read(gpa, "3/out");
     defer gpa.free(piped_out);
     try std.testing.expect(std.mem.indexOf(u8, piped_out, "HIST_NOOUT_PAYLOAD_012") != null);
     try std.testing.expect(std.mem.indexOf(u8, piped_out, "<tj:noout>") == null);
-    try std.testing.expect(std.mem.indexOf(u8, piped_out, "5107;tj") == null);
+    try std.testing.expect(std.mem.indexOf(u8, piped_out, "5107;") == null);
 }
 
 test "history shows positional annotation flags size UTC date and wrapped commands" {
@@ -1060,7 +1065,7 @@ test "concurrent namespace operations leave one complete winner" {
         "--",
         "/bin/sh",
         "-c",
-        "printf '\\033]5107;tj;bogus\\033\\\\'",
+        "printf '\\033]5107;BOGUS\\033\\\\'",
     }, 24, 80);
     const renaming = try support.spawnTjctl(gpa, &.{ support.tjctl, "--home", scratch.path(), "mv", "new-source", "shared-destination" }, 24, 80);
     var create_out: std.ArrayList(u8) = .empty;
