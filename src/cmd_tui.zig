@@ -26,6 +26,10 @@ const detail_output_limit = 2 * 1024 * 1024;
 
 var region_active: std.atomic.Value(bool) = .init(false);
 
+fn orderU32(wanted: u32, item: u32) std.math.Order {
+    return std.math.order(wanted, item);
+}
+
 const Mode = enum { normal, add_tag, remove_tag, name, delete_confirm, detail };
 
 const Effect = enum {
@@ -69,9 +73,10 @@ const Detail = struct {
 };
 
 const Model = struct {
-    /// The allocation may be longer than count when the running `tj tui`
-    /// entry was removed from the visible index in place.
+    /// The allocation may be longer than count when the running browser
+    /// command or entries outside a supplied filter were removed in place.
     numbers: []u32 = &.{},
+    allowed_numbers: ?[]u32 = null,
     count: usize = 0,
     selected: std.DynamicBitSetUnmanaged = .{},
     range_base: std.DynamicBitSetUnmanaged = .{},
@@ -103,6 +108,7 @@ const Model = struct {
         self.selected.deinit(gpa);
         self.range_base.deinit(gpa);
         gpa.free(self.numbers);
+        if (self.allowed_numbers) |numbers| gpa.free(numbers);
         self.* = undefined;
     }
 
@@ -291,6 +297,9 @@ const Model = struct {
             if (active) |entry| {
                 if (std.mem.eql(u8, entry.journal, journal) and entry.number == number) continue;
             }
+            if (self.allowed_numbers) |allowed| {
+                if (std.sort.binarySearch(u32, allowed, number, orderU32) == null) continue;
+            }
             numbers[new_count] = number;
             new_count += 1;
         }
@@ -358,12 +367,21 @@ const Model = struct {
 };
 
 pub fn run(gpa: std.mem.Allocator, io: Io, home: ?[]const u8) !void {
+    return runWithFilter(gpa, io, home, null);
+}
+
+pub fn runFiltered(gpa: std.mem.Allocator, io: Io, home: ?[]const u8, numbers: []const u32) !void {
+    return runWithFilter(gpa, io, home, numbers);
+}
+
+fn runWithFilter(gpa: std.mem.Allocator, io: Io, home: ?[]const u8, allowed_numbers: ?[]const u32) !void {
     const journal = try context.currentJournal();
     if (journal.len == 0) return error.NotInJournal;
     if (!sys.isTty(0) or !sys.isTty(1)) return error.NoControllingTerminal;
 
     var model: Model = .{};
     defer model.deinit(gpa);
+    if (allowed_numbers) |numbers| model.allowed_numbers = try gpa.dupe(u32, numbers);
     try model.reload(gpa, io, home, journal);
 
     try sys.writeAll(1, noout.begin_marker);
@@ -1181,10 +1199,11 @@ fn fillRow(screen: *zooi.Screen, row: u16, columns: u16, style: zooi.Style) void
 
 fn renderHeader(journal: []const u8, model: *const Model, screen: *zooi.Screen) void {
     var buffer: [160]u8 = undefined;
+    const noun = if (model.allowed_numbers != null) "matches" else "entries";
     const text = if (model.selectedCount() == 0)
-        std.fmt.bufPrint(&buffer, " tj  {s}  {d} entries ", .{ journal, model.count }) catch " tj "
+        std.fmt.bufPrint(&buffer, " tj  {s}  {d} {s} ", .{ journal, model.count, noun }) catch " tj "
     else
-        std.fmt.bufPrint(&buffer, " tj  {s}  {d} entries  {d} selected ", .{ journal, model.count, model.selectedCount() }) catch " tj ";
+        std.fmt.bufPrint(&buffer, " tj  {s}  {d} {s}  {d} selected ", .{ journal, model.count, noun, model.selectedCount() }) catch " tj ";
     screen.move(0, 0);
     screen.writeStyled(text, header_style);
     var spaces: [256]u8 = @splat(' ');

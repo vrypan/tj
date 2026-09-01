@@ -155,6 +155,11 @@ fn commandErrorMessage(which: cli.CommandName, err: anyerror) []const u8 {
         error.ForkFailed => "tj: cannot fork\n",
         else => "tj: cannot start noout command\n",
     };
+    if (which == .grep) switch (err) {
+        error.NoControllingTerminal, error.NotATerminal => return "tj: grep --tui needs an interactive terminal\n",
+        error.TerminalSetupFailed, error.ReadFailed, error.PollFailed => return "tj: grep --tui terminal session failed\n",
+        else => {},
+    };
     return switch (err) {
         error.NotInJournal => "tj: not inside a tj journal writer\n",
         error.NoSuchJournal => "tj: no journal matches that name\n",

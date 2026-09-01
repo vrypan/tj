@@ -62,6 +62,7 @@ const force_flag = [_]zecli.FlagSpec{
 
 const grep_flags = [_]zecli.FlagSpec{
     .{ .name = "all", .short = 'a', .description = "Search every journal" },
+    .{ .name = "tui", .description = "Browse matching entries" },
     .{ .name = "cmd", .description = "Search commands" },
     .{ .name = "out", .description = "Search output" },
     .{ .name = "ignore-case", .short = 'i', .description = "Fold ASCII letter case" },

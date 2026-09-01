@@ -1006,7 +1006,7 @@ The portable search command is:
 
 ``` text
 tj grep [--all] [--cmd] [--out] [-i|--ignore-case]
-        [--color WHEN] [--] PATTERN
+        [--color WHEN] [--tui] [--] PATTERN
 ```
 
 `PATTERN` is one non-empty literal byte string, not a regular expression. It
@@ -1021,6 +1021,14 @@ writer. Both `cmd` and `out` are selected initially. The first `--cmd` or
 form a union, so `--cmd --out` selects both. No other entry files,
 published resources, annotations, private trash, or lock data are searched.
 A missing `out` is skipped.
+
+`--tui` searches the current journal and opens the entry browser over the
+matching entry numbers. Each entry appears once regardless of how many lines
+or selected resources match. The resulting subset retains numeric entry order
+and the browser's normal annotation and deletion operations. Browser refreshes
+retain the original matching subset while removing entries deleted since the
+search. No-match status is 1 and does not open the browser. `--tui` is
+incompatible with `--all` and with an explicitly supplied `--color` option.
 
 Color behavior uses GNU grep's three modes. With no color option, highlighting
 is disabled. `--color` and `--colour` require `WHEN`, supplied as the next

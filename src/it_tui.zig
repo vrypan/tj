@@ -114,3 +114,42 @@ test "tui shows details, confirms deletion, and shares annotation semantics" {
     try std.testing.expect(std.mem.indexOf(u8, tui_out, "DETAIL_SECOND") == null);
     try std.testing.expect(std.mem.indexOf(u8, tui_out, "entries") == null);
 }
+
+test "grep tui deduplicates matching entries" {
+    if (!support.haveZsh()) return error.SkipZigTest;
+    const gpa = std.testing.allocator;
+
+    var journal = try support.Journal.open(gpa);
+    defer journal.close();
+    const child = try support.spawnJournalZsh(gpa, &journal);
+    var transcript: std.ArrayList(u8) = .empty;
+    defer transcript.deinit(gpa);
+    try support.setupJournalZsh(gpa, child, &transcript);
+
+    var from = transcript.items.len;
+    try child.write("printf '%s\\n' DEDUP_TUI_HIT DEDUP_TUI_HIT\n");
+    try std.testing.expect(try child.readUntilFrom(gpa, &transcript, from, support.test_prompt, support.timeout_ms));
+    from = transcript.items.len;
+    try child.write("echo DEDUP_TUI_HIT\n");
+    try std.testing.expect(try child.readUntilFrom(gpa, &transcript, from, support.test_prompt, support.timeout_ms));
+    from = transcript.items.len;
+    try child.write("echo UNRELATED_TUI_ENTRY\n");
+    try std.testing.expect(try child.readUntilFrom(gpa, &transcript, from, support.test_prompt, support.timeout_ms));
+
+    from = transcript.items.len;
+    try child.write("command \"$TJ\" grep --tui DEDUP_TUI_HIT\n");
+    try std.testing.expect(try child.readUntilFrom(gpa, &transcript, from, "2 matches", support.timeout_ms));
+    const browser = transcript.items[from..];
+    try std.testing.expect(std.mem.indexOf(u8, browser, "UNRELATED_TUI_ENTRY") == null);
+    try child.write("q");
+    try std.testing.expect(try child.readUntilFrom(gpa, &transcript, from, support.test_prompt, support.timeout_ms));
+
+    try child.write("exit 0\r");
+    try std.testing.expectEqual(@as(u8, 0), try child.finish(gpa, &transcript, support.timeout_ms));
+
+    const grep_out = try journal.read(gpa, "4/out");
+    defer gpa.free(grep_out);
+    try std.testing.expect(std.mem.startsWith(u8, grep_out, store.noout_placeholder));
+    try std.testing.expect(std.mem.indexOf(u8, grep_out, "DEDUP_TUI_HIT") == null);
+    try std.testing.expect(std.mem.indexOf(u8, grep_out, "5107;") == null);
+}

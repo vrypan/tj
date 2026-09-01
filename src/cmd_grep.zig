@@ -16,6 +16,7 @@ const noout = @import("noout.zig");
 const report = @import("report.zig");
 const replay_engine = @import("replay.zig");
 const cmd_context = @import("context.zig");
+const cmd_tui = @import("cmd_tui.zig");
 
 pub fn grepRequestFromArgs(args: []const [:0]const u8) !GrepRequest {
     var parsed = try cmd_context.parseTestCommand(.grep, args);
@@ -27,6 +28,7 @@ pub const ColorWhen = enum { never, auto, always };
 
 pub const GrepRequest = struct {
     all: bool = false,
+    tui: bool = false,
     commands: bool = true,
     output: bool = true,
     ignore_case: bool = false,
@@ -37,6 +39,7 @@ pub const GrepRequest = struct {
 pub fn grepRequest(parsed: *const zecli.Parsed) !GrepRequest {
     var request: GrepRequest = .{
         .all = parsed.enabled("all"),
+        .tui = parsed.enabled("tui"),
         .ignore_case = parsed.enabled("ignore-case"),
     };
     if (parsed.enabled("cmd") or parsed.enabled("out")) {
@@ -428,9 +431,15 @@ pub fn grepCommand(
 ) !u8 {
     const request = try grepRequest(parsed);
 
+    if (request.tui and (request.all or parsed.present("color"))) return error.BadArguments;
+
     const current = sys.env("TJ_JOURNAL");
     if (!request.all and (current == null or current.?.len == 0)) {
-        cmd_context.note("tj grep: no current journal; use --all\n", .{});
+        if (request.tui) {
+            cmd_context.note("tj grep --tui: no current journal\n", .{});
+        } else {
+            cmd_context.note("tj grep: no current journal; use --all\n", .{});
+        }
         return 2;
     }
 
@@ -438,6 +447,17 @@ pub fn grepCommand(
     defer root.close(io);
     var matcher = try search.Matcher.init(gpa, request.pattern, request.ignore_case);
     defer matcher.deinit();
+    const active = cmd_context.activeInteraction();
+
+    if (request.tui) {
+        var numbers: std.ArrayList(u32) = .empty;
+        defer numbers.deinit(gpa);
+        try collectMatchingEntries(gpa, io, root, current.?, request, active, &matcher, &numbers);
+        if (numbers.items.len == 0) return 1;
+        try cmd_tui.runFiltered(gpa, io, home, numbers.items);
+        return 0;
+    }
+
     const terminal_columns = if (sys.isTty(1)) report.terminalColumns() else null;
     var output: GrepOutput = .{
         .io = io,
@@ -452,7 +472,6 @@ pub fn grepCommand(
         .reference_width = 1,
     };
     defer output.noout_region.finish();
-    const active = cmd_context.activeInteraction();
     var total: u64 = 0;
 
     if (request.all) {
@@ -470,6 +489,55 @@ pub fn grepCommand(
         try grepJournal(gpa, io, root, current.?, request, active, &matcher, &output, &total);
     }
     return if (total == 0) 1 else 0;
+}
+
+const MatchOnlySink = struct {
+    fn emit(_: *anyopaque, _: Io.File, _: u64, _: u64) !void {}
+};
+
+fn collectMatchingEntries(
+    gpa: std.mem.Allocator,
+    io: Io,
+    root: store.Dir,
+    journal: []const u8,
+    request: GrepRequest,
+    active: ?cmd_context.ActiveInteraction,
+    matcher: *const search.Matcher,
+    numbers: *std.ArrayList(u32),
+) !void {
+    var interactions = store.iterateInteractions(gpa, io, root, journal, store.no_command) catch |err| switch (err) {
+        error.FileNotFound => return error.NoSuchJournal,
+        else => |other| return other,
+    };
+    defer interactions.deinit();
+    var sink_context: u8 = 0;
+
+    while (try interactions.next()) |info| {
+        defer info.deinit(gpa);
+        if (active) |item| {
+            if (item.number == info.number and std.mem.eql(u8, item.journal, journal)) continue;
+        }
+        for ([_]struct { enabled: bool, name: []const u8 }{
+            .{ .enabled = request.commands, .name = "cmd" },
+            .{ .enabled = request.output, .name = "out" },
+        }) |resource| {
+            if (!resource.enabled) continue;
+            var path_buf: [96]u8 = undefined;
+            const path = try std.fmt.bufPrint(&path_buf, "{s}/{d}/{s}", .{ journal, info.number, resource.name });
+            var file = root.openFile(io, path, .{}) catch |err| switch (err) {
+                error.FileNotFound => continue,
+                else => |other| return other,
+            };
+            defer file.close(io);
+            const found = try search.scanFile(io, file, matcher, .{
+                .context = &sink_context,
+                .emit = MatchOnlySink.emit,
+            });
+            if (found == 0) continue;
+            try numbers.append(gpa, info.number);
+            break;
+        }
+    }
 }
 
 pub fn grepJournal(
@@ -544,6 +612,7 @@ test "grep arguments select resources and preserve literal syntax" {
     try std.testing.expectEqualStrings("-needle", leading.pattern);
 
     try std.testing.expectEqual(ColorWhen.never, (try grepRequestFromArgs(&.{"x"})).color);
+    try std.testing.expect((try grepRequestFromArgs(&.{ "--tui", "x" })).tui);
     const automatic = try grepRequestFromArgs(&.{ "--color", "auto", "x" });
     try std.testing.expectEqual(ColorWhen.auto, automatic.color);
     try std.testing.expectEqualStrings("x", automatic.pattern);
