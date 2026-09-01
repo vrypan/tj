@@ -57,7 +57,7 @@ pub fn run(
             });
             return result.exit_code;
         },
-        .ls => try cmd_history.listJournals(gpa, io, home, out),
+        .ls => try cmd_history.listJournals(gpa, io, home, parsed.enabled("long"), parsed.last("number"), out),
         .mv => {
             if (sys.env("TJ_JOURNAL")) |current| if (current.len != 0) return error.InsideJournalRename;
             var root = try store.openRoot(io, home);

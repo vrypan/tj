@@ -89,7 +89,7 @@ old processes, environment variables, or shell state.
 Useful journal commands:
 
 ```sh
-tjctl ls
+tjctl ls -l
 tjctl current
 tjctl mv project-work new-name
 tjctl rm new-name

@@ -393,7 +393,7 @@ tj hist|cat|grep|name|tag|pin|rm|last|resolve|complete|noout ...
 
 tjctl new [options] [NAME] [-- COMMAND...]
 tjctl use [options] JOURNAL [-- COMMAND...]
-tjctl ls
+tjctl ls [-l] [-n NUMBER]
 tjctl mv JOURNAL NEW-NAME
 tjctl rm JOURNAL [--force]
 tjctl du [JOURNAL] [--chart] [--bytes]
@@ -456,18 +456,21 @@ cross-journal references always use the complete name. `tjctl mv` is an
 intentional identity change and leaves no alias, so old qualified references
 stop resolving.
 
-All-journal traversal, including `tjctl ls` and `tj grep --all`, is ascending
-lexicographic canonical-name order. Directory names have no chronological
-meaning. `tjctl replay` therefore always requires a journal selector.
+`tj grep --all` traverses journals in ascending lexicographic canonical-name
+order. Directory names have no chronological meaning. `tjctl replay` therefore
+always requires a journal selector.
 
-`tjctl ls` streams each valid complete name and entry count and marks the
-current journal when applicable. `tjctl current` prints the complete
-`TJ_JOURNAL` value and fails outside a writer. `tjctl du` retains logical-byte,
-chart, color, and noout behavior described below. `tjctl replay` retains the
-recorded-prompt, range, pacing, duration, and inside-writer rules; only its
-mandatory selector and command owner change. `tjctl rm` prompts on a terminal
-unless forced, refuses pins unless forced, and never removes an active journal.
-`tjctl mv` never prompts, refuses active sources and existing destinations,
+`tjctl ls` orders journals by their latest remaining completed-entry timestamp,
+newest first, with canonical name as the tie-breaker and journals without valid
+timing metadata last. Its default form prints one complete name per line. `-l`
+adds the current-journal marker, entry count, and first- and last-entry UTC
+dates. `-n NUMBER` limits either form after sorting. `tjctl current` prints the
+complete `TJ_JOURNAL` value and fails outside a writer. `tjctl du` retains
+logical-byte, chart, color, and noout behavior described below. `tjctl replay`
+retains the recorded-prompt, range, pacing, duration, and inside-writer rules;
+only its mandatory selector and command owner change. `tjctl rm` prompts on a
+terminal unless forced, refuses pins unless forced, and never removes an active
+journal. `tjctl mv` never prompts, refuses active sources and existing destinations,
 and preserves the directory's entries, resources, database, sidecars, logs,
 and private trash without editing their contents.
 

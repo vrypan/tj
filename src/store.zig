@@ -1041,6 +1041,37 @@ pub fn countInteractions(gpa: std.mem.Allocator, io: Io, root: Dir, journal: []c
     return numbers.len;
 }
 
+pub const JournalEntrySpan = struct {
+    count: usize = 0,
+    first_started: ?i64 = null,
+    last_ended: ?i64 = null,
+};
+
+/// Summarizes the entries still present in a journal without retaining a list
+/// of them. Entries without valid completed timing metadata count toward the
+/// total but cannot contribute a date.
+pub fn journalEntrySpan(gpa: std.mem.Allocator, io: Io, root: Dir, journal: []const u8) !JournalEntrySpan {
+    var dir = try root.openDir(io, journal, .{ .iterate = true });
+    defer dir.close(io);
+
+    var span: JournalEntrySpan = .{};
+    var it = dir.iterate();
+    while (try it.next(io)) |entry| {
+        if (entry.kind != .directory) continue;
+        const number = parseInteractionDirName(entry.name) orelse continue;
+        span.count += 1;
+
+        const timing = readTiming(gpa, io, root, journal, number) orelse continue;
+        if (span.first_started == null or timing.started < span.first_started.?) {
+            span.first_started = timing.started;
+        }
+        if (span.last_ended == null or timing.ended > span.last_ended.?) {
+            span.last_ended = timing.ended;
+        }
+    }
+    return span;
+}
+
 /// Interactions of one journal, in numeric order. Prefer `iterateInteractions`
 /// unless the whole set genuinely has to be resident at once.
 pub fn listInteractions(gpa: std.mem.Allocator, io: Io, root: Dir, journal: []const u8) ![]InteractionInfo {

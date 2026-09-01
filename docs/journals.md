@@ -91,9 +91,20 @@ that consume terminal recordings.
 ## List and identify journals
 
 ```sh
-tjctl ls
+tjctl ls -l
+tjctl ls                       # names only
+tjctl ls -l -n 10
 tjctl current
 ```
+
+`ls` prints one journal name per line. `ls -l` also shows the active marker,
+entry count, and the UTC dates of the earliest and latest remaining completed
+entries. A dash indicates that no completed entry has valid timing metadata.
+Journals are ordered by latest entry, newest first; journals without timing
+metadata come last. In the long form, the current journal is marked with `*`.
+
+Use `-n NUMBER` or `--number NUMBER` to show at most that many journals after
+sorting. Zero produces no output.
 
 `current` requires `TJ_JOURNAL`, which is set inside a journal.
 

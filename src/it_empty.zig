@@ -456,6 +456,78 @@ test "an empty use preserves its journal" {
     dir.close(io);
 }
 
+test "journal listing shows entry counts and remaining timing span" {
+    const gpa = std.testing.allocator;
+    const io = std.testing.io;
+    var scratch = try support.Scratch.open();
+    defer scratch.close();
+
+    try scratch.makeNamedJournal("alpha", &.{ "1", "3", "4" });
+    var alpha = try scratch.tmp.dir.openDir(io, "alpha", .{});
+    defer alpha.close(io);
+    try alpha.writeFile(io, .{
+        .sub_path = "1/meta.json",
+        .data = "{\"started\":\"2026-09-02T10:00:00.000Z\",\"ended\":\"2026-09-03T10:00:00.000Z\"}\n",
+    });
+    try alpha.writeFile(io, .{
+        .sub_path = "3/meta.json",
+        .data = "{\"started\":\"2026-08-01T10:00:00.000Z\",\"ended\":\"2026-09-10T10:00:00.000Z\"}\n",
+    });
+    // Entry 4 is unfinished and still counts, but has no timing span.
+
+    try scratch.makeNamedJournal("beta", &.{"1"});
+    try scratch.makeNamedJournal("zeta", &.{"1"});
+    var zeta = try scratch.tmp.dir.openDir(io, "zeta", .{});
+    defer zeta.close(io);
+    try zeta.writeFile(io, .{
+        .sub_path = "1/meta.json",
+        .data = "{\"started\":\"2026-08-20T10:00:00.000Z\",\"ended\":\"2026-08-21T10:00:00.000Z\"}\n",
+    });
+
+    var compact = try support.runTjctl(gpa, &.{ "--home", scratch.path(), "ls" }, 24, 120);
+    defer compact.out.deinit(gpa);
+    try std.testing.expectEqual(@as(u8, 0), compact.code);
+    const compact_alpha = std.mem.indexOf(u8, compact.out.items, "alpha") orelse return error.TestUnexpectedResult;
+    const compact_zeta = std.mem.indexOf(u8, compact.out.items, "zeta") orelse return error.TestUnexpectedResult;
+    const compact_beta = std.mem.indexOf(u8, compact.out.items, "beta") orelse return error.TestUnexpectedResult;
+    try std.testing.expect(compact_alpha < compact_zeta);
+    try std.testing.expect(compact_zeta < compact_beta);
+    try std.testing.expect(std.mem.indexOf(u8, compact.out.items, "JOURNAL") == null);
+    try std.testing.expect(std.mem.indexOf(u8, compact.out.items, "2026-") == null);
+
+    var listed = try support.runTjctl(gpa, &.{ "--home", scratch.path(), "ls", "-l" }, 24, 120);
+    defer listed.out.deinit(gpa);
+    try std.testing.expectEqual(@as(u8, 0), listed.code);
+    try std.testing.expect(std.mem.indexOf(u8, listed.out.items, "JOURNAL") != null);
+    try std.testing.expect(std.mem.indexOf(u8, listed.out.items, "ENTRIES  FIRST ENTRY  LAST ENTRY") != null);
+    try std.testing.expect(std.mem.indexOf(u8, listed.out.items, "alpha") != null);
+    try std.testing.expect(std.mem.indexOf(u8, listed.out.items, "3  2026-08-01  2026-09-10") != null);
+    try std.testing.expect(std.mem.indexOf(u8, listed.out.items, "beta") != null);
+    try std.testing.expect(std.mem.indexOf(u8, listed.out.items, "1  ----------  ----------") != null);
+    const alpha_at = std.mem.indexOf(u8, listed.out.items, "alpha") orelse return error.TestUnexpectedResult;
+    const zeta_at = std.mem.indexOf(u8, listed.out.items, "zeta") orelse return error.TestUnexpectedResult;
+    const beta_at = std.mem.indexOf(u8, listed.out.items, "beta") orelse return error.TestUnexpectedResult;
+    try std.testing.expect(alpha_at < zeta_at);
+    try std.testing.expect(zeta_at < beta_at);
+
+    var limited = try support.runTjctl(gpa, &.{ "--home", scratch.path(), "ls", "-n", "2" }, 24, 120);
+    defer limited.out.deinit(gpa);
+    try std.testing.expectEqual(@as(u8, 0), limited.code);
+    try std.testing.expect(std.mem.indexOf(u8, limited.out.items, "alpha") != null);
+    try std.testing.expect(std.mem.indexOf(u8, limited.out.items, "zeta") != null);
+    try std.testing.expect(std.mem.indexOf(u8, limited.out.items, "beta") == null);
+
+    var zero = try support.runTjctl(gpa, &.{ "--home", scratch.path(), "ls", "--number=0" }, 24, 120);
+    defer zero.out.deinit(gpa);
+    try std.testing.expectEqual(@as(u8, 0), zero.code);
+    try std.testing.expectEqual(@as(usize, 0), zero.out.items.len);
+
+    var invalid = try support.runTjctl(gpa, &.{ "--home", scratch.path(), "ls", "-n", "many" }, 24, 120);
+    defer invalid.out.deinit(gpa);
+    try std.testing.expectEqual(@as(u8, 2), invalid.code);
+    try std.testing.expect(std.mem.indexOf(u8, invalid.out.items, "--number needs a non-negative integer") != null);
+}
+
 test "use replays the journal immediately unless no-replay is set" {
     const gpa = std.testing.allocator;
     const io = std.testing.io;

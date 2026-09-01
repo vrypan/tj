@@ -32,6 +32,16 @@ const title_blink = zecli.FlagSpec{
 const lifecycle_flags = [_]zecli.FlagSpec{ home_flag, keep_osc, no_splash, title, title_blink };
 const use_flags = [_]zecli.FlagSpec{ home_flag, keep_osc, no_splash, title, title_blink, .{ .name = "no-replay", .description = "Start without replaying the journal" } };
 const force_flags = [_]zecli.FlagSpec{.{ .name = "force", .description = "Skip confirmation or override pin protection" }};
+const ls_flags = [_]zecli.FlagSpec{
+    .{ .name = "long", .short = 'l', .description = "Show activity details" },
+    .{
+        .name = "number",
+        .short = 'n',
+        .value = .string,
+        .value_name = "NUMBER",
+        .description = "Show at most NUMBER journals",
+    },
+};
 const du_flags = [_]zecli.FlagSpec{
     .{ .name = "chart", .description = "Show every entry's size as a chart" },
     .{ .name = "bytes", .description = "Show exact byte counts" },
@@ -62,7 +72,7 @@ const commands = [_]zecli.CommandSpec{
         .flags = &use_flags,
         .arguments = &.{.{ .name = "JOURNAL", .description = "Exact name or unambiguous suffix", .required = true, .completion = journal_completion }},
     },
-    .{ .name = "ls", .description = "List journals", .usage = "tjctl ls" },
+    .{ .name = "ls", .description = "List journals", .usage = "tjctl ls [-l] [-n NUMBER]", .flags = &ls_flags },
     .{
         .name = "mv",
         .description = "Rename an inactive journal",
