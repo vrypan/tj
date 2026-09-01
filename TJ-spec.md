@@ -284,7 +284,7 @@ The proxy:
 A PTY carries a single byte stream: the program's stdout and stderr are
 already merged by the time TJ sees them. TJ therefore does not attempt
 to separate them. There is no `err` core resource; a program that wants
-to expose its errors as a distinct resource can do so with OSC 5107
+to expose its errors as a distinct resource can do so with OSC SLOT
 (see below).
 
 ## Journals and numbering
@@ -499,9 +499,13 @@ the next command that actually starts. It does not read or re-evaluate prompt
 variables, so prompt substitutions and external engines such as Starship are
 captured exactly as displayed.
 
-At `preexec`, the plugin emits one `OSC 5107;tj;context;DATA ST` marker. `DATA`
-is the base64 encoding of an ASCII header followed by its three concatenated
-fields:
+The OSC SLOT forms in this specification define the agreed next wire format.
+TJ 0.4.1 still implements the earlier `OSC 5107;tj;...` form; the implementation
+will move to OSC SLOT in a separate change.
+
+At `preexec`, the plugin emits one `OSC SLOT;CONTEXT;PAYLOAD ST` marker, where
+`SLOT` is numeric OSC code 5107. `PAYLOAD` is the base64 encoding of an ASCII
+header followed by its three concatenated fields:
 
 ``` text
 1;<cmd-bytes>;<cwd-bytes>;<expanded-flag>;<expanded-bytes>;<cmd><cwd><expanded>
@@ -771,7 +775,7 @@ name/tag metadata are green, dates are blue, and failures are red.
 For terminal output, TJ obtains the width with `TIOCGWINSZ`, reserves the fixed
 columns, and word-wraps the command and suffix in the remaining cells.
 Oversized words are hard-wrapped. When stdout is a terminal and a current
-journal exists, history lazily encloses the listing in one OSC 5107 noout
+journal exists, history lazily encloses the listing in one OSC SLOT `NOOUT`
 region. No markers are emitted when filters select no entries. Redirected or
 piped history is one physical line per entry, with no styling or OSC markers.
 Before layout, recorded command text is sanitized as untrusted terminal input:
@@ -887,7 +891,7 @@ Zooi owns raw mode, resize input, retained rendering, synchronized output, and
 the alternate screen. Normal and error returns restore the terminal through
 Zooi teardown; the process panic path and fatal `SIGTERM`/`SIGHUP` paths call
 Zooi's allocation-free restoration hook. The complete terminal session,
-including alternate-screen teardown, is inside one OSC 5107 noout region.
+including alternate-screen teardown, is inside one OSC SLOT `NOOUT` region.
 Consequently the browser remains visible but its entry records one
 `<tj:noout>` placeholder rather than screen frames. After teardown TJ closes
 the region before returning control to the shell.
@@ -1067,7 +1071,7 @@ spans are copied by positional reads, so memory use is proportional to the
 pattern and fixed buffers rather than to the resource, line, or match count.
 
 When stdout is a terminal and a current journal exists, search lazily encloses
-all result lines in one OSC 5107 noout region. No markers are emitted for help,
+all result lines in one OSC SLOT `NOOUT` region. No markers are emitted for help,
 errors, or no matches. Redirected or piped stdout is plain marker-free data.
 The result is status 0 when any line matched, 1 for no matches, and 2 for grep
 argument errors or current-journal mode without a current journal. Storage and
@@ -1084,46 +1088,60 @@ writes human-readable output, and can explicitly keep visible output out of
 the recorded resource.
 
 A cooperating program marks the beginning and end of a resource using
-**OSC 5107** (`5107` reads as `SLOT` in leetspeak). The resource
+**OSC SLOT**, whose numeric OSC code is 5107 (`5107` reads as `SLOT` in
+leetspeak). `SLOT` is written as `5107` on the wire; message names are uppercase
+and case-sensitive, and there is no additional namespace field. The resource
 contents remain ordinary program output; TJ interprets the control
 sequences as annotations over that output.
+
+The four message forms have distinct producers and roles:
+
+-   `CONTEXT` is a self-contained message normally emitted by
+    `tj.plugin.zsh` once per command from `preexec`; it does not open a region.
+-   `RESOURCE` is normally emitted by a cooperating program or an output
+    wrapper such as `tj-fence`; it opens a published-resource region.
+-   `NOOUT` is emitted by `tj noout`, by TJ's terminal reports (`hist`, `grep`,
+    `du`, and `tui`), or by a cooperating program; it opens an omitted-output
+    region.
+-   `END` is emitted by the program or wrapper that opened a `RESOURCE` or
+    `NOOUT` region and closes that region.
 
 The protocol is:
 
 ``` text
-OSC 5107 ; tj ; begin ; <path> ; <mime> ST
+OSC SLOT ; RESOURCE ; <path> [ ; <mime> ] ST
 <ordinary output bytes>
-OSC 5107 ; tj ; end ST
+OSC SLOT ; END ST
 ```
 
 The same non-nesting protocol has a noout region:
 
 ``` text
-OSC 5107 ; tj ; noout ST
+OSC SLOT ; NOOUT ST
 <ordinary output bytes>
-OSC 5107 ; tj ; end ST
+OSC SLOT ; END ST
 ```
 
-TJ removes both markers before forwarding output. On `noout`, it writes the
+TJ removes both markers before forwarding output. On `NOOUT`, it writes the
 fixed text `<tj:noout>` once to the entry's `out`, without displaying
 that text. Bytes inside the region are forwarded to the terminal but are not
 written to `out` or to a published resource. Normal recording resumes after
-the generic `end` marker.
+the generic `END` marker.
 
 For example, an agent might produce a reply containing a CSV data set
 and a shell script:
 
 ``` text
-OSC 5107 ; tj ; begin ; files/data.csv ; text/csv ST
+OSC SLOT ; RESOURCE ; files/data.csv ; text/csv ST
 date,amount
 2026-08-01,12.50
 2026-08-02,19.20
-OSC 5107 ; tj ; end ST
+OSC SLOT ; END ST
 
-OSC 5107 ; tj ; begin ; files/script.sh ; text/x-shellscript ST
+OSC SLOT ; RESOURCE ; files/script.sh ; text/x-shellscript ST
 #!/bin/sh
 awk -F, '{ sum += $2 } END { print sum }'
-OSC 5107 ; tj ; end ST
+OSC SLOT ; END ST
 ```
 
 The user still sees normal terminal output. TJ additionally exposes:
@@ -1140,9 +1158,9 @@ The same mechanism lets a program publish its own error output as a
 resource, for example:
 
 ``` text
-OSC 5107 ; tj ; begin ; err ; text/plain ST
+OSC SLOT ; RESOURCE ; err ; text/plain ST
 parse error at line 12
-OSC 5107 ; tj ; end ST
+OSC SLOT ; END ST
 ```
 
 exposing `@42/err`. Whether such a resource exists is up to the program.
@@ -1151,13 +1169,13 @@ The v1 protocol has deliberately simple rules:
 
 -   no nesting
 -   one open region at a time, either a resource or noout
--   the first open region wins when another begin marker is received
--   `end` closes whichever region is open
+-   the first open region wins when another `RESOURCE` or `NOOUT` is received
+-   `END` closes whichever region is open
 -   resource names are relative paths
 -   absolute paths and `..` are rejected
 -   `cmd`, `cwd`, `out`, `prompt`, `rc`, `meta.json`, and private removal bookkeeping names are
     reserved and rejected as resource names
--   the bytes between `begin` and `end` are exactly the resource
+-   the bytes between `RESOURCE` and `END` are exactly the resource
     contents
 -   OSC markers are control metadata and are not part of `@N/out`
 -   `ST` (`ESC \`) terminates the OSC sequence
@@ -1166,12 +1184,12 @@ The v1 protocol has deliberately simple rules:
     cannot affect the next entry
 -   noout payload sizes or flags are not stored in `meta.json`
 
-By default, TJ strips OSC 5107 sequences from the stream before
+By default, TJ strips OSC SLOT sequences from the stream before
 forwarding it to the terminal emulator. An option keeps them in the
 forwarded stream, for debugging or for emulators and multiplexers that
 want to interpret them.
 
-Programs that do not emit OSC 5107 still work normally and expose the core
+Programs that do not emit OSC SLOT still work normally and expose the core
 resources produced by their shell integration.
 
 `tj noout -- command args...` is the user-facing wrapper for a whole command.
@@ -1180,7 +1198,7 @@ markers to that terminal, executes the supplied argv directly without a shell,
 and otherwise inherits the caller's cwd, environment, standard streams,
 terminal, and process group. Its result is the child's exit status, or
 `128 + signal` when the child dies from a signal. The wrapper makes a best
-effort to emit `end` after it has emitted `noout`; entry-boundary reset
+effort to emit `END` after it has emitted `NOOUT`; entry-boundary reset
 handles cases where the wrapper itself dies before it can do so.
 
 Noout is explicit and is not inferred from the PTY ECHO flag. Input typed with
