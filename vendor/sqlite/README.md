@@ -13,5 +13,5 @@ into the `tj` executable. It does not use a system SQLite library or the
 The build enables SQLite's normal thread-safe mode and disables loadable
 extensions and double-quoted string literals. When updating SQLite, replace
 both generated files together, update the artifact and checksum above, update
-the version assertion in `src/sqlite.zig`, and run the native and six-target
+the version assertion in `src/sqlite.zig`, and run the native and three-target
 release gates.

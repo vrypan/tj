@@ -32,16 +32,16 @@ SQLite through its C source.
 
 ```sh
 make list
-make -j6 all
+make -j3 all
 make package
 ```
 
 Build trees and archives are written below `dist/`. Each archive contains one
 `tj-VERSION-TARGET` root directory with `bin` and `share` beneath it.
 
-Supported targets are `{aarch64,x86_64}` combined with `{macos, linux-musl,
-linux-gnu}`. Musl builds are static. Release packages default to `ReleaseSafe`
-and strip debug information.
+Supported targets are `aarch64-macos`, `aarch64-linux-musl`, and
+`x86_64-linux-musl`. Linux builds are static. Release packages default to
+`ReleaseSafe` and strip debug information.
 
 ## Publish a release
 

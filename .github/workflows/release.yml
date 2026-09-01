@@ -62,7 +62,7 @@ jobs:
         run: make check
 
       - name: Build release archives
-        run: make -j6 package OPTIMIZE=ReleaseSafe STRIP=true
+        run: make -j3 package OPTIMIZE=ReleaseSafe STRIP=true
 
       - name: Generate checksums
         shell: bash
@@ -72,8 +72,8 @@ jobs:
           set -euo pipefail
 
           archives=(dist/tj-"$VERSION"-*.tar.gz)
-          if (( ${#archives[@]} != 6 )); then
-            echo "expected 6 release archives, found ${#archives[@]}" >&2
+          if (( ${#archives[@]} != 3 )); then
+            echo "expected 3 release archives, found ${#archives[@]}" >&2
             exit 1
           fi
 
@@ -133,7 +133,7 @@ jobs:
             Alternatively, download the archive for your platform and install it under `~/.local`:
 
             ```sh
-            archive=tj-${{ needs.build.outputs.version }}-x86_64-linux-gnu.tar.gz # choose your downloaded archive
+            archive=tj-${{ needs.build.outputs.version }}-x86_64-linux-musl.tar.gz # choose your downloaded archive
             mkdir -p ~/.local
             tar -xzf "$archive" -C ~/.local --strip-components=1
             ```

@@ -12,11 +12,8 @@ VERSION  := $(shell sed -n 's/.*\.version = "\([^"]*\)".*/\1/p' build.zig.zon)
 
 TARGETS := \
 	aarch64-macos \
-	x86_64-macos \
 	aarch64-linux-musl \
-	x86_64-linux-musl \
-	aarch64-linux-gnu \
-	x86_64-linux-gnu
+	x86_64-linux-musl
 
 .DEFAULT_GOAL := build
 .PHONY: build install uninstall test fmt fmt-check check all package clean list $(TARGETS)
