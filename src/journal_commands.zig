@@ -8,7 +8,7 @@ const cli = @import("tjctl_cli.zig");
 const proxy = @import("proxy.zig");
 const store = @import("store.zig");
 const sys = @import("sys.zig");
-const cmd_history = @import("cmd_history.zig");
+const cmd_journal_report = @import("cmd_journal_report.zig");
 const cmd_remove = @import("cmd_remove.zig");
 const cmd_replay = @import("cmd_replay.zig");
 
@@ -57,7 +57,7 @@ pub fn run(
             });
             return result.exit_code;
         },
-        .ls => try cmd_history.listJournals(gpa, io, home, parsed.enabled("long"), parsed.last("number"), out),
+        .ls => try cmd_journal_report.listJournals(gpa, io, home, parsed.enabled("long"), parsed.last("number"), out),
         .mv => {
             if (sys.env("TJ_JOURNAL")) |current| if (current.len != 0) return error.InsideJournalRename;
             var root = try store.openRoot(io, home);
@@ -65,7 +65,7 @@ pub fn run(
             try store.renameJournal(gpa, io, root, parsed.positionals.items[0], parsed.positionals.items[1]);
         },
         .rm => try cmd_remove.removeJournal(gpa, io, home, parsed.positionals.items[0], parsed.enabled("force"), out),
-        .du => try cmd_history.usageJournal(
+        .du => try cmd_journal_report.usageJournal(
             gpa,
             io,
             home,

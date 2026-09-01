@@ -4,18 +4,9 @@ const std = @import("std");
 const Io = std.Io;
 const zecli = @import("zecli");
 
-const cli = @import("cli.zig");
 const store = @import("store.zig");
 const sys = @import("sys.zig");
-const reference = @import("reference.zig");
-const plain = @import("plain.zig");
-const annotations = @import("annotations.zig");
-const mutation_lock = @import("mutation_lock.zig");
-const search = @import("search.zig");
-const noout = @import("noout.zig");
-const report = @import("report.zig");
 const replay_engine = @import("replay.zig");
-const context = @import("context.zig");
 const tjctl_spec = @import("tjctl_spec.zig");
 
 pub const ReplayRequest = struct {

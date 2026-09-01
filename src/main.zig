@@ -213,6 +213,7 @@ test {
     _ = @import("context.zig");
     _ = @import("cmd_grep.zig");
     _ = @import("cmd_history.zig");
+    _ = @import("cmd_journal_report.zig");
     _ = @import("cmd_reference.zig");
     _ = @import("cmd_annotate.zig");
     _ = @import("cmd_remove.zig");

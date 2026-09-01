@@ -11,13 +11,8 @@ const cli_spec = @import("cli_spec.zig");
 const store = @import("store.zig");
 const sys = @import("sys.zig");
 const reference = @import("reference.zig");
-const plain = @import("plain.zig");
 const annotations = @import("annotations.zig");
 const mutation_lock = @import("mutation_lock.zig");
-const search = @import("search.zig");
-const noout = @import("noout.zig");
-const report = @import("report.zig");
-const replay_engine = @import("replay.zig");
 
 pub const Error = error{
     NotInJournal,
