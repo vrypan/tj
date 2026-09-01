@@ -5,6 +5,104 @@ provides the command, expanded command, prompt, and working directory. Without
 the plugin, terminal bytes still pass through but shell entries are not
 recorded.
 
+## How recording works
+
+```mermaid
+flowchart TB
+    subgraph Without["Without TJ"]
+        direction LR
+        PlainTerminal[Terminal emulator] <-->|terminal bytes| PlainShell[zsh]
+        PlainShell <-->|run and wait| PlainCommand[Foreground command]
+    end
+
+    subgraph With["With TJ"]
+        direction LR
+        Terminal[Terminal emulator] <-->|terminal bytes| Proxy[TJ proxy]
+        Proxy <-->|inner PTY| Shell[zsh]
+        Shell <-->|run and wait| Command[Foreground command]
+        Shell -.->|invokes hooks| Plugin[TJ zsh plugin]
+        Plugin -.->|OSC metadata| Proxy
+        Proxy -->|recorded data| Journal[(Journal)]
+    end
+
+    classDef tj fill:#dbeafe,stroke:#2563eb,color:#0f172a
+    class Proxy,Plugin,Journal tj
+```
+
+TJ inserts the proxy into the existing terminal byte path. The plugin runs
+inside zsh and adds metadata; the command still uses the terminal normally.
+Blue nodes are TJ components.
+
+The command lifecycle shows when those extra messages appear:
+
+```mermaid
+sequenceDiagram
+    actor User
+    participant Terminal as Terminal emulator
+    participant Proxy as TJ proxy
+    participant Plugin as TJ zsh plugin
+    participant Shell as zsh
+    participant Command as Foreground command
+    participant Journal
+
+    Note over Plugin,Shell: The plugin runs inside zsh
+
+    User->>Terminal: Type a command
+    Terminal->>Proxy: Input bytes
+    Proxy->>Shell: Input through the inner PTY
+
+    Shell->>Plugin: Run preexec hook
+    Plugin-->>Proxy: OSC SLOT#59;CONTEXT#59;… ST
+    Note right of Proxy: Consume command, cwd, and expanded command
+    Plugin-->>Proxy: OSC 133#59;C ST
+    Proxy->>Journal: Start entry
+
+    Shell->>Command: Execute
+    Command->>Proxy: stdout and stderr through the inner PTY
+    Proxy->>Terminal: Display ordinary output
+    Proxy->>Journal: Append ordinary output to out
+
+    opt Published resource
+        Command-->>Proxy: OSC SLOT#59;RESOURCE#59;… ST
+        Command->>Proxy: Resource bytes
+        Proxy->>Terminal: Display resource bytes
+        Proxy->>Journal: Append to out and named resource
+        Command-->>Proxy: OSC SLOT#59;END ST
+    end
+
+    opt Output omitted from the journal
+        Command-->>Proxy: OSC SLOT#59;NOOUT ST
+        Command->>Proxy: Visible bytes
+        Proxy->>Terminal: Display visible bytes
+        Proxy->>Journal: Write the noout placeholder once
+        Command-->>Proxy: OSC SLOT#59;END ST
+    end
+
+    Command->>Shell: Exit status
+    Shell->>Plugin: Run precmd hook
+    Plugin-->>Proxy: OSC 133#59;D#59;rc ST, then OSC 133#59;A ST
+    Proxy->>Journal: Finish entry and start prompt capture
+    Shell->>Proxy: Rendered prompt bytes
+    Proxy->>Terminal: Display prompt
+    Proxy->>Journal: Save prompt for the next entry
+    Shell->>Plugin: Run zle-line-init hook
+    Plugin-->>Proxy: OSC 133#59;B ST
+```
+
+The terminal sends input to TJ, and TJ forwards it unchanged to the inner PTY.
+Output travels in the opposite direction, which lets the proxy inspect it
+before forwarding it to the terminal.
+
+Solid arrows in the lifecycle are ordinary input, output, execution, or
+journal writes. Dashed arrows are OSC metadata added by the plugin or a
+cooperating command.
+
+OSC SLOT messages are private instructions for TJ. The proxy consumes them, so
+they do not appear on screen or in `out`. OSC 133 command-boundary messages are
+observed by TJ and also forwarded to the terminal. Ordinary output remains
+ordinary terminal data. The proxy also observes OSC 0 and OSC 2 title changes
+so it can preserve the application's title while adding the recording marker.
+
 ## Load the plugin
 
 Add one line to `~/.zshrc`:
