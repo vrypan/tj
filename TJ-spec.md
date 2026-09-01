@@ -881,10 +881,18 @@ uniqueness, mutation locking, and SQLite transactions are identical.
 
 The detail view contains the complete command, exit status, recorded working
 directory, start and end timestamps, duration, output size, resource names,
-name, tags, pin state, and plain-rendered output. It wraps to the terminal
-width and scrolls with arrows, `j`/`k`, Home/`g`, End/`G`, Page Up, and Page
-Down. Enter, Escape, or `q` returns to the list. The preview renders at most
-2 MiB of recorded output and directs the user to `tj cat @N` when truncated.
+name, tags, pin state, and plain-rendered output. Every logical detail line is
+a selectable list item, including metadata, working directory, command, and
+each output line. Long lines are clipped to the viewport rather than wrapped;
+their complete safe display values remain available when selected. Up/Down
+and `j`/`k` move the focused item; Home/`g`, End/`G`, Page Up, and Page Down
+move through the same logical-line index. Space toggles individual items and
+Shift+Up/Down extends an inclusive range using the list view's selection
+semantics. Enter restores the terminal, prints selected values in display
+order (or the focused value when no selection exists), and exits. Escape
+clears an existing selection before returning to the list; `q` returns
+directly. The preview renders at most 2 MiB of recorded output and directs the
+user to `tj cat @N` when truncated.
 
 Zooi owns raw mode, resize input, retained rendering, synchronized output, and
 the alternate screen. Normal and error returns restore the terminal through

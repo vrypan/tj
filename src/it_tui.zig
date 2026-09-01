@@ -16,7 +16,7 @@ test "tui shows details, confirms deletion, and shares annotation semantics" {
     try support.setupJournalZsh(gpa, child, &transcript);
 
     var from = transcript.items.len;
-    try child.write("printf '%s\\n' DETAIL_STDOUT\n");
+    try child.write("printf '%s\\n' DETAIL_STDOUT DETAIL_SECOND\n");
     try std.testing.expect(try child.readUntilFrom(gpa, &transcript, from, support.test_prompt, support.timeout_ms));
 
     from = transcript.items.len;
@@ -62,16 +62,24 @@ test "tui shows details, confirms deletion, and shares annotation semantics" {
     try std.testing.expect(try child.readUntilFrom(gpa, &transcript, from, "pinned", support.timeout_ms));
 
     // Exercise every annotation mutation, including an untag, and open the
-    // selected entry's full detail view before returning to the browser.
+    // selected entry's full detail view. Focus its first output line and
+    // extend the selection through the second; Enter restores the terminal,
+    // prints both selected lines, and exits the browser.
     from = transcript.items.len;
     try child.write("tBug\nTbug\ntParser\nntui-target\n");
     try std.testing.expect(try child.readUntilFrom(gpa, &transcript, from, "named entry 1 @tui-target", support.timeout_ms));
     from = transcript.items.len;
     try child.write("\r");
-    try std.testing.expect(try child.readUntilFrom(gpa, &transcript, from, "DETAIL_STDOUT", support.timeout_ms));
+    try std.testing.expect(try child.readUntilFrom(gpa, &transcript, from, "DETAIL_SECOND", support.timeout_ms));
+    try std.testing.expect(std.mem.indexOf(u8, transcript.items[from..], "cwd") != null);
     from = transcript.items.len;
-    try child.write("qq");
+    try child.write("jjjjjjjjjjjjjjj\x1b[1;2B\r");
     try std.testing.expect(try child.readUntilFrom(gpa, &transcript, from, support.test_prompt, support.timeout_ms));
+    const printed = transcript.items[from..];
+    const restored_at = std.mem.lastIndexOf(u8, printed, "\x1b[?1049l") orelse return error.TestUnexpectedResult;
+    const stdout_at = std.mem.lastIndexOf(u8, printed, "DETAIL_STDOUT") orelse return error.TestUnexpectedResult;
+    const second_at = std.mem.lastIndexOf(u8, printed, "DETAIL_SECOND") orelse return error.TestUnexpectedResult;
+    try std.testing.expect(restored_at < stdout_at and stdout_at < second_at);
 
     try child.write("exit 0\r");
     try std.testing.expectEqual(@as(u8, 0), try child.finish(gpa, &transcript, support.timeout_ms));
@@ -103,5 +111,6 @@ test "tui shows details, confirms deletion, and shares annotation semantics" {
     defer gpa.free(tui_out);
     try std.testing.expect(std.mem.startsWith(u8, tui_out, store.noout_placeholder));
     try std.testing.expect(std.mem.indexOf(u8, tui_out, "DETAIL_STDOUT") == null);
+    try std.testing.expect(std.mem.indexOf(u8, tui_out, "DETAIL_SECOND") == null);
     try std.testing.expect(std.mem.indexOf(u8, tui_out, "entries") == null);
 }

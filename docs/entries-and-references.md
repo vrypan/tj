@@ -176,7 +176,7 @@ Individual published resources cannot be removed separately.
 | `Up`, `Down`, `j`, `k` | Move |
 | `Home`, `g` / `End`, `G` | First / last entry |
 | `Page Up`, `Page Down` | Move one page |
-| `Enter` | Show entry details and output |
+| `Enter` | Show entry details |
 | `Space` | Toggle selection |
 | `Shift+Up`, `Shift+Down` | Extend or shrink a range |
 | `Escape` | Clear the selection |
@@ -189,6 +189,14 @@ Individual published resources cannot be removed separately.
 
 Pin, tag, untag, and delete apply to every selected entry. With no selection,
 they apply to the focused entry. Naming and details use the focused entry.
+
+The detail view is a list of selectable logical lines, including its metadata,
+`cwd`, `cmd`, and every output line. Long lines are clipped on screen rather
+than wrapped; selecting one still prints its complete value. `Up`, `Down`,
+`j`, and `k` move the cursor; Space toggles a line and Shift+Up/Down selects an
+inclusive range. Enter restores the terminal, prints the selected lines (or
+the focused line when nothing is selected), and exits. Escape clears a
+selection before returning to the list; `q` returns directly.
 
 Unpinned entries are deleted without a prompt. If the targets include pinned
 entries, one prompt offers to include them. The browser restores the terminal

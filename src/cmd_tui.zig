@@ -12,7 +12,6 @@ const zooi = @import("zooi");
 
 const annotations = @import("annotations.zig");
 const cmd_annotate = @import("cmd_annotate.zig");
-const cmd_history = @import("cmd_history.zig");
 const cmd_remove = @import("cmd_remove.zig");
 const context = @import("context.zig");
 const noout = @import("noout.zig");
@@ -43,15 +42,29 @@ const Effect = enum {
     delete_unpinned,
     open_detail,
     close_detail,
+    choose_detail,
+};
+
+const DetailItem = struct {
+    section_start: usize,
+    section_end: usize,
+    payload_start: usize,
+    payload_end: usize,
 };
 
 const Detail = struct {
     number: u32,
     document: []u8,
+    items: []DetailItem,
 
     fn deinit(self: *Detail, gpa: std.mem.Allocator) void {
         gpa.free(self.document);
+        gpa.free(self.items);
         self.* = undefined;
+    }
+
+    fn itemValue(self: *const Detail, item: DetailItem) []const u8 {
+        return self.document[item.payload_start..item.payload_end];
     }
 };
 
@@ -75,10 +88,18 @@ const Model = struct {
     detail: ?Detail = null,
     detail_scroll: usize = 0,
     detail_line_count: usize = 0,
+    detail_cursor: usize = 0,
+    detail_selected: std.DynamicBitSetUnmanaged = .{},
+    detail_range_base: std.DynamicBitSetUnmanaged = .{},
+    detail_range_anchor: ?usize = null,
+    detail_follow_selection: bool = false,
+    detail_chosen: bool = false,
     quit: bool = false,
 
     fn deinit(self: *Model, gpa: std.mem.Allocator) void {
         if (self.detail) |*detail| detail.deinit(gpa);
+        self.detail_selected.deinit(gpa);
+        self.detail_range_base.deinit(gpa);
         self.selected.deinit(gpa);
         self.range_base.deinit(gpa);
         gpa.free(self.numbers);
@@ -181,6 +202,61 @@ const Model = struct {
 
     fn clearInput(self: *Model) void {
         self.input_len = 0;
+    }
+
+    fn detailSelectedCount(self: *const Model) usize {
+        return self.detail_selected.count();
+    }
+
+    fn detailMove(self: *Model, delta: isize) void {
+        const detail = self.detail orelse return;
+        if (detail.items.len == 0) return;
+        const current: isize = @intCast(self.detail_cursor);
+        const last: isize = @intCast(detail.items.len - 1);
+        self.detail_cursor = @intCast(@max(@as(isize, 0), @min(last, current + delta)));
+        self.detail_follow_selection = true;
+    }
+
+    fn detailScrollToCursor(self: *Model) void {
+        const detail = self.detail orelse return;
+        const rows = self.listRows();
+        if (rows == 0 or detail.items.len <= rows) {
+            self.detail_scroll = 0;
+            return;
+        }
+        self.detail_scroll = @min(self.detail_scroll, detail.items.len - rows);
+        if (self.detail_cursor < self.detail_scroll) self.detail_scroll = self.detail_cursor;
+        if (self.detail_cursor >= self.detail_scroll + rows) {
+            self.detail_scroll = self.detail_cursor - rows + 1;
+        }
+    }
+
+    fn detailToggle(self: *Model) void {
+        const detail = self.detail orelse return;
+        if (detail.items.len == 0) return;
+        self.detail_selected.toggle(self.detail_cursor);
+    }
+
+    fn detailExtend(self: *Model, delta: isize) void {
+        const detail = self.detail orelse return;
+        if (detail.items.len == 0) return;
+        if (self.detail_range_anchor == null) {
+            self.detail_range_anchor = self.detail_cursor;
+            self.detail_range_base.unsetAll();
+            self.detail_range_base.setUnion(self.detail_selected);
+        }
+        self.detail_selected.unsetAll();
+        self.detail_selected.setUnion(self.detail_range_base);
+        self.detailMove(delta);
+        const anchor = self.detail_range_anchor.?;
+        const first = @min(anchor, self.detail_cursor);
+        const last = @max(anchor, self.detail_cursor);
+        self.detail_selected.setRangeValue(.{ .start = first, .end = last + 1 }, true);
+    }
+
+    fn detailClearSelection(self: *Model) void {
+        self.detail_selected.unsetAll();
+        self.detail_range_anchor = null;
     }
 
     fn pushInput(self: *Model, codepoint: u21) void {
@@ -300,7 +376,8 @@ pub fn run(gpa: std.mem.Allocator, io: Io, home: ?[]const u8) !void {
     installSignalHandlers();
 
     var ui = try zooi.Ui.init(gpa, .{});
-    defer ui.deinit();
+    var ui_active = true;
+    defer if (ui_active) ui.deinit();
     model.size = ui.size();
     model.scrollToCursor();
     try render(gpa, io, home, journal, &model, ui.screen());
@@ -319,6 +396,20 @@ pub fn run(gpa: std.mem.Allocator, io: Io, home: ?[]const u8) !void {
         }
         if (model.quit) break;
         try render(gpa, io, home, journal, &model, ui.screen());
+    }
+
+    ui.deinit();
+    ui_active = false;
+    if (model.detail_chosen) {
+        const detail = if (model.detail) |*value| value else return;
+        const selected_count = model.detailSelectedCount();
+        for (detail.items, 0..) |item, index| {
+            if (selected_count == 0) {
+                if (index != model.detail_cursor) continue;
+            } else if (!model.detail_selected.isSet(index)) continue;
+            try sys.writeAll(1, detail.itemValue(item));
+            try sys.writeAll(1, "\n");
+        }
     }
 }
 
@@ -345,6 +436,7 @@ fn update(model: *Model, event: zooi.Event) Effect {
         .resize => |size| blk: {
             model.size = size;
             model.scrollToCursor();
+            if (model.mode == .detail) model.detail_follow_selection = true;
             break :blk .none;
         },
         .key => |key| switch (model.mode) {
@@ -470,21 +562,47 @@ fn detailKey(model: *Model, key: zooi.Key) Effect {
         model.quit = true;
         return .quit;
     }
+    if (key != .shift_up and key != .shift_down) model.detail_range_anchor = null;
     const page = @max(model.listRows(), 1);
-    const max_scroll = model.detail_line_count -| model.listRows();
     switch (key) {
-        .up => model.detail_scroll -|= 1,
-        .down => model.detail_scroll = @min(model.detail_scroll + 1, max_scroll),
-        .page_up => model.detail_scroll -|= page,
-        .page_down => model.detail_scroll = @min(model.detail_scroll + page, max_scroll),
-        .home => model.detail_scroll = 0,
-        .end => model.detail_scroll = max_scroll,
-        .escape, .enter => return .close_detail,
+        .up => model.detailMove(-1),
+        .down => model.detailMove(1),
+        .shift_up => model.detailExtend(-1),
+        .shift_down => model.detailExtend(1),
+        .page_up => model.detailMove(-@as(isize, @intCast(page))),
+        .page_down => model.detailMove(@intCast(page)),
+        .home => {
+            model.detail_cursor = 0;
+            model.detail_follow_selection = true;
+        },
+        .end => {
+            if (model.detail) |detail| {
+                if (detail.items.len != 0) model.detail_cursor = detail.items.len - 1;
+            }
+            model.detail_follow_selection = true;
+        },
+        .escape => {
+            if (model.detailSelectedCount() != 0) {
+                model.detailClearSelection();
+                return .none;
+            }
+            return .close_detail;
+        },
+        .enter => return .choose_detail,
         .character => |codepoint| switch (codepoint) {
-            'k' => model.detail_scroll -|= 1,
-            'j' => model.detail_scroll = @min(model.detail_scroll + 1, max_scroll),
-            'g' => model.detail_scroll = 0,
-            'G' => model.detail_scroll = max_scroll,
+            'k' => model.detailMove(-1),
+            'j' => model.detailMove(1),
+            'g' => {
+                model.detail_cursor = 0;
+                model.detail_follow_selection = true;
+            },
+            'G' => {
+                if (model.detail) |detail| {
+                    if (detail.items.len != 0) model.detail_cursor = detail.items.len - 1;
+                }
+                model.detail_follow_selection = true;
+            },
+            ' ' => model.detailToggle(),
             'q' => return .close_detail,
             else => {},
         },
@@ -582,16 +700,34 @@ fn executeEffect(
             const number = model.currentNumber() orelse return;
             if (model.detail) |*detail| detail.deinit(gpa);
             model.detail = try loadDetail(gpa, io, home, journal, number);
+            model.detail_selected.deinit(gpa);
+            model.detail_selected = try std.DynamicBitSetUnmanaged.initEmpty(gpa, model.detail.?.items.len);
+            model.detail_range_base.deinit(gpa);
+            model.detail_range_base = try std.DynamicBitSetUnmanaged.initEmpty(gpa, model.detail.?.items.len);
             model.detail_scroll = 0;
             model.detail_line_count = 0;
+            model.detail_cursor = 0;
+            model.detail_range_anchor = null;
+            model.detail_follow_selection = true;
             model.mode = .detail;
         },
         .close_detail => {
             if (model.detail) |*detail| detail.deinit(gpa);
             model.detail = null;
+            model.detail_selected.deinit(gpa);
+            model.detail_selected = .{};
+            model.detail_range_base.deinit(gpa);
+            model.detail_range_base = .{};
             model.detail_scroll = 0;
             model.detail_line_count = 0;
+            model.detail_cursor = 0;
+            model.detail_range_anchor = null;
+            model.detail_follow_selection = false;
             model.mode = .normal;
+        },
+        .choose_detail => {
+            model.detail_chosen = true;
+            model.quit = true;
         },
     }
 }
@@ -659,12 +795,55 @@ fn loadDetail(
 
     const command = try report.sanitizeDisplayText(gpa, info.command);
     defer gpa.free(command);
-    const safe_cwd = if (cwd) |value| try report.sanitizeDisplayText(gpa, value) else null;
-    defer if (safe_cwd) |value| gpa.free(value);
+    const cwd_value = if (cwd) |value|
+        try report.sanitizeDisplayText(gpa, value)
+    else
+        try gpa.dupe(u8, "");
+    defer gpa.free(cwd_value);
 
     var document: std.ArrayList(u8) = .empty;
     errdefer document.deinit(gpa);
+    var special_items: std.ArrayList(DetailItem) = .empty;
+    defer special_items.deinit(gpa);
     try document.print(gpa, "entry     @{d}\n", .{number});
+
+    var item_start = document.items.len;
+    try document.appendSlice(gpa, "cwd       ");
+    const cwd_payload_start = document.items.len;
+    if (cwd == null) {
+        try document.appendSlice(gpa, "(missing)");
+    } else if (cwd_value.len == 0) {
+        try document.appendSlice(gpa, "(empty)");
+    } else {
+        try document.appendSlice(gpa, cwd_value);
+    }
+    try special_items.append(gpa, .{
+        .section_start = item_start,
+        .section_end = document.items.len,
+        .payload_start = cwd_payload_start,
+        .payload_end = cwd_payload_start + cwd_value.len,
+    });
+    try document.append(gpa, '\n');
+
+    item_start = document.items.len;
+    try document.appendSlice(gpa, "cmd       ");
+    const command_payload_start = document.items.len;
+    if (command.len == 0) try document.appendSlice(gpa, "(empty)") else try document.appendSlice(gpa, command);
+    try special_items.append(gpa, .{
+        .section_start = item_start,
+        .section_end = document.items.len,
+        .payload_start = command_payload_start,
+        .payload_end = command_payload_start + command.len,
+    });
+    try document.append(gpa, '\n');
+
+    if (info.exit_code) |code| {
+        try document.print(gpa, "rc        {d}\n", .{code});
+    } else {
+        try document.appendSlice(gpa, "rc        unfinished\n");
+    }
+    try document.append(gpa, '\n');
+
     if (annotation) |value| {
         try document.print(gpa, "pinned    {s}\n", .{if (value.pinned) "yes" else "no"});
         try document.print(gpa, "name      {s}\n", .{if (value.name) |name| name else "-"});
@@ -678,12 +857,6 @@ fn loadDetail(
     } else {
         try document.appendSlice(gpa, "pinned    no\nname      -\ntags      -\n");
     }
-    if (info.exit_code) |code| {
-        try document.print(gpa, "rc        {d}\n", .{code});
-    } else {
-        try document.appendSlice(gpa, "rc        unfinished\n");
-    }
-    try document.print(gpa, "cwd       {s}\n", .{safe_cwd orelse "-"});
     if (store.readTiming(gpa, io, root, journal, number)) |timing| {
         var started_buf: [32]u8 = undefined;
         var ended_buf: [32]u8 = undefined;
@@ -706,20 +879,70 @@ fn loadDetail(
         for (resources) |resource| try document.print(gpa, " {s}", .{resource});
     }
 
-    try document.appendSlice(gpa, "\n\ncmd\n");
-    if (command.len == 0) try document.appendSlice(gpa, "(empty)") else try document.appendSlice(gpa, command);
     try document.appendSlice(gpa, "\n\nout\n");
-    if (!output.present) {
-        try document.appendSlice(gpa, "(removed)");
-    } else if (output.text.len == 0) {
-        try document.appendSlice(gpa, "(empty)");
+    if (!output.present or output.text.len == 0) {
+        item_start = document.items.len;
+        try document.appendSlice(gpa, if (output.present) "(empty)" else "(removed)");
+        try special_items.append(gpa, .{
+            .section_start = item_start,
+            .section_end = document.items.len,
+            .payload_start = item_start,
+            .payload_end = item_start,
+        });
     } else {
-        try document.appendSlice(gpa, output.text);
+        var line_start: usize = 0;
+        while (line_start < output.text.len) {
+            const relative_end = std.mem.indexOfScalar(u8, output.text[line_start..], '\n');
+            const line_end = if (relative_end) |offset| line_start + offset else output.text.len;
+            item_start = document.items.len;
+            try document.appendSlice(gpa, output.text[line_start..line_end]);
+            const payload_end = document.items.len;
+            if (line_end == line_start) try document.appendSlice(gpa, " ");
+            try special_items.append(gpa, .{
+                .section_start = item_start,
+                .section_end = document.items.len,
+                .payload_start = item_start,
+                .payload_end = payload_end,
+            });
+            if (relative_end == null) break;
+            try document.append(gpa, '\n');
+            line_start = line_end + 1;
+        }
     }
     if (output.truncated) {
         try document.print(gpa, "\n[preview limited to {d} recorded bytes; use tj cat @{d}]", .{ detail_output_limit, number });
     }
-    return .{ .number = number, .document = try document.toOwnedSlice(gpa) };
+
+    var items: std.ArrayList(DetailItem) = .empty;
+    errdefer items.deinit(gpa);
+    var line_start: usize = 0;
+    var special_index: usize = 0;
+    while (true) {
+        const relative_end = std.mem.indexOfScalar(u8, document.items[line_start..], '\n');
+        const line_end = if (relative_end) |offset| line_start + offset else document.items.len;
+        if (special_index < special_items.items.len and special_items.items[special_index].section_start == line_start) {
+            try items.append(gpa, special_items.items[special_index]);
+            special_index += 1;
+        } else {
+            try items.append(gpa, .{
+                .section_start = line_start,
+                .section_end = line_end,
+                .payload_start = line_start,
+                .payload_end = line_end,
+            });
+        }
+        if (relative_end == null) break;
+        line_start = line_end + 1;
+        if (line_start == document.items.len) break;
+    }
+    const owned_document = try document.toOwnedSlice(gpa);
+    errdefer gpa.free(owned_document);
+    const owned_items = try items.toOwnedSlice(gpa);
+    return .{
+        .number = number,
+        .document = owned_document,
+        .items = owned_items,
+    };
 }
 
 const PlainOutput = struct {
@@ -888,12 +1111,15 @@ fn render(
 }
 
 fn renderDetail(gpa: std.mem.Allocator, model: *Model, screen: *zooi.Screen) !void {
+    _ = gpa;
     const detail = if (model.detail) |*value| value else return error.NoSuchInteraction;
-    var lines = try wrapDocument(gpa, detail.document, model.size.cols);
-    defer lines.deinit(gpa);
-    model.detail_line_count = lines.items.len;
+    model.detail_line_count = detail.items.len;
     const rows = model.listRows();
-    const max_scroll = lines.items.len -| rows;
+    const max_scroll = detail.items.len -| rows;
+    if (model.detail_follow_selection and detail.items.len != 0) {
+        model.detailScrollToCursor();
+        model.detail_follow_selection = false;
+    }
     model.detail_scroll = @min(model.detail_scroll, max_scroll);
 
     var header_buf: [96]u8 = undefined;
@@ -909,40 +1135,37 @@ fn renderDetail(gpa: std.mem.Allocator, model: *Model, screen: *zooi.Screen) !vo
     }
 
     var row: usize = 0;
-    while (row < rows and model.detail_scroll + row < lines.items.len) : (row += 1) {
-        const line = lines.items[model.detail_scroll + row];
-        const text = detail.document[line.start..line.end];
+    while (row < rows and model.detail_scroll + row < detail.items.len) : (row += 1) {
+        const item_index = model.detail_scroll + row;
+        const item = detail.items[item_index];
+        const text = detail.document[item.section_start..item.section_end];
         screen.move(@intCast(row + 1), 0);
-        const section = std.mem.eql(u8, text, "cmd") or std.mem.eql(u8, text, "out");
-        screen.writeStyled(text, if (section) .{ .bold = true, .fg = .{ .ansi = 3 } } else .{});
+        const focused = item_index == model.detail_cursor;
+        const selected = model.detail_selected.isSet(item_index);
+        const style: zooi.Style = if (focused and selected)
+            focused_selected_style
+        else if (focused)
+            cursor_style
+        else if (selected)
+            selected_style
+        else if (std.mem.eql(u8, text, "out"))
+            .{ .bold = true, .fg = .{ .ansi = 3 } }
+        else
+            .{};
+        if (focused) fillRow(screen, @intCast(row + 1), model.size.cols, style);
+        screen.move(@intCast(row + 1), 0);
+        screen.writeStyled(text, style);
     }
 
     screen.move(model.size.rows - 1, 0);
-    screen.writeStyled("↑↓/jk scroll  PgUp/PgDn page  g/G ends  ⏎/esc/q back", footer_style);
-    try screen.present();
-}
-
-fn wrapDocument(gpa: std.mem.Allocator, text: []const u8, columns: u16) !std.ArrayList(cmd_history.HistoryLine) {
-    var result: std.ArrayList(cmd_history.HistoryLine) = .empty;
-    errdefer result.deinit(gpa);
-    var start: usize = 0;
-    while (true) {
-        const relative_end = std.mem.indexOfScalar(u8, text[start..], '\n');
-        const end = if (relative_end) |offset| start + offset else text.len;
-        if (end == start) {
-            try result.append(gpa, .{ .start = start, .end = start });
-        } else {
-            var wrapped = try cmd_history.wrapHistoryText(gpa, text[start..end], @max(columns, 1), 0);
-            defer wrapped.deinit(gpa);
-            for (wrapped.items) |line| {
-                try result.append(gpa, .{ .start = start + line.start, .end = start + line.end });
-            }
-        }
-        if (relative_end == null) break;
-        start = end + 1;
-        if (start == text.len) break;
+    if (model.detailSelectedCount() == 0) {
+        screen.writeStyled("↑↓/jk move  shift+↑↓ range  space toggle  ⏎ print  esc/q back", footer_style);
+    } else {
+        var footer_buf: [128]u8 = undefined;
+        const footer = std.fmt.bufPrint(&footer_buf, "{d} selected  shift+↑↓ range  space toggle  ⏎ print  esc clear", .{model.detailSelectedCount()}) catch "selected  ⏎ print  esc clear";
+        screen.writeStyled(footer, footer_style);
     }
-    return result;
+    try screen.present();
 }
 
 fn fillRow(screen: *zooi.Screen, row: u16, columns: u16, style: zooi.Style) void {
@@ -1110,17 +1333,73 @@ test "browser selects individual entries and inclusive ranges" {
     try std.testing.expectEqualSlices(u32, &.{10}, focused);
 }
 
-test "detail document wrapping preserves explicit lines" {
+test "detail navigation selects values and inclusive ranges" {
     const gpa = std.testing.allocator;
-    const text = "entry @1\n\ncmd\nalpha beta";
-    var lines = try wrapDocument(gpa, text, 6);
-    defer lines.deinit(gpa);
+    var items = [_]DetailItem{
+        .{ .section_start = 0, .section_end = 3, .payload_start = 0, .payload_end = 3 },
+        .{ .section_start = 4, .section_end = 7, .payload_start = 4, .payload_end = 7 },
+        .{ .section_start = 8, .section_end = 11, .payload_start = 8, .payload_end = 11 },
+        .{ .section_start = 12, .section_end = 15, .payload_start = 12, .payload_end = 15 },
+    };
+    var model: Model = .{
+        .mode = .detail,
+        .detail_line_count = 20,
+        .detail = .{
+            .number = 1,
+            .document = @constCast("cwd cmd one two"),
+            .items = &items,
+        },
+        .detail_selected = try std.DynamicBitSetUnmanaged.initEmpty(gpa, items.len),
+        .detail_range_base = try std.DynamicBitSetUnmanaged.initEmpty(gpa, items.len),
+    };
+    defer model.detail_selected.deinit(gpa);
+    defer model.detail_range_base.deinit(gpa);
 
-    try std.testing.expectEqual(@as(usize, 6), lines.items.len);
-    try std.testing.expectEqualStrings("entry", text[lines.items[0].start..lines.items[0].end]);
-    try std.testing.expectEqualStrings("@1", text[lines.items[1].start..lines.items[1].end]);
-    try std.testing.expectEqualStrings("", text[lines.items[2].start..lines.items[2].end]);
-    try std.testing.expectEqualStrings("cmd", text[lines.items[3].start..lines.items[3].end]);
-    try std.testing.expectEqualStrings("alpha", text[lines.items[4].start..lines.items[4].end]);
-    try std.testing.expectEqualStrings("beta", text[lines.items[5].start..lines.items[5].end]);
+    try std.testing.expectEqual(Effect.none, detailKey(&model, .down));
+    try std.testing.expectEqual(@as(usize, 1), model.detail_cursor);
+    try std.testing.expect(model.detail_follow_selection);
+
+    model.detail_follow_selection = false;
+    try std.testing.expectEqual(Effect.none, detailKey(&model, .{ .character = 'j' }));
+    try std.testing.expectEqual(@as(usize, 2), model.detail_cursor);
+    try std.testing.expect(model.detail_follow_selection);
+
+    _ = detailKey(&model, .shift_down);
+    try std.testing.expectEqual(@as(usize, 3), model.detail_cursor);
+    try std.testing.expectEqual(@as(usize, 2), model.detailSelectedCount());
+    try std.testing.expect(model.detail_selected.isSet(2));
+    try std.testing.expect(model.detail_selected.isSet(3));
+    try std.testing.expectEqual(Effect.none, detailKey(&model, .escape));
+    try std.testing.expectEqual(@as(usize, 0), model.detailSelectedCount());
+    try std.testing.expectEqual(Effect.choose_detail, detailKey(&model, .enter));
+    try std.testing.expectEqual(Effect.close_detail, detailKey(&model, .escape));
+}
+
+test "detail scrolling moves only when focus crosses a viewport edge" {
+    var items = [_]DetailItem{
+        .{ .section_start = 0, .section_end = 0, .payload_start = 0, .payload_end = 0 },
+        .{ .section_start = 0, .section_end = 0, .payload_start = 0, .payload_end = 0 },
+        .{ .section_start = 0, .section_end = 0, .payload_start = 0, .payload_end = 0 },
+        .{ .section_start = 0, .section_end = 0, .payload_start = 0, .payload_end = 0 },
+        .{ .section_start = 0, .section_end = 0, .payload_start = 0, .payload_end = 0 },
+        .{ .section_start = 0, .section_end = 0, .payload_start = 0, .payload_end = 0 },
+        .{ .section_start = 0, .section_end = 0, .payload_start = 0, .payload_end = 0 },
+    };
+    var model: Model = .{
+        .size = .{ .rows = 6, .cols = 80 },
+        .detail = .{ .number = 1, .document = @constCast(""), .items = &items },
+    };
+
+    model.detail_cursor = 2;
+    model.detailScrollToCursor();
+    try std.testing.expectEqual(@as(usize, 0), model.detail_scroll);
+    model.detail_cursor = 4;
+    model.detailScrollToCursor();
+    try std.testing.expectEqual(@as(usize, 1), model.detail_scroll);
+    model.detail_cursor = 6;
+    model.detailScrollToCursor();
+    try std.testing.expectEqual(@as(usize, 3), model.detail_scroll);
+    model.detail_cursor = 0;
+    model.detailScrollToCursor();
+    try std.testing.expectEqual(@as(usize, 0), model.detail_scroll);
 }
