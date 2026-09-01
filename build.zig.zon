@@ -9,8 +9,8 @@
             .hash = "zecli-0.3.2-j151k2cQAwCWyvhowi_1Dx3jeec5mw_ROP8O-0m8neFo",
         },
         .zooi = .{
-            .url = "git+https://github.com/vrypan/zooi.git?ref=v0.1.3#825649ca5108dcc9a26660e0ac0b9b786944cd85",
-            .hash = "zooi-0.1.3-c99W4DNHAwDEGlEYZlflQo4dCQfS3n5UX2T-Af6bDrP3",
+            .url = "git+https://github.com/vrypan/zooi.git?ref=v0.2.0#2f49128d1433d31902f15d587170dfb1dcbd7658",
+            .hash = "zooi-0.2.0-c99W4HVi7QJ2ikwZ18pMV4n7_077Fl4VdVUw1ubkvjVc",
         },
     },
     .paths = .{
