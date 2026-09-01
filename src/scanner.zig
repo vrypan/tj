@@ -30,6 +30,7 @@ pub const max_osc = 32 * 1024;
 
 const overflow_error = "SLOT sequence exceeded the 32768-byte limit";
 const unterminated_error = "unterminated SLOT sequence";
+const bel_terminator_error = "SLOT sequence used BEL instead of ST";
 
 const slot_prefix = "5107;";
 
@@ -345,6 +346,11 @@ pub const Scanner = struct {
         const payload = self.buf[0..self.len];
         self.state = .ground;
         self.len = 0;
+
+        if (self.terminator == bel) {
+            sink.event(.{ .protocol_error = bel_terminator_error });
+            return;
+        }
 
         if (self.overflowed or payload.len < slot_prefix.len) {
             sink.event(.{ .protocol_error = payload });
@@ -684,6 +690,26 @@ test "unsupported and legacy SLOT messages are stripped and reported" {
         try std.testing.expectEqual(@as(usize, 1), r.events.items.len);
         try std.testing.expect(r.events.items[0] == .protocol_error);
     }
+}
+
+test "SLOT requires ST while BEL remains ordinary region content" {
+    const gpa = std.testing.allocator;
+
+    var rejected = run(gpa, "before\x1b]5107;NOOUT\x07after", 1, false);
+    defer rejected.deinit();
+    try std.testing.expectEqualStrings("beforeafter", rejected.forwarded.items);
+    try std.testing.expectEqualStrings("beforeafter", rejected.recorded.items);
+    try std.testing.expectEqual(@as(usize, 1), rejected.events.items.len);
+    try std.testing.expectEqualStrings(bel_terminator_error, rejected.events.items[0].protocol_error);
+
+    const region = "\x1b]5107;NOOUT\x1b\\invalid\x07input\x1b]5107;END\x1b\\";
+    var content = run(gpa, region, 1, false);
+    defer content.deinit();
+    try std.testing.expectEqualStrings("invalid\x07input", content.forwarded.items);
+    try std.testing.expectEqualStrings("invalid\x07input", content.recorded.items);
+    try std.testing.expectEqual(@as(usize, 2), content.events.items.len);
+    try std.testing.expect(content.events.items[0] == .noout_begin);
+    try std.testing.expect(content.events.items[1] == .region_end);
 }
 
 test "a SLOT-lookalike number is not stripped" {

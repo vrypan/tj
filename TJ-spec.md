@@ -500,8 +500,8 @@ variables, so prompt substitutions and external engines such as Starship are
 captured exactly as displayed.
 
 At `preexec`, the plugin emits one `OSC SLOT;CONTEXT;PAYLOAD ST` marker, where
-`SLOT` is numeric OSC code 5107. `PAYLOAD` is the base64 encoding of an ASCII
-header followed by its three concatenated fields:
+`SLOT` is the mnemonic for numeric OSC code 5107. `PAYLOAD` is the base64
+encoding of an ASCII header followed by its three concatenated fields:
 
 ``` text
 1;<cmd-bytes>;<cwd-bytes>;<expanded-flag>;<expanded-bytes>;<cmd><cwd><expanded>
@@ -1084,11 +1084,12 @@ writes human-readable output, and can explicitly keep visible output out of
 the recorded resource.
 
 A cooperating program marks the beginning and end of a resource using
-**OSC SLOT**, whose numeric OSC code is 5107 (`5107` reads as `SLOT` in
-leetspeak). `SLOT` is written as `5107` on the wire; message names are uppercase
-and case-sensitive, and there is no additional namespace field. The resource
-contents remain ordinary program output; TJ interprets the control
-sequences as annotations over that output.
+**OSC SLOT**, where `SLOT` is the mnemonic for numeric OSC code 5107 (`5107`
+reads as `SLOT` in leetspeak). `SLOT` is written as `5107` on the wire; message
+names are uppercase and case-sensitive, and there is no additional namespace
+field. SLOT messages end with `ST`. The resource contents remain ordinary
+program output; TJ interprets the control sequences as annotations over that
+output.
 
 The four message forms have distinct producers and roles:
 
