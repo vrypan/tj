@@ -19,6 +19,7 @@ const plain = @import("plain.zig");
 const report = @import("report.zig");
 const store = @import("store.zig");
 const sys = @import("sys.zig");
+const presentation = @import("entry_presentation.zig");
 
 const max_input = 63;
 const max_events_per_frame = 64;
@@ -1082,14 +1083,12 @@ fn render(
         if (focused) fillRow(screen, line, model.size.cols, base_style);
         screen.move(line, 0);
 
-        const pinned = if (annotation) |value| value.pinned else false;
-        const has_name = if (annotation) |value| value.name != null else false;
-        const has_tags = if (annotation) |value| value.tags.items.len != 0 else false;
-        const failed = info.exit_code != null and info.exit_code.? != 0;
-        screen.writeStyled(if (pinned) "*" else " ", base_style);
-        screen.writeStyled(if (has_name) "@" else " ", base_style);
-        screen.writeStyled(if (has_tags) "#" else " ", base_style);
-        screen.writeStyled(if (failed) "!" else " ", if (focused) base_style else if (failed) failure_style else base_style);
+        const row_view = presentation.EntryPresentation.init(journal, number, false, if (annotation) |*value| value else null, info.exit_code);
+        const flags = row_view.flags();
+        screen.writeStyled(flags[0..1], base_style);
+        screen.writeStyled(flags[1..2], base_style);
+        screen.writeStyled(flags[2..3], base_style);
+        screen.writeStyled(flags[3..4], if (focused) base_style else if (row_view.failed()) failure_style else base_style);
         screen.writeStyled(" ", base_style);
 
         var number_buf: [24]u8 = undefined;
@@ -1104,23 +1103,34 @@ fn render(
         screen.writeStyled(size_text, if (focused) base_style else metadata_style);
         screen.writeStyled(" ", base_style);
 
-        const command = try report.sanitizeDisplayText(gpa, context.firstLine(info.command));
+        const command = try presentation.displayCommand(gpa, info.command);
         defer gpa.free(command);
         screen.writeStyled(command, base_style);
-        if (annotation) |value| {
-            if (value.name) |name| {
-                screen.writeStyled(" @", base_style);
-                screen.writeStyled(name, if (focused) base_style else metadata_style);
+        var metadata_parts = row_view.metadata();
+        while (metadata_parts.next()) |part| {
+            screen.writeStyled(" ", base_style);
+            const role_style = if (focused)
+                base_style
+            else switch (part.role()) {
+                .metadata => metadata_style,
+                .failure => failure_style,
+                else => unreachable,
+            };
+            switch (part) {
+                .name => |name| {
+                    screen.writeStyled("@", base_style);
+                    screen.writeStyled(name, role_style);
+                },
+                .tag => |tag| {
+                    screen.writeStyled("#", base_style);
+                    screen.writeStyled(tag, role_style);
+                },
+                .failure => |code| {
+                    var rc_buf: [8]u8 = undefined;
+                    const rc = try std.fmt.bufPrint(&rc_buf, "!{d}", .{code});
+                    screen.writeStyled(rc, role_style);
+                },
             }
-            for (value.tags.items) |tag| {
-                screen.writeStyled(" #", base_style);
-                screen.writeStyled(tag, if (focused) base_style else metadata_style);
-            }
-        }
-        if (failed) {
-            var rc_buf: [8]u8 = undefined;
-            const rc = try std.fmt.bufPrint(&rc_buf, " !{d}", .{info.exit_code.?});
-            screen.writeStyled(rc, if (focused) base_style else failure_style);
         }
     }
 

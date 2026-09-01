@@ -17,6 +17,7 @@ const noout = @import("noout.zig");
 const report = @import("report.zig");
 const replay_engine = @import("replay.zig");
 const context = @import("context.zig");
+const presentation = @import("entry_presentation.zig");
 
 pub fn listJournals(
     gpa: std.mem.Allocator,
@@ -243,9 +244,7 @@ pub fn appendWholeHistoryJournal(
 }
 
 pub fn historyReferenceWidth(journal: *const HistoryJournal, item: HistoryCursor.Item) usize {
-    const number_width = report.decimalWidth(item.number);
-    if (!item.qualified) return number_width;
-    return 1 + journal.name.len + 1 + number_width;
+    return presentation.EntryPresentation.init(journal.name, item.number, item.qualified, null, null).referenceWidth();
 }
 
 pub fn writeHistoryReference(
@@ -255,14 +254,12 @@ pub fn writeHistoryReference(
     width: usize,
     color_enabled: bool,
 ) !void {
-    const actual_width = historyReferenceWidth(journal, item);
+    const entry = presentation.EntryPresentation.init(journal.name, item.number, item.qualified, null, null);
+    const actual_width = entry.referenceWidth();
     try out.splatByteAll(' ', width - actual_width);
     if (color_enabled) try out.writeAll("\x1b[33m");
-    if (item.qualified) {
-        try out.print("@{s}.{d}", .{ journal.name, item.number });
-    } else {
-        try out.print("{d}", .{item.number});
-    }
+    var reference_buf: [96]u8 = undefined;
+    try out.writeAll(try entry.formatReference(&reference_buf));
     if (color_enabled) try out.writeAll("\x1b[0m");
 }
 
@@ -405,35 +402,12 @@ pub fn listInteractions(
 
         var payload: std.ArrayList(u8) = .empty;
         defer payload.deinit(gpa);
-        const command = try report.sanitizeDisplayText(gpa, context.firstLine(info.command));
+        const command = try presentation.displayCommand(gpa, info.command);
         defer gpa.free(command);
         try payload.appendSlice(gpa, command);
-
-        var metadata_start: ?usize = null;
-        var rc_start: ?usize = null;
-        const has_name = annotation != null and annotation.?.name != null;
-        const has_tags = annotation != null and annotation.?.tags.items.len != 0;
-        const has_failure = info.exit_code != null and info.exit_code.? != 0;
-        if (has_name or has_tags or has_failure) {
-            if (payload.items.len != 0) try payload.append(gpa, ' ');
-            if (has_name or has_tags) metadata_start = payload.items.len;
-            if (has_name) {
-                try payload.append(gpa, '@');
-                try payload.appendSlice(gpa, annotation.?.name.?);
-            }
-            if (has_tags) {
-                for (annotation.?.tags.items, 0..) |tag, tag_i| {
-                    if (has_name or tag_i != 0) try payload.append(gpa, ' ');
-                    try payload.append(gpa, '#');
-                    try payload.appendSlice(gpa, tag);
-                }
-            }
-            if (has_failure) {
-                if (has_name or has_tags) try payload.append(gpa, ' ');
-                rc_start = payload.items.len;
-                try payload.print(gpa, "!{d}", .{info.exit_code.?});
-            }
-        }
+        const row = presentation.EntryPresentation.init(journal.name, info.number, item.qualified, annotation, info.exit_code);
+        const offsets = try row.appendMetadata(gpa, &payload);
+        const flags = row.flags();
 
         var lines = try wrapHistoryText(gpa, payload.items, payload_width, prefix_width);
         defer lines.deinit(gpa);
@@ -447,12 +421,10 @@ pub fn listInteractions(
 
         for (lines.items, 0..) |line, line_i| {
             if (line_i == 0) {
-                try out.writeByte(if (annotation != null and annotation.?.pinned) '*' else ' ');
-                try out.writeByte(if (has_name) '@' else ' ');
-                try out.writeByte(if (has_tags) '#' else ' ');
-                if (has_failure and color_enabled) try out.writeAll("\x1b[31m");
-                try out.writeByte(if (has_failure) '!' else ' ');
-                if (has_failure and color_enabled) try out.writeAll("\x1b[0m");
+                try out.writeAll(flags[0..3]);
+                if (row.failed() and color_enabled) try out.writeAll("\x1b[31m");
+                try out.writeByte(flags[3]);
+                if (row.failed() and color_enabled) try out.writeAll("\x1b[0m");
                 try out.writeByte(' ');
                 try writeHistoryReference(out, journal, item, number_width, color_enabled);
                 try out.writeByte(' ');
@@ -468,7 +440,7 @@ pub fn listInteractions(
             } else {
                 try out.splatByteAll(' ', prefix_width);
             }
-            try writeHistoryLine(out, payload.items, line, metadata_start, rc_start, color_enabled);
+            try writeHistoryLine(out, payload.items, line, offsets.metadata_start, offsets.failure_start, color_enabled);
             try out.writeByte('\n');
         }
     }

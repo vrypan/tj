@@ -240,16 +240,13 @@ _tj_is_literal_tjcd() {
   _tj_valid_reference_head "$target"
 }
 
-# Rewrites valid unquoted shorthand in $1 into canonical ~[...] notation,
-# leaving $_tj_expanded. Returns 0 only if something actually changed.
-#
-# A reference is canonicalized only when it starts a shell word, so user@host
-# is untouched. Quoted text is copied through verbatim: the scan tracks quoting
-# rather than pattern-matching the whole line.
-_tj_canonicalize_shorthand() {
+# Scans shell words once, preserving quotes and escapes verbatim. The named
+# transformer may replace only the current unquoted word through the
+# dynamically scoped `_tj_scan_word`. Returns 0 only when a word changed.
+_tj_transform_command_line() {
   emulate -L zsh
 
-  local buf=$1 out='' word='' head='' suffix='' ch
+  local transformer=$1 buf=$2 out='' word='' ch _tj_scan_word
   local -i i=1 n=${#buf} at_word_start=1 changed=0
 
   while (( i <= n )); do
@@ -286,23 +283,10 @@ _tj_canonicalize_shorthand() {
           esac
           word+=${buf[i]}; (( i++ ))
         done
-        head=${word%%/*}
-        suffix=${word#$head}
-        if (( at_word_start )) && [[ $head == @* ]] &&
-           _tj_valid_reference_head "$head"; then
-          if ! _tj_reference_head_is_name "$head" ||
-             command "$(_tj_bin)" resolve "$head" >/dev/null 2>&1; then
-            out+="~[$head]$suffix"
-            changed=1
-          else
-            # Unassigned names stay literal for commands that use @handles.
-            out+=$word
-          fi
-        else
-          # Never drop a word: malformed shorthand reaches the command
-          # literally. A well-formed but missing name is rejected later by zsh.
-          out+=$word
-        fi
+        _tj_scan_word=$word
+        "$transformer" "$word" "$at_word_start"
+        [[ $_tj_scan_word != $word ]] && changed=1
+        out+=$_tj_scan_word
         at_word_start=0
         ;;
     esac
@@ -312,79 +296,55 @@ _tj_canonicalize_shorthand() {
   return $(( ! changed ))
 }
 
-# Resolves canonical TJ named-directory tokens in $1 for metadata only. This
-# does not mutate BUFFER and never evaluates the command line. The suffix stays
-# as shell text; only TJ's known directory component becomes a quoted path.
-_tj_expand_canonical_for_metadata() {
-  emulate -L zsh
+# A reference is canonicalized only when it starts a shell word, so user@host
+# is untouched. Unassigned names remain literal for commands that use
+# @handles; numbers and already assigned names enter zsh's dynamic-directory
+# namespace.
+_tj_transform_shorthand_word() {
+  local word=$1 at_word_start=$2 head suffix
+  (( at_word_start )) || return 0
+  head=${word%%/*}
+  suffix=${word#$head}
+  [[ $head == @* ]] && _tj_valid_reference_head "$head" || return 0
+  if ! _tj_reference_head_is_name "$head" ||
+     command "$(_tj_bin)" resolve "$head" >/dev/null 2>&1; then
+    _tj_scan_word="~[$head]$suffix"
+  fi
+}
 
-  local buf=$1 out='' word='' head='' suffix='' resolved='' ch
-  local -i i=1 n=${#buf} at_word_start=1 changed=0 close
+# Resolves one canonical TJ named-directory token for metadata only. The
+# resource suffix remains shell text; only TJ's known directory component is
+# replaced by a quoted path.
+_tj_transform_canonical_word() {
+  local word=$1 at_word_start=$2 head suffix resolved
+  local -i close=0 j
+  (( at_word_start )) && [[ ${word[1,2]} == '~[' ]] || return 0
 
-  while (( i <= n )); do
-    ch=${buf[i]}
-    case $ch in
-      "'")
-        out+=$ch; (( i++ ))
-        while (( i <= n )) && [[ ${buf[i]} != "'" ]]; do out+=${buf[i]}; (( i++ )); done
-        (( i <= n )) && { out+=${buf[i]}; (( i++ )) }
-        at_word_start=0
-        ;;
-      '"')
-        out+=$ch; (( i++ ))
-        while (( i <= n )) && [[ ${buf[i]} != '"' ]]; do
-          if [[ ${buf[i]} == '\' ]] && (( i < n )); then out+=${buf[i]}; (( i++ )); fi
-          out+=${buf[i]}; (( i++ ))
-        done
-        (( i <= n )) && { out+=${buf[i]}; (( i++ )) }
-        at_word_start=0
-        ;;
-      ' '|$'\t'|$'\n'|'|'|'&'|';'|'('|')'|'<'|'>')
-        out+=$ch; (( i++ )); at_word_start=1
-        ;;
-      *)
-        word=''
-        while (( i <= n )); do
-          if [[ ${buf[i]} == '\' ]] && (( i < n )); then
-            word+=${buf[i]}; (( i++ ))
-            word+=${buf[i]}; (( i++ ))
-            continue
-          fi
-          case ${buf[i]} in
-            (' '|$'\t'|$'\n'|'|'|'&'|';'|'('|')'|'<'|'>'|"'"|'"') break ;;
-          esac
-          word+=${buf[i]}; (( i++ ))
-        done
-
-        close=0
-        if (( at_word_start )) && [[ ${word[1,2]} == '~[' ]]; then
-          local -i j=3
-          while (( j <= ${#word} )); do
-            if [[ ${word[j]} == ']' ]]; then close=$j; break; fi
-            (( j++ ))
-          done
-        fi
-
-        if (( close > 3 )); then
-          head=${word[3,close-1]}
-          suffix=${word[close+1,-1]}
-          if _tj_valid_reference_head "$head" &&
-             resolved=$(command "$(_tj_bin)" resolve "$head" 2>/dev/null); then
-            out+=${(q)resolved}$suffix
-            changed=1
-          else
-            out+=$word
-          fi
-        else
-          out+=$word
-        fi
-        at_word_start=0
-        ;;
-    esac
+  j=3
+  while (( j <= ${#word} )); do
+    if [[ ${word[j]} == ']' ]]; then close=$j; break; fi
+    (( j++ ))
   done
+  (( close > 3 )) || return 0
 
-  _tj_expanded=$out
-  return $(( ! changed ))
+  head=${word[3,close-1]}
+  suffix=${word[close+1,-1]}
+  if _tj_valid_reference_head "$head" &&
+     resolved=$(command "$(_tj_bin)" resolve "$head" 2>/dev/null); then
+    _tj_scan_word=${(q)resolved}$suffix
+  fi
+}
+
+# Rewrites valid unquoted shorthand in $1 into canonical ~[...] notation,
+# leaving $_tj_expanded.
+_tj_canonicalize_shorthand() {
+  _tj_transform_command_line _tj_transform_shorthand_word "$1"
+}
+
+# Resolves canonical TJ named-directory tokens in $1 for metadata only. This
+# does not mutate BUFFER and never evaluates the command line.
+_tj_expand_canonical_for_metadata() {
+  _tj_transform_command_line _tj_transform_canonical_word "$1"
 }
 
 _tj_accept_line() {
@@ -411,6 +371,14 @@ _tj_register_accept_line
 
 # --- dynamic named directories ---------------------------------------------
 
+typeset -ga _tj_completion_candidates
+
+_tj_load_completion_candidates() {
+  emulate -L zsh
+  _tj_completion_candidates=(${(f)"$(command "$(_tj_bin)" complete "$1" 2>/dev/null)"})
+  (( ${#_tj_completion_candidates} ))
+}
+
 _tj_directory_name() {
   emulate -L zsh
 
@@ -424,10 +392,8 @@ _tj_directory_name() {
       ;;
     c)
       [[ $PREFIX == @* ]] || return 1
-      local -a candidates
-      candidates=(${(f)"$(command "$(_tj_bin)" complete "$PREFIX" 2>/dev/null)"})
-      (( ${#candidates} )) || return 1
-      _wanted dynamic-dirs expl 'tj journal reference' compadd -U -S\] -a candidates
+      _tj_load_completion_candidates "$PREFIX" || return 1
+      _wanted dynamic-dirs expl 'tj journal reference' compadd -U -S\] -a _tj_completion_candidates
       ;;
     *)
       return 1
@@ -452,12 +418,10 @@ _tj_register_directory_name
 # The resolver knows what is on disk; this only formats what it prints.
 _tj_completer() {
   [[ $PREFIX == @* ]] || return 1
-  local -a candidates
-  candidates=(${(f)"$(command "$(_tj_bin)" complete "$PREFIX" 2>/dev/null)"})
-  (( ${#candidates} )) || return 1
+  _tj_load_completion_candidates "$PREFIX" || return 1
   # Let zsh quote the match it inserts. `-Q` would turn a resource name into
   # active shell syntax when it contains a metacharacter.
-  compadd -U -- $candidates
+  compadd -U -- $_tj_completion_candidates
   return 0
 }
 

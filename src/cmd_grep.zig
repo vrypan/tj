@@ -17,6 +17,7 @@ const report = @import("report.zig");
 const replay_engine = @import("replay.zig");
 const cmd_context = @import("context.zig");
 const cmd_tui = @import("cmd_tui.zig");
+const presentation = @import("entry_presentation.zig");
 
 pub fn grepRequestFromArgs(args: []const [:0]const u8) !GrepRequest {
     var parsed = try cmd_context.parseTestCommand(.grep, args);
@@ -194,22 +195,21 @@ pub const GrepLineSink = struct {
     pub fn emit(context: *anyopaque, file: Io.File, start: u64, end: u64) !void {
         const self: *GrepLineSink = @ptrCast(@alignCast(context));
         try self.output.noout_region.begin();
-
-        const has_name = self.annotation != null and self.annotation.?.name != null;
-        const has_tags = self.annotation != null and self.annotation.?.tags.items.len != 0;
-        const has_failure = self.exit_code != null and self.exit_code.? != 0;
-
+        const entry = presentation.EntryPresentation.init(
+            self.journal,
+            self.number,
+            self.qualified,
+            self.annotation,
+            self.exit_code,
+        );
+        const flags = entry.flags();
         var reference_buf: [96]u8 = undefined;
-        const reference_text = if (self.qualified) blk: {
-            break :blk try std.fmt.bufPrint(&reference_buf, "@{s}.{d}", .{ self.journal, self.number });
-        } else try std.fmt.bufPrint(&reference_buf, "{d}", .{self.number});
+        const reference_text = try entry.formatReference(&reference_buf);
         const prefix_width = 4 + 1 + self.output.reference_width + 1 + 1 + 1;
-        try self.output.out.writeByte(if (self.annotation != null and self.annotation.?.pinned) '*' else ' ');
-        try self.output.out.writeByte(if (has_name) '@' else ' ');
-        try self.output.out.writeByte(if (has_tags) '#' else ' ');
-        if (has_failure and self.output.layout_color) try self.output.out.writeAll("\x1b[31m");
-        try self.output.out.writeByte(if (has_failure) '!' else ' ');
-        if (has_failure and self.output.layout_color) try self.output.out.writeAll("\x1b[0m");
+        try self.output.out.writeAll(flags[0..3]);
+        if (entry.failed() and self.output.layout_color) try self.output.out.writeAll("\x1b[31m");
+        try self.output.out.writeByte(flags[3]);
+        if (entry.failed() and self.output.layout_color) try self.output.out.writeAll("\x1b[0m");
         try self.output.out.writeByte(' ');
         try self.output.out.splatByteAll(' ', self.output.reference_width - reference_text.len);
         if (self.output.layout_color) try self.output.out.writeAll("\x1b[33m");
@@ -222,11 +222,11 @@ pub const GrepLineSink = struct {
         try self.output.out.writeByte(' ');
 
         if (self.output.terminal_columns) |columns| {
-            const fixed_width = prefix_width + self.metadataWidth();
+            const fixed_width = prefix_width + entry.metadataSuffixWidth();
             const budget = if (columns > fixed_width) columns - fixed_width else 0;
-            try self.writePayload(file, start, end, self.output.out, budget);
+            try self.writePayload(file, start, end, self.output.out, budget, &entry);
         } else {
-            try self.writePayload(file, start, end, self.output.out, null);
+            try self.writePayload(file, start, end, self.output.out, null, &entry);
         }
         try self.output.out.writeAll("\n");
     }
@@ -238,6 +238,7 @@ pub const GrepLineSink = struct {
         original_end: u64,
         writer: *Io.Writer,
         budget: ?usize,
+        entry: *const presentation.EntryPresentation,
     ) !void {
         var end = original_end;
         if (end > start) {
@@ -269,55 +270,39 @@ pub const GrepLineSink = struct {
         try normalized.finish();
 
         if (window.trailing_ellipsis) try writer.writeAll("…");
-        try self.writeMetadata(writer);
+        try self.writeMetadata(writer, entry);
     }
 
-    pub fn metadataWidth(self: *const GrepLineSink) usize {
-        const has_name = self.annotation != null and self.annotation.?.name != null;
-        const has_tags = self.annotation != null and self.annotation.?.tags.items.len != 0;
-        const has_failure = self.exit_code != null and self.exit_code.? != 0;
-        if (!has_name and !has_tags and !has_failure) return 0;
-
-        var width: usize = 1;
-        if (has_name) width += 1 + self.annotation.?.name.?.len;
-        if (has_tags) {
-            for (self.annotation.?.tags.items, 0..) |tag, i| {
-                if (has_name or i != 0) width += 1;
-                width += 1 + tag.len;
+    pub fn writeMetadata(
+        self: *const GrepLineSink,
+        writer: *Io.Writer,
+        entry: *const presentation.EntryPresentation,
+    ) !void {
+        var iterator = entry.metadata();
+        var active_role: ?presentation.ColorRole = null;
+        while (iterator.next()) |part| {
+            const role = part.role();
+            if (!self.output.layout_color) {
+                try writer.writeByte(' ');
+            } else if (active_role == role) {
+                try writer.writeByte(' ');
+            } else {
+                if (active_role != null) try writer.writeAll("\x1b[0m");
+                try writer.writeByte(' ');
+                try writer.writeAll(switch (role) {
+                    .metadata => "\x1b[32m",
+                    .failure => "\x1b[31m",
+                    else => unreachable,
+                });
+                active_role = role;
+            }
+            switch (part) {
+                .name => |name| try writer.print("@{s}", .{name}),
+                .tag => |tag| try writer.print("#{s}", .{tag}),
+                .failure => |code| try writer.print("!{d}", .{code}),
             }
         }
-        if (has_failure) {
-            if (has_name or has_tags) width += 1;
-            width += 1 + report.decimalWidth(self.exit_code.?);
-        }
-        return width;
-    }
-
-    pub fn writeMetadata(self: *const GrepLineSink, writer: *Io.Writer) !void {
-        const has_name = self.annotation != null and self.annotation.?.name != null;
-        const has_tags = self.annotation != null and self.annotation.?.tags.items.len != 0;
-        const has_failure = self.exit_code != null and self.exit_code.? != 0;
-        if (!has_name and !has_tags and !has_failure) return;
-        try writer.writeByte(' ');
-
-        if (has_name or has_tags) {
-            if (self.output.layout_color) try writer.writeAll("\x1b[32m");
-            if (has_name) try writer.print("@{s}", .{self.annotation.?.name.?});
-            if (has_tags) {
-                for (self.annotation.?.tags.items, 0..) |tag, i| {
-                    if (has_name or i != 0) try writer.writeByte(' ');
-                    try writer.writeByte('#');
-                    try writer.writeAll(tag);
-                }
-            }
-            if (self.output.layout_color) try writer.writeAll("\x1b[0m");
-        }
-        if (has_failure) {
-            if (has_name or has_tags) try writer.writeByte(' ');
-            if (self.output.layout_color) try writer.writeAll("\x1b[31m");
-            try writer.print("!{d}", .{self.exit_code.?});
-            if (self.output.layout_color) try writer.writeAll("\x1b[0m");
-        }
+        if (active_role != null) try writer.writeAll("\x1b[0m");
     }
 };
 
@@ -495,7 +480,67 @@ const MatchOnlySink = struct {
     fn emit(_: *anyopaque, _: Io.File, _: u64, _: u64) !void {}
 };
 
-fn collectMatchingEntries(
+const MatchingEntryVisitor = struct {
+    gpa: std.mem.Allocator,
+    numbers: *std.ArrayList(u32),
+    sink_context: u8 = 0,
+
+    fn beginResource(
+        _: *MatchingEntryVisitor,
+        _: []const u8,
+        _: store.InteractionInfo,
+        _: []const u8,
+        _: *const search.Matcher,
+    ) void {}
+
+    fn sink(self: *MatchingEntryVisitor) search.Sink {
+        return .{ .context = &self.sink_context, .emit = MatchOnlySink.emit };
+    }
+
+    fn endResource(self: *MatchingEntryVisitor, number: u32, found: u64) !bool {
+        if (found == 0) return false;
+        try self.numbers.append(self.gpa, number);
+        return true;
+    }
+};
+
+const FormattedMatchVisitor = struct {
+    output: *GrepOutput,
+    qualified: bool,
+    annotations_set: *const annotations.Set,
+    total: *u64,
+    line_sink: GrepLineSink = undefined,
+
+    fn beginResource(
+        self: *FormattedMatchVisitor,
+        journal: []const u8,
+        info: store.InteractionInfo,
+        resource: []const u8,
+        matcher: *const search.Matcher,
+    ) void {
+        self.line_sink = .{
+            .output = self.output,
+            .journal = journal,
+            .number = info.number,
+            .resource = resource,
+            .qualified = self.qualified,
+            .matcher = matcher,
+            .annotation = self.annotations_set.get(info.number),
+            .exit_code = info.exit_code,
+        };
+    }
+
+    fn sink(self: *FormattedMatchVisitor) search.Sink {
+        return .{ .context = &self.line_sink, .emit = GrepLineSink.emit };
+    }
+
+    fn endResource(self: *FormattedMatchVisitor, _: u32, found: u64) !bool {
+        self.total.* = try std.math.add(u64, self.total.*, found);
+        return false;
+    }
+};
+
+fn traverseGrepJournal(
     gpa: std.mem.Allocator,
     io: Io,
     root: store.Dir,
@@ -503,14 +548,15 @@ fn collectMatchingEntries(
     request: GrepRequest,
     active: ?cmd_context.ActiveInteraction,
     matcher: *const search.Matcher,
-    numbers: *std.ArrayList(u32),
+    visitor: anytype,
 ) !void {
+    // Matching reads resource files directly; recorded command text never
+    // needs to be resident merely to traverse a journal.
     var interactions = store.iterateInteractions(gpa, io, root, journal, store.no_command) catch |err| switch (err) {
         error.FileNotFound => return error.NoSuchJournal,
         else => |other| return other,
     };
     defer interactions.deinit();
-    var sink_context: u8 = 0;
 
     while (try interactions.next()) |info| {
         defer info.deinit(gpa);
@@ -529,15 +575,29 @@ fn collectMatchingEntries(
                 else => |other| return other,
             };
             defer file.close(io);
-            const found = try search.scanFile(io, file, matcher, .{
-                .context = &sink_context,
-                .emit = MatchOnlySink.emit,
-            });
-            if (found == 0) continue;
-            try numbers.append(gpa, info.number);
-            break;
+
+            visitor.beginResource(journal, info, resource.name, matcher);
+            const found = try search.scanFile(io, file, matcher, visitor.sink());
+            if (try visitor.endResource(info.number, found)) break;
         }
     }
+}
+
+fn collectMatchingEntries(
+    gpa: std.mem.Allocator,
+    io: Io,
+    root: store.Dir,
+    journal: []const u8,
+    request: GrepRequest,
+    active: ?cmd_context.ActiveInteraction,
+    matcher: *const search.Matcher,
+    numbers: *std.ArrayList(u32),
+) !void {
+    var visitor: MatchingEntryVisitor = .{
+        .gpa = gpa,
+        .numbers = numbers,
+    };
+    try traverseGrepJournal(gpa, io, root, journal, request, active, matcher, &visitor);
 }
 
 pub fn grepJournal(
@@ -551,53 +611,17 @@ pub fn grepJournal(
     output: *GrepOutput,
     total: *u64,
 ) !void {
-    // Grep matches against the resource files directly, so it never needs an
-    // entry's recorded command text in memory.
-    var interactions = store.iterateInteractions(gpa, io, root, journal, store.no_command) catch |err| switch (err) {
-        error.FileNotFound => return error.NoSuchJournal,
-        else => |other| return other,
-    };
-    defer interactions.deinit();
     var metadata = try annotations.openRead(gpa, io, root, journal);
     defer metadata.deinit(gpa);
     var journal_annotations = try annotations.loadSet(gpa, &metadata);
     defer journal_annotations.deinit(gpa);
-
-    while (try interactions.next()) |info| {
-        defer info.deinit(gpa);
-        if (active) |item| {
-            if (item.number == info.number and std.mem.eql(u8, item.journal, journal)) continue;
-        }
-        const annotation = journal_annotations.get(info.number);
-        for ([_]struct { enabled: bool, name: []const u8 }{
-            .{ .enabled = request.commands, .name = "cmd" },
-            .{ .enabled = request.output, .name = "out" },
-        }) |resource| {
-            if (!resource.enabled) continue;
-            var path_buf: [96]u8 = undefined;
-            const path = try std.fmt.bufPrint(&path_buf, "{s}/{d}/{s}", .{ journal, info.number, resource.name });
-            var file = root.openFile(io, path, .{}) catch |err| switch (err) {
-                error.FileNotFound => continue,
-                else => |other| return other,
-            };
-            defer file.close(io);
-            var line_sink: GrepLineSink = .{
-                .output = output,
-                .journal = journal,
-                .number = info.number,
-                .resource = resource.name,
-                .qualified = request.all,
-                .matcher = matcher,
-                .annotation = annotation,
-                .exit_code = info.exit_code,
-            };
-            const found = try search.scanFile(io, file, matcher, .{
-                .context = &line_sink,
-                .emit = GrepLineSink.emit,
-            });
-            total.* = try std.math.add(u64, total.*, found);
-        }
-    }
+    var visitor: FormattedMatchVisitor = .{
+        .output = output,
+        .qualified = request.all,
+        .annotations_set = &journal_annotations,
+        .total = total,
+    };
+    try traverseGrepJournal(gpa, io, root, journal, request, active, matcher, &visitor);
 }
 
 test "grep arguments select resources and preserve literal syntax" {
