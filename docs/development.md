@@ -60,5 +60,5 @@ tag and GitHub release, and updates the source-building formula in
 Retry only the Homebrew formula update with:
 
 ```sh
-gh workflow run update-homebrew-formula.yml -f tag=v0.5.0
+gh workflow run update-homebrew-formula.yml -f tag=v0.5.1
 ```
