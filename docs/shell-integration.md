@@ -120,6 +120,27 @@ source "$(brew --prefix)/share/tj/tj.plugin.zsh"
 The plugin preserves existing `accept-line`, completion, and dynamic named
 directory handlers.
 
+## TUI key binding
+
+While a journal shell is at its prompt, Ctrl-X Ctrl-T opens `tj tui`. Closing
+the TUI returns to the command line that was being edited. The two-key sequence
+avoids the Ctrl-T binding commonly installed by fzf.
+
+In an entry's detail view, Enter returns the focused line or selected lines.
+When the browser was opened through the widget, that value is inserted at the
+cursor in the current command line.
+
+Set `TJ_TUI_KEY` before sourcing the plugin to choose another ZLE key sequence,
+or set it to `none` to install the widget without binding a key:
+
+```zsh
+export TJ_TUI_KEY='^X^J'
+source ~/.local/share/tj/tj.plugin.zsh
+```
+
+The widget is named `_tj_tui_widget`, so it can also be bound explicitly with
+`bindkey`.
+
 ## Reference expansion
 
 zsh dynamic named directories make `~[@42]` resolve to an entry directory.

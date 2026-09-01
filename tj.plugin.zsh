@@ -8,12 +8,14 @@
 # `tjcd` remains available so qualified references can be used from an
 # ordinary shell.
 #
-# Two jobs:
+# Three jobs:
 #
 #   1. Mark command boundaries, because the proxy sees one undifferentiated
 #      byte stream and cannot tell where one command ends and the next begins.
 #   2. Give journal references a zsh dynamic named-directory namespace, so
 #      ordinary programs receive paths without exposing them in command lines.
+#   3. Open the journal browser from ZLE and insert a chosen detail value into
+#      the command line.
 
 _tj_bin() { print -r -- "${TJ:-tj}" }
 
@@ -178,6 +180,40 @@ _tj_prompt_end() {
 # sourced again.
 autoload -Uz add-zle-hook-widget
 add-zle-hook-widget zle-line-init _tj_prompt_end
+
+# Open the journal browser from the current prompt. The TUI owns the terminal
+# until it exits; ZLE then redraws the command line that was being edited.
+_tj_tui_widget() {
+  emulate -L zsh
+
+  zle -I
+  # ZLE does not reliably expose its terminal on stdin. Duplicate stderr,
+  # which is the inherited terminal descriptor, rather than reopening
+  # /dev/tty: poll() rejects freshly-opened /dev/tty descriptors on macOS.
+  # stdout is intentionally captured: the TUI paints through stderr when
+  # stdout is a pipe, and writes the chosen detail value to stdout on exit.
+  local selection
+  selection=$(command "$(_tj_bin)" tui <&2)
+  local tui_status=$?
+  if (( tui_status == 0 )) && [[ -n $selection ]]; then
+    LBUFFER+=$selection
+  fi
+  zle reset-prompt
+  return $tui_status
+}
+
+_tj_register_tui_widget() {
+  (( ${+_TJ_TUI_WIDGET_REGISTERED} )) && return 0
+
+  zle -N _tj_tui_widget || return 1
+  local key=${TJ_TUI_KEY-'^X^T'}
+  if [[ -n $key && $key != none ]]; then
+    bindkey "$key" _tj_tui_widget || return 1
+  fi
+  typeset -g _TJ_TUI_WIDGET_REGISTERED=1
+}
+
+_tj_register_tui_widget
 
 # --- the journal namespace --------------------------------------------------
 

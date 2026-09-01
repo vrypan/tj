@@ -66,7 +66,8 @@ tjctl --version
 ```
 
 The plugin records command boundaries and enables reference expansion and
-completion. TJ can start without it, but shell commands will not be recorded.
+completion. Inside a journal, Ctrl-X Ctrl-T opens the entry browser. TJ can
+start without the plugin, but shell commands will not be recorded.
 
 ## Start a journal
 

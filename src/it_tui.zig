@@ -4,6 +4,56 @@ const std = @import("std");
 const store = @import("store.zig");
 const support = @import("it_support.zig");
 
+test "zsh widget keeps tui open and inserts its stdout" {
+    if (!support.haveZsh()) return error.SkipZigTest;
+    const gpa = std.testing.allocator;
+
+    var journal = try support.Journal.open(gpa);
+    defer journal.close();
+    const child = try support.spawnJournalZsh(gpa, &journal);
+    var transcript: std.ArrayList(u8) = .empty;
+    defer transcript.deinit(gpa);
+    const prefix =
+        "_tj_probe_buffer() { zle -I; print -r -- \"TJ_WIDGET_BUFFER=<$BUFFER>\"; BUFFER=; zle reset-prompt; }; " ++
+        "zle -N _tj_probe_buffer; bindkey '^X^B' _tj_probe_buffer";
+    try support.setupJournalZshWithPrefix(gpa, child, &transcript, prefix);
+
+    var from = transcript.items.len;
+    try child.write("echo WIDGET_FIXTURE\n");
+    try std.testing.expect(try child.readUntilFrom(gpa, &transcript, from, support.test_prompt, support.timeout_ms));
+
+    // The browser must remain active without input. This catches attempts to
+    // poll a freshly opened /dev/tty descriptor on macOS, which looks like an
+    // immediate end-of-input from a ZLE-launched child.
+    from = transcript.items.len;
+    try child.write("\x18\x14");
+    try std.testing.expect(try child.readUntilFrom(gpa, &transcript, from, " entries", support.timeout_ms));
+    const drawn = transcript.items.len;
+    try std.testing.expect(!try child.readUntilFrom(gpa, &transcript, drawn, "\x00", 300));
+    try std.testing.expect(std.mem.indexOf(u8, transcript.items[from..], "\x1b[?1049l") == null);
+
+    from = transcript.items.len;
+    try child.write("q");
+    try std.testing.expect(try child.readUntilFrom(gpa, &transcript, from, support.test_prompt, support.timeout_ms));
+
+    // The direct TUI test below covers Enter choosing detail values. Isolate
+    // the ZLE half here by substituting a deterministic command whose stdout
+    // is what the real TUI would return.
+    from = transcript.items.len;
+    try child.write("TJ=/bin/echo\n");
+    try std.testing.expect(try child.readUntilFrom(gpa, &transcript, from, support.test_prompt, support.timeout_ms));
+
+    from = transcript.items.len;
+    try child.write("\x18\x14\x18\x02");
+    try std.testing.expect(try child.readUntilFrom(gpa, &transcript, from, "TJ_WIDGET_BUFFER=<tui>", support.timeout_ms));
+    try std.testing.expect(try child.readUntilFrom(gpa, &transcript, from, support.test_prompt, support.timeout_ms));
+
+    try child.write("exit 0\n");
+    const status = try child.finish(gpa, &transcript, support.timeout_ms);
+    if (status != 0) std.debug.print("tui widget shell failed ({d}): {s}\n", .{ status, transcript.items });
+    try std.testing.expectEqual(@as(u8, 0), status);
+}
+
 test "tui shows details, confirms deletion, and shares annotation semantics" {
     if (!support.haveZsh()) return error.SkipZigTest;
     const gpa = std.testing.allocator;

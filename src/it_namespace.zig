@@ -48,8 +48,16 @@ test "the tj zle hooks preserve existing widgets and register once" {
     try std.testing.expect(try child.readUntilFrom(gpa, &out, from, "TJ_PRIOR_LINE_INIT_COUNT=2", support.timeout_ms));
     try std.testing.expect(try child.readUntilFrom(gpa, &out, from, support.test_prompt, support.timeout_ms));
 
+    from = out.items.len;
+    try child.write("print -r -- \"TJ_TUI_WIDGET=${widgets[_tj_tui_widget]}\"; bindkey -L '^X^T'\n");
+    try std.testing.expect(try child.readUntilFrom(gpa, &out, from, "TJ_TUI_WIDGET=user:_tj_tui_widget", support.timeout_ms));
+    try std.testing.expect(try child.readUntilFrom(gpa, &out, from, "bindkey \"^X^T\" _tj_tui_widget", support.timeout_ms));
+    try std.testing.expect(try child.readUntilFrom(gpa, &out, from, support.test_prompt, support.timeout_ms));
+
     try child.write("exit 0\n");
-    try std.testing.expectEqual(@as(u8, 0), try child.finish(gpa, &out, support.timeout_ms));
+    const status = try child.finish(gpa, &out, support.timeout_ms);
+    if (status != 0) std.debug.print("zle registration shell failed ({d}): {s}\n", .{ status, out.items });
+    try std.testing.expectEqual(@as(u8, 0), status);
 }
 
 test "zsh preexec precedes dynamic named-directory expansion" {

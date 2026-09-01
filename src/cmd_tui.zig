@@ -40,7 +40,8 @@ pub fn runFiltered(gpa: std.mem.Allocator, io: Io, home: ?[]const u8, numbers: [
 fn runWithFilter(gpa: std.mem.Allocator, io: Io, home: ?[]const u8, allowed_numbers: ?[]const u32) !void {
     const journal = try context.currentJournal();
     if (journal.len == 0) return error.NotInJournal;
-    if (!sys.isTty(0) or !sys.isTty(1)) return error.NoControllingTerminal;
+    if (!sys.isTty(0)) return error.NoControllingTerminal;
+    const terminal_output: sys.Fd = if (sys.isTty(1)) 1 else if (sys.isTty(2)) 2 else return error.NoControllingTerminal;
 
     var model: Model = .{};
     defer model.deinit(gpa);
@@ -50,10 +51,10 @@ fn runWithFilter(gpa: std.mem.Allocator, io: Io, home: ?[]const u8, allowed_numb
     var page: tui_page.Page = .{};
     defer page.deinit(gpa);
 
-    try sys.writeAll(1, noout.begin_marker);
+    try sys.writeAll(terminal_output, noout.begin_marker);
     region_active.store(true, .release);
     defer {
-        sys.writeAll(1, noout.end_marker) catch {};
+        sys.writeAll(terminal_output, noout.end_marker) catch {};
         region_active.store(false, .release);
     }
 
