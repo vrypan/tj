@@ -131,6 +131,12 @@ journal.
 See [Entries and references](docs/entries-and-references.md) for ranges, names,
 tags, pins, removal, completion, and the TUI.
 
+## Contributing
+
+TJ does not accept pull requests. To report a specific bug or request a
+specific feature, open an issue and document it clearly. See
+[Contributing](CONTRIBUTING.md).
+
 ## Documentation
 
 - [Installation](docs/installation.md)
