@@ -83,6 +83,14 @@ Leave the journal with `exit`. Open it again later:
 tjctl use project-work
 ```
 
+For disposable work, use a temporary journal. It is removed on exit unless
+you save it from the shell:
+
+```sh
+tjctl new --temp
+tjctl save
+```
+
 By default, `use` quickly replays the recorded terminal output before opening
 a new shell. Use `--no-replay` to skip it. Continuing a journal does not restore
 old processes, environment variables, or shell state.
@@ -100,7 +108,8 @@ tjctl mv project-work new-name
 tjctl rm new-name
 ```
 
-See [Journals](docs/journals.md) for replay, disk usage, titles, and deletion.
+See [Journals](docs/journals.md) for temporary journals, replay, disk usage,
+titles, and deletion.
 
 ## Work with entries
 

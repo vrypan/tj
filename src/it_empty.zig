@@ -157,6 +157,22 @@ test "a new journal that recorded nothing leaves nothing behind" {
     try std.testing.expectEqual(@as(usize, 0), try scratch.journals());
 }
 
+test "an unsaved temporary journal is removed even when it has journal data" {
+    const gpa = std.testing.allocator;
+    var scratch = try support.Scratch.open();
+    defer scratch.close();
+
+    // The malformed ELLO request leaves a journal warning, proving temporary
+    // finalization is unconditional rather than the ordinary empty-new rule.
+    var result = try support.runTjctl(gpa, &.{
+        "--home",  scratch.path(), "new",                                "--temp", "scratch-work", "--",
+        "/bin/sh", "-c",           "printf '\\033]3110;BOGUS\\033\\\\'",
+    }, 24, 80);
+    defer result.out.deinit(gpa);
+    try std.testing.expectEqual(@as(u8, 0), result.code);
+    try std.testing.expectEqual(@as(usize, 0), try scratch.journals());
+}
+
 test "the nothing-recorded warning uses stderr when it is redirected" {
     const gpa = std.testing.allocator;
 

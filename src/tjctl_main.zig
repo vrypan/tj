@@ -117,6 +117,7 @@ fn isUsageError(err: anyerror) bool {
 fn commandErrorMessage(err: anyerror) []const u8 {
     return switch (err) {
         error.NotInJournal => "tjctl: not inside a tj journal writer\n",
+        error.NotTemporaryJournal => "tjctl: the active journal is not an unsaved temporary journal\n",
         error.NoSuchJournal => "tjctl: no journal matches that name\n",
         error.AmbiguousJournal => "tjctl: journal suffix is ambiguous\n",
         error.InvalidJournalName => "tjctl: invalid journal name\n",

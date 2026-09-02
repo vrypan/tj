@@ -60,6 +60,7 @@ pub const noout_placeholder = "<tj:noout>";
 /// tj's own bookkeeping, which a program may not overwrite by publishing a
 /// resource with the same name.
 const reserved_names = [_][]const u8{ "cmd", "cwd", "out", "prompt", "rc", "meta.json", "out.removed", ".meta.tmp", "log" };
+pub const temporary_marker = ".tj-temporary";
 
 const PromptState = enum { idle, capturing, ready };
 
@@ -71,6 +72,12 @@ pub const Store = struct {
     journal: []u8,
     lock_file: File,
     origin: Origin,
+    /// A journal made with `tjctl new --temp`. The marker is deliberately in
+    /// the journal itself, so a later lifecycle command can reclaim it after
+    /// an unclean exit.
+    temporary: bool = false,
+    /// Set only by this writer after a successful OSC ELLO SAVE request.
+    saved_temporary: bool = false,
     next_number: ?u32 = 1,
     current: ?Interaction = null,
     out_buffer: []u8,
@@ -131,10 +138,10 @@ pub const Store = struct {
     /// Creates a new journal. `home_override` wins over `$TJ_HOME`, which wins
     /// over `~/.tj`.
     pub fn createJournal(gpa: std.mem.Allocator, io: Io, home_override: ?[]const u8) !Store {
-        return createNamedJournal(gpa, io, home_override, null);
+        return createNamedJournal(gpa, io, home_override, null, false);
     }
 
-    pub fn createNamedJournal(gpa: std.mem.Allocator, io: Io, home_override: ?[]const u8, requested_name: ?[]const u8) !Store {
+    pub fn createNamedJournal(gpa: std.mem.Allocator, io: Io, home_override: ?[]const u8, requested_name: ?[]const u8, temporary: bool) !Store {
         var path_buf: [std.fs.max_path_bytes]u8 = undefined;
         const root_path = try resolveRoot(home_override, &path_buf);
 
@@ -178,6 +185,10 @@ pub const Store = struct {
 
             const journal_dir = try root.openDir(io, id, .{ .iterate = true });
             errdefer journal_dir.close(io);
+            if (temporary) {
+                const marker = try journal_dir.createFile(io, temporary_marker, .{ .permissions = file_permissions });
+                marker.close(io);
+            }
 
             const out_buffer = try gpa.alloc(u8, out_buffer_size);
             errdefer gpa.free(out_buffer);
@@ -190,6 +201,7 @@ pub const Store = struct {
                 .journal = owned_id,
                 .lock_file = lock_file,
                 .origin = .created,
+                .temporary = temporary,
                 .out_buffer = out_buffer,
             };
         }
@@ -253,7 +265,10 @@ pub const Store = struct {
 
         // Only the invocation that created a journal may remove it as empty
         // noise. A continued journal is persistent even when it stays empty.
-        const removed = self.origin == .created and blk: {
+        const removed = if (self.temporary and !self.saved_temporary) blk: {
+            self.root.deleteTree(self.io, self.journal) catch break :blk false;
+            break :blk true;
+        } else self.origin == .created and !self.saved_temporary and blk: {
             self.root.deleteDir(self.io, self.journal) catch break :blk false;
             break :blk true;
         };
@@ -281,6 +296,15 @@ pub const Store = struct {
     /// The exact journal selected and locked by this writer.
     pub fn journalId(self: *const Store) []const u8 {
         return self.journal;
+    }
+
+    /// Makes this temporary journal persistent. Only the active proxy calls
+    /// this in response to its private ELLO request.
+    pub fn saveTemporary(self: *Store) bool {
+        if (!self.temporary or self.saved_temporary) return false;
+        self.journal_dir.deleteFile(self.io, temporary_marker) catch return false;
+        self.saved_temporary = true;
+        return true;
     }
 
     /// Opens interaction N and writes `cmd` immediately, so a journal that
@@ -811,6 +835,35 @@ pub fn listJournals(gpa: std.mem.Allocator, io: Io, root: Dir) ![][]const u8 {
     }.lexical);
 
     return found.toOwnedSlice(gpa);
+}
+
+/// Reclaim journals whose temporary writer disappeared without saving them.
+/// A live writer holds its per-journal lock, which `removeJournal` refuses to
+/// take; stale cleanup therefore never touches an active journal.
+pub fn sweepTemporaryJournals(gpa: std.mem.Allocator, io: Io, home_override: ?[]const u8) !void {
+    var root = openRoot(io, home_override) catch |err| switch (err) {
+        error.FileNotFound => return,
+        else => return err,
+    };
+    defer root.close(io);
+    const journals = try listJournals(gpa, io, root);
+    defer {
+        for (journals) |name| gpa.free(name);
+        gpa.free(journals);
+    }
+    for (journals) |journal| {
+        var dir = root.openDir(io, journal, .{ .follow_symlinks = false }) catch continue;
+        const marked = blk: {
+            _ = dir.statFile(io, temporary_marker, .{ .follow_symlinks = false }) catch break :blk false;
+            break :blk true;
+        };
+        dir.close(io);
+        if (!marked) continue;
+        removeJournal(gpa, io, root, journal, true) catch |err| switch (err) {
+            error.ActiveJournal => {},
+            else => return err,
+        };
+    }
 }
 
 pub const InteractionInfo = struct {
@@ -1775,11 +1828,58 @@ test "explicit journal creation validates names and rejects collisions" {
     var path_buf: [std.fs.max_path_bytes]u8 = undefined;
     const home = try testHome(&tmp, io, &path_buf);
 
-    var first = try Store.createNamedJournal(gpa, io, home, "release-build");
+    var first = try Store.createNamedJournal(gpa, io, home, "release-build", false);
     defer first.close();
     try std.testing.expectEqualStrings("release-build", first.journalId());
-    try std.testing.expectError(error.JournalExists, Store.createNamedJournal(gpa, io, home, "release-build"));
-    try std.testing.expectError(error.InvalidJournalName, Store.createNamedJournal(gpa, io, home, "Release.Build"));
+    try std.testing.expectError(error.JournalExists, Store.createNamedJournal(gpa, io, home, "release-build", false));
+    try std.testing.expectError(error.InvalidJournalName, Store.createNamedJournal(gpa, io, home, "Release.Build", false));
+}
+
+test "temporary journals are removed unless saved" {
+    const io = std.testing.io;
+    const gpa = std.testing.allocator;
+    var tmp = std.testing.tmpDir(.{ .iterate = true });
+    defer tmp.cleanup();
+    var path_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const home = try testHome(&tmp, io, &path_buf);
+
+    var discarded = try Store.createNamedJournal(gpa, io, home, "discarded", true);
+    discarded.close();
+    var root = try openRoot(io, home);
+    defer root.close(io);
+    try std.testing.expectError(error.FileNotFound, root.statFile(io, "discarded", .{}));
+
+    var retained = try Store.createNamedJournal(gpa, io, home, "retained", true);
+    try std.testing.expect(retained.saveTemporary());
+    retained.close();
+    _ = try root.statFile(io, "retained", .{});
+    var journal = try root.openDir(io, "retained", .{});
+    defer journal.close(io);
+    try std.testing.expectError(error.FileNotFound, journal.statFile(io, temporary_marker, .{}));
+}
+
+test "temporary cleanup skips a live writer and removes a stale marker" {
+    const io = std.testing.io;
+    const gpa = std.testing.allocator;
+    var tmp = std.testing.tmpDir(.{ .iterate = true });
+    defer tmp.cleanup();
+    var path_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const home = try testHome(&tmp, io, &path_buf);
+
+    var live = try Store.createNamedJournal(gpa, io, home, "live", true);
+    defer live.close();
+    try sweepTemporaryJournals(gpa, io, home);
+    var root = try openRoot(io, home);
+    defer root.close(io);
+    _ = try root.statFile(io, "live", .{});
+
+    try root.createDir(io, "stale", dir_permissions);
+    var stale = try root.openDir(io, "stale", .{});
+    const marker = try stale.createFile(io, temporary_marker, .{ .permissions = file_permissions });
+    marker.close(io);
+    stale.close(io);
+    try sweepTemporaryJournals(gpa, io, home);
+    try std.testing.expectError(error.FileNotFound, root.statFile(io, "stale", .{}));
 }
 
 test "rename changes identity atomically and preserves journal bytes" {

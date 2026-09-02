@@ -9,6 +9,7 @@ TJ stores journals below `~/.tj`, or the directory selected by `TJ_HOME` or
 ~/.tj/
 ├── .locks/
 └── project-work/
+    ├── .tj-temporary       # present only until `tjctl save`
     ├── journal.sqlite3
     ├── log
     ├── 1/
@@ -58,6 +59,12 @@ uses its number. Deleted numbers are not reused.
 A newly created journal may be removed automatically when it records nothing.
 An existing journal opened with `tjctl use` is never removed because that run
 was empty. A journal containing a diagnostic log is also preserved.
+
+A journal created with `tjctl new --temp` has a private `.tj-temporary` marker.
+The writer removes the whole journal on exit while that marker remains. `tjctl
+save` removes the marker through the active proxy, making the journal
+persistent even if it is empty. Later `tjctl` lifecycle commands reclaim an
+inactive marker-bearing journal left by an unclean writer exit.
 
 ## Recording diagnostics
 

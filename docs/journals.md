@@ -14,6 +14,25 @@ Names may contain lowercase ASCII letters, digits, and internal `-` characters.
 They must start and end with a letter or digit and may be at most 63 characters
 long. If the name is omitted, TJ creates one.
 
+## Temporary journals
+
+`tjctl new --temp [NAME]` creates a journal intended for short-lived work. TJ
+removes it when its writer exits, even if it has entries, pins, names, or tags.
+Save it while the shell is active to keep it:
+
+```sh
+tjctl save
+```
+
+Saving keeps the current name and prints it when the writer later finishes.
+Use `tjctl mv` after exit to rename it. `tj-new --temp` works during a shell
+handoff too. If a temporary writer is killed, a later `tjctl` lifecycle command
+removes the inactive leftover; active journals are never reclaimed.
+
+Temporary writers export `TJ_TEMPORARY=1`. It describes how that writer began,
+so it remains set after `save`; the journal marker, not this environment
+variable, is the authoritative saved state.
+
 ## Open an existing journal
 
 ```sh

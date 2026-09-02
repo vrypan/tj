@@ -111,12 +111,11 @@ pub fn build(b: *std.Build) void {
     integration_options.addOptionPath("tjctl_zsh_completion", completion_outputs[4]);
     integration_options.addOptionPath("tjctl_fish_completion", completion_outputs[5]);
 
-    const integration_mod = b.createModule(.{
-        .root_source_file = b.path("src/integration_test.zig"),
-        .target = target,
-        .optimize = optimize,
-        .link_libc = true,
-    });
+    // Integration tests import the same command and storage modules as the
+    // binaries, including embedded SQLite. Give their root module the exact
+    // same C sources, include paths, and package imports.
+    const integration_mod = applicationModule(b, zecli, "src/integration_test.zig", target, optimize, false);
+    integration_mod.addImport("zooi", zooi.module("zooi"));
     integration_mod.addOptions("build_options", integration_options);
 
     const unit_tests = b.addTest(.{ .root_module = exe_mod });

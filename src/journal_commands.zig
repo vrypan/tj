@@ -34,6 +34,9 @@ pub fn run(
         }
         break :blk configured;
     } else 0;
+    // Lifecycle commands are the recovery point for a temporary writer killed
+    // before it could finish. Entry commands deliberately never do this work.
+    if (which != .save and which != .current) try store.sweepTemporaryJournals(gpa, io, home);
     switch (which) {
         .new => {
             const opts: proxy.Options = .{
@@ -44,6 +47,7 @@ pub fn run(
                 .title = title,
                 .title_blink_ms = title_blink_ms,
                 .home = home,
+                .temporary = parsed.enabled("temp"),
             };
             if (insideWriter()) {
                 if (!sys.envPresent("TJ_SHELL_HANDOFF")) return error.UseShellHandoff;
@@ -51,6 +55,7 @@ pub fn run(
             }
             return (try proxy.run(gpa, io, opts)).exit_code;
         },
+        .save => return saveTemporary(),
         .use => {
             const opts: proxy.Options = .{
                 .journal = .{ .existing = parsed.positionals.items[0] },
@@ -121,7 +126,10 @@ fn emitHandoff(
     // still alive. The proxy repeats acquisition after it owns the handoff;
     // this short preflight keeps a failed request from terminating the source.
     var target = switch (opts.journal) {
-        .new => |name| try store.Store.createNamedJournal(gpa, io, opts.home, name),
+        // This is only name selection and lock validation. Do not mark the
+        // short-lived preflight journal temporary: closing it must leave the
+        // target directory available for the proxy that owns the handoff.
+        .new => |name| try store.Store.createNamedJournal(gpa, io, opts.home, name, false),
         .existing => |selector| try store.Store.continueJournal(gpa, io, opts.home, selector),
     };
     errdefer target.close();
@@ -138,6 +146,7 @@ fn emitHandoff(
         .keep_osc = opts.keep_osc,
         .replay_before_start = opts.replay_before_start,
         .splash = opts.splash,
+        .temporary = opts.temporary,
         .title_blink_ms = title_blink_ms,
         .title_len = title.len,
         .selector_len = selected.len,
@@ -162,6 +171,24 @@ fn emitHandoff(
     var blink: [16]u8 = undefined;
     const blink_text = try std.fmt.bufPrint(&blink, "{d}", .{title_blink_ms});
     try writeShellExport(out, "TJ_TITLE_BLINK", blink_text);
+    if (opts.temporary) {
+        try writeShellExport(out, "TJ_TEMPORARY", "1");
+    } else {
+        try out.writeAll("unset TJ_TEMPORARY\n");
+    }
+    return 0;
+}
+
+fn saveTemporary() !u8 {
+    if (!insideWriter() or !sys.envPresent("TJ_TEMPORARY")) return error.NotTemporaryJournal;
+    const flags: posix.O = .{ .ACCMODE = .WRONLY, .CLOEXEC = true };
+    const tty_fd = posix.openatZ(posix.AT.FDCWD, "/dev/tty", flags, 0) catch return error.NoControllingTerminal;
+    defer sys.close(tty_fd);
+    try sys.writeAll(tty_fd, "\x1b]3110;SAVE\x1b\\");
+    var reply: [1]u8 = undefined;
+    const fd_text = sys.env("TJ_HANDOFF_FD") orelse return error.NotTemporaryJournal;
+    const fd: sys.Fd = std.fmt.parseInt(sys.Fd, fd_text, 10) catch return error.NotTemporaryJournal;
+    if (try sys.read(fd, &reply) != 1 or reply[0] != 0) return error.NotTemporaryJournal;
     return 0;
 }
 

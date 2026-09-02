@@ -65,7 +65,7 @@ test "application and every command expose generated help" {
         }
     }
 
-    const control_names = [_][]const u8{ "new", "use", "ls", "mv", "rm", "du", "replay", "current", "complete" };
+    const control_names = [_][]const u8{ "new", "save", "use", "ls", "mv", "rm", "du", "replay", "current", "complete" };
     for (control_names) |name| {
         const result = try support.runTjctlNonTty(gpa, &.{ name, "--help" });
         defer gpa.free(result.stdout);
@@ -74,6 +74,8 @@ test "application and every command expose generated help" {
         const usage = try std.fmt.allocPrint(gpa, "Usage: tjctl {s}", .{name});
         defer gpa.free(usage);
         try std.testing.expect(std.mem.indexOf(u8, result.stdout, usage) != null);
+        if (std.mem.eql(u8, name, "new")) try std.testing.expect(std.mem.indexOf(u8, result.stdout, "--temp") != null);
+        if (std.mem.eql(u8, name, "use")) try std.testing.expect(std.mem.indexOf(u8, result.stdout, "--temp") == null);
     }
 
     const alias = try support.runNonTty(gpa, &.{ "history", "--help" });

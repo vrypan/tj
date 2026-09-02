@@ -315,6 +315,11 @@ reject in-writer use and direct the user to the helpers. A failed target
 selection leaves the source writer running. Handoff is rejected from tmux and
 GNU Screen and does not accept `--home` or a child command after `--`.
 
+`tjctl new --temp` makes a journal temporary. The active proxy removes an
+unsaved temporary journal when its writer ends or hands off. `tjctl save`
+emits private `OSC 3110;SAVE` control traffic; the proxy removes the
+journal-local temporary marker and the journal then remains persistent.
+
 Interactive writers show the startup splash unless `--no-splash` is present
 or inherited `TJ_NO_SPLASH` parses as true (`true`, `yes`, or `1`; false forms
 are `false`, `no`, and `0`). Non-interactive writers do not

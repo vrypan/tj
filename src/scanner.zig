@@ -64,6 +64,8 @@ pub const Event = union(enum) {
     region_end,
     /// `OSC 3110;HANDOFF;BASE64` - replace the current journal writer.
     handoff: []const u8,
+    /// `OSC 3110;SAVE` - make the current temporary journal persistent.
+    save,
     /// A malformed or unsupported ELLO sequence. Carries a bounded payload or
     /// diagnostic for the journal log; the sequence itself is dropped.
     protocol_error: []const u8,
@@ -415,6 +417,11 @@ pub const Scanner = struct {
             } else {
                 sink.event(.{ .handoff = encoded });
             }
+            return;
+        }
+
+        if (std.mem.eql(u8, rest, "SAVE")) {
+            sink.event(.save);
             return;
         }
 
@@ -980,4 +987,14 @@ test "keep osc forwards handoff markers only as control" {
     try std.testing.expectEqualStrings(input, r.forwarded.items);
     try std.testing.expectEqualStrings("ab", r.recorded.items);
     try std.testing.expect(r.events.items[0] == .handoff);
+}
+
+test "save marker is stripped across reads" {
+    const gpa = std.testing.allocator;
+    var r = run(gpa, "before\x1b]3110;SAVE\x1b\\after", 1, false);
+    defer r.deinit();
+    try std.testing.expectEqualStrings("beforeafter", r.forwarded.items);
+    try std.testing.expectEqualStrings("beforeafter", r.recorded.items);
+    try std.testing.expectEqual(@as(usize, 1), r.events.items.len);
+    try std.testing.expect(r.events.items[0] == .save);
 }

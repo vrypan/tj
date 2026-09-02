@@ -78,6 +78,7 @@ pub const Options = struct {
     title: []const u8 = "none",
     title_blink_ms: u32 = 1500,
     home: ?[]const u8 = null,
+    temporary: bool = false,
 };
 
 pub fn run(gpa: std.mem.Allocator, io: std.Io, opts: Options) !Result {
@@ -87,10 +88,15 @@ pub fn run(gpa: std.mem.Allocator, io: std.Io, opts: Options) !Result {
     // Lifecycle acquisition is strict: selection, numbering, and locking all
     // complete before a pty or child process exists.
     var store = switch (opts.journal) {
-        .new => |name| try Store.createNamedJournal(gpa, io, opts.home, name),
+        .new => |name| try Store.createNamedJournal(gpa, io, opts.home, name, opts.temporary),
         .existing => |selector| try Store.continueJournal(gpa, io, opts.home, selector),
     };
-    defer store.close();
+    defer {
+        const saved_temporary = store.saved_temporary;
+        const journal = store.journalId();
+        if (saved_temporary) warnStartup("tjctl: saved journal {s}\n", .{journal});
+        store.close();
+    }
 
     const title_enabled = !std.mem.eql(u8, opts.title, "none") and sys.isTty(stdout_fd);
     defer if (title_enabled) terminal_title.pop(stdout_fd);
@@ -316,6 +322,12 @@ fn exportEnvironment(store: *Store, title: [:0]const u8, title_blink_ms: u32, ha
     const handoff_fd_value = std.fmt.bufPrint(&handoff_fd_text, "{d}", .{handoff_fd}) catch unreachable;
     handoff_fd_text[handoff_fd_value.len] = 0;
     sys.setEnv("TJ_HANDOFF_FD", handoff_fd_text[0..handoff_fd_value.len :0]);
+    if (store.temporary) {
+        var temporary: [2:0]u8 = .{ '1', 0 };
+        sys.setEnv("TJ_TEMPORARY", temporary[0..1 :0]);
+    } else {
+        sys.unsetEnv("TJ_TEMPORARY");
+    }
     // Also when it came from --home: every `tj` invoked inside the writer has
     // to resolve references against the selected journal root.
     var root: [std.fs.max_path_bytes + 1]u8 = undefined;
@@ -466,6 +478,14 @@ const Recorder = struct {
                 // Close its interaction before terminating the source shell.
                 if (self.store.isRecording()) self.store.finish(0);
             },
+            .save => {
+                if (!self.store.saveTemporary()) {
+                    self.store.warn("ignored ELLO SAVE outside a temporary journal", .{});
+                    handoffReply(self, 1);
+                    return;
+                }
+                handoffReply(self, 0);
+            },
             .protocol_error => |payload| {
                 const shown = payload[0..@min(payload.len, max_protocol_error_log_bytes)];
                 if (shown.len == payload.len) {
@@ -545,7 +565,7 @@ fn applyHandoff(gpa: std.mem.Allocator, io: std.Io, home: ?[]const u8, recorder:
     // Acquire the target before giving up the source lock. If it cannot be
     // acquired, the source writer remains active.
     const target = switch (request.operation) {
-        .new => Store.createNamedJournal(gpa, io, home, if (request.selector_len == 0) null else request.selectorSlice()),
+        .new => Store.createNamedJournal(gpa, io, home, if (request.selector_len == 0) null else request.selectorSlice(), request.temporary),
         .use => Store.continueJournal(gpa, io, home, request.selectorSlice()),
     } catch {
         recorder.store.warn("journal handoff target could not be acquired", .{});
@@ -562,6 +582,7 @@ fn applyHandoff(gpa: std.mem.Allocator, io: std.Io, home: ?[]const u8, recorder:
         }, &stdout_file.interface) catch {};
         stdout_file.interface.flush() catch {};
     }
+    if (recorder.store.saved_temporary) warnStartup("tjctl: saved journal {s}\n", .{recorder.store.journalId()});
     recorder.store.close();
     recorder.store.* = target;
     if (recorder.blinker) |active| active.startJournal(recorder.store.journalId()) catch {};

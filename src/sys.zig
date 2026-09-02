@@ -18,13 +18,14 @@ pub const Fd = c.fd_t;
 //
 // Everything else in this file goes through std.posix or std.c. These six have
 // no declaration anywhere in std, as of 0.17-dev: the pty allocation sequence,
-// PATH-searching exec, and setenv.
+// PATH-searching exec, and environment updates.
 
 extern "c" fn posix_openpt(oflag: c_int) c_int;
 extern "c" fn grantpt(fd: c_int) c_int;
 extern "c" fn unlockpt(fd: c_int) c_int;
 extern "c" fn ptsname(fd: c_int) ?[*:0]const u8;
 extern "c" fn setenv(name: [*:0]const u8, value: [*:0]const u8, overwrite: c_int) c_int;
+extern "c" fn unsetenv(name: [*:0]const u8) c_int;
 
 pub extern "c" fn execvp(file: [*:0]const u8, argv: [*:null]const ?[*:0]const u8) c_int;
 
@@ -222,6 +223,10 @@ pub fn envPresent(name: [*:0]const u8) bool {
 
 pub fn setEnv(name: [*:0]const u8, value: [*:0]const u8) void {
     _ = setenv(name, value, 1);
+}
+
+pub fn unsetEnv(name: [*:0]const u8) void {
+    _ = unsetenv(name);
 }
 
 /// Absolute path of the running binary, so the shell plugin can invoke exactly

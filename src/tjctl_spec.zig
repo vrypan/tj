@@ -29,7 +29,7 @@ const title_blink = zecli.FlagSpec{
     .description = "Alternate the title recording marker every MS (0 disables)",
     .default_value = "1500",
 };
-const lifecycle_flags = [_]zecli.FlagSpec{ home_flag, keep_osc, no_splash, title, title_blink };
+const new_flags = [_]zecli.FlagSpec{ home_flag, keep_osc, no_splash, title, title_blink, .{ .name = "temp", .description = "Remove the journal unless it is saved before exit" } };
 const use_flags = [_]zecli.FlagSpec{ home_flag, keep_osc, no_splash, title, title_blink, .{ .name = "no-replay", .description = "Start without replaying the journal" } };
 const force_flags = [_]zecli.FlagSpec{.{ .name = "force", .description = "Skip confirmation or override pin protection" }};
 const ls_flags = [_]zecli.FlagSpec{
@@ -61,10 +61,11 @@ const commands = [_]zecli.CommandSpec{
         .name = "new",
         .description = "Create and write a new journal",
         .usage = "tjctl new [options] [NAME] [-- COMMAND...]",
-        .flags = &lifecycle_flags,
+        .flags = &new_flags,
         .arguments = &.{.{ .name = "NAME", .description = "Canonical journal name" }},
         .extra_help = "A child command must follow `--`; otherwise $SHELL is started.\n",
     },
+    .{ .name = "save", .description = "Keep the active temporary journal", .usage = "tjctl save" },
     .{
         .name = "use",
         .description = "Append to an existing journal with a fresh shell or command",

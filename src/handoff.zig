@@ -12,6 +12,7 @@ pub const Request = struct {
     keep_osc: bool = false,
     replay_before_start: bool = false,
     splash: bool = false,
+    temporary: bool = false,
     title_blink_ms: u32 = 1500,
     title: [max_field]u8 = undefined,
     title_len: usize = 0,
@@ -38,7 +39,8 @@ pub fn encode(request: *const Request, out: []u8) ![]const u8 {
     raw[1] = @intFromEnum(request.operation);
     raw[2] = (@as(u8, @intFromBool(request.keep_osc)) << 0) |
         (@as(u8, @intFromBool(request.replay_before_start)) << 1) |
-        (@as(u8, @intFromBool(request.splash)) << 2);
+        (@as(u8, @intFromBool(request.splash)) << 2) |
+        (@as(u8, @intFromBool(request.temporary)) << 3);
     std.mem.writeInt(u32, raw[3..7], request.title_blink_ms, .big);
     std.mem.writeInt(u16, raw[7..9], @intCast(request.title_len), .big);
     @memcpy(raw[9 .. 9 + request.title_len], request.titleSlice());
@@ -60,7 +62,7 @@ pub fn decode(encoded: []const u8) !Request {
     if (raw_len < 9 or raw_len > max_wire) return error.InvalidRequest;
     var raw: [max_wire]u8 = undefined;
     std.base64.standard.Decoder.decode(raw[0..raw_len], encoded) catch return error.InvalidRequest;
-    if (raw[0] != 1 or raw[2] & ~@as(u8, 0x07) != 0) return error.InvalidRequest;
+    if (raw[0] != 1 or raw[2] & ~@as(u8, 0x0f) != 0) return error.InvalidRequest;
     const operation: Operation = switch (raw[1]) {
         0 => .new,
         1 => .use,
@@ -78,6 +80,7 @@ pub fn decode(encoded: []const u8) !Request {
         .keep_osc = raw[2] & 1 != 0,
         .replay_before_start = raw[2] & 2 != 0,
         .splash = raw[2] & 4 != 0,
+        .temporary = raw[2] & 8 != 0,
         .title_blink_ms = std.mem.readInt(u32, raw[3..7], .big),
         .title_len = title_len,
         .selector_len = selector_len,
