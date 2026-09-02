@@ -385,6 +385,10 @@ pub const Journal = struct {
 /// plugin it needs through the PTY, so system zsh configuration cannot change
 /// the prompt or install competing hooks.
 pub fn spawnJournalZsh(gpa: std.mem.Allocator, journal: *const Journal) !harness.PtyChild {
+    // A preceding test may have selected a journal to exercise reference
+    // resolution. This fixture starts a fresh outer writer, never a handoff,
+    // so it must not inherit that process-global test state.
+    leaveJournal();
     const home = try journal.homeArg(gpa);
     defer gpa.free(home);
     return spawnTjctl(gpa, &.{ tjctl, "--home", home, "new", "--", "/bin/zsh", "-f", "-i" }, 24, 80);
@@ -395,6 +399,18 @@ pub fn spawnContinuedJournalZsh(
     journal: *const Journal,
     selector: []const u8,
 ) !harness.PtyChild {
+    // The parent test may use TJ_JOURNAL for direct `tj` invocations after
+    // this child returns. Do not leak that synthetic state into a fresh
+    // `tjctl use`, where it would correctly be interpreted as a nested writer.
+    const prior_journal = if (sys.env("TJ_JOURNAL")) |value| try gpa.dupe(u8, value) else null;
+    defer if (prior_journal) |value| gpa.free(value);
+    defer if (prior_journal) |value| {
+        var saved: [journal_name.max_len + 1]u8 = undefined;
+        @memcpy(saved[0..value.len], value);
+        saved[value.len] = 0;
+        sys.setEnv("TJ_JOURNAL", saved[0..value.len :0]);
+    } else sys.setEnv("TJ_JOURNAL", "");
+    sys.setEnv("TJ_JOURNAL", "");
     const home = try journal.homeArg(gpa);
     defer gpa.free(home);
     return spawnTjctl(gpa, &.{ tjctl, "--home", home, "use", selector, "--", "/bin/zsh", "-f", "-i" }, 24, 80);
