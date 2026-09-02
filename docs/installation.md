@@ -17,7 +17,7 @@ Download an archive for your platform from the
 
 ```sh
 mkdir -p ~/.local
-tar xzf tj-0.5.1-x86_64-linux-musl.tar.gz \
+tar xzf tj-0.5.2-x86_64-linux-musl.tar.gz \
   -C ~/.local --strip-components=1
 ```
 
