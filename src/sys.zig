@@ -123,6 +123,16 @@ pub fn selfPipe() Error![2]Fd {
     return .{ fds[0], fds[1] };
 }
 
+/// A bidirectional private control channel inherited by the shell. It is used
+/// only to acknowledge an OSC handoff after the proxy has switched stores.
+pub fn socketPair() Error![2]Fd {
+    var fds: [2]c_int = undefined;
+    // AF_UNIX and SOCK_STREAM are both 1 on TJ's supported macOS and Linux
+    // targets; Zig 0.16 does not expose these libc constants uniformly.
+    if (c.socketpair(1, 1, 0, &fds) != 0) return error.Syscall;
+    return .{ fds[0], fds[1] };
+}
+
 const O_NONBLOCK: c_int = @bitCast(@as(u32, @bitCast(posix.O{ .NONBLOCK = true })));
 const FD_CLOEXEC: c_int = 1;
 

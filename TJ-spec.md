@@ -306,6 +306,15 @@ using the caller's cwd and environment. It restores no cwd, environment,
 shell options, functions, history, jobs, file descriptors, processes, or
 other state from previous writers.
 
+`tj-new` and `tj-use` are zsh helpers supplied by `tj.plugin.zsh`. Outside a
+writer they delegate to `tjctl new/use`. Inside a direct TJ shell, they do not
+nest a second proxy: `tjctl` emits private `OSC 3110;HANDOFF` control traffic
+after standard locked target selection succeeds, and the active proxy moves
+recording to that target while zsh remains running. `tjctl new/use` themselves
+reject in-writer use and direct the user to the helpers. A failed target
+selection leaves the source writer running. Handoff is rejected from tmux and
+GNU Screen and does not accept `--home` or a child command after `--`.
+
 Interactive writers show the startup splash unless `--no-splash` is present
 or inherited `TJ_NO_SPLASH` parses as true (`true`, `yes`, or `1`; false forms
 are `false`, `no`, and `0`). Non-interactive writers do not

@@ -27,6 +27,13 @@ highest number already present. Existing unfinished entries are preserved.
 
 Only one TJ process may write to a journal at a time.
 
+Use `tj-new` or `tj-use` from an interactive zsh. Outside a journal they
+delegate to `tjctl new/use`. Inside one, they keep the current shell while the
+proxy moves recording to the selected journal. The shell's cwd, environment,
+jobs, functions, and editor state remain intact. `tjctl new/use` intentionally
+refuse an in-journal invocation and tell the user to use the shell helpers.
+Handoff is unavailable from tmux and GNU Screen in this version.
+
 ## Choose a child shell
 
 Normally, `new` and `use` start `$SHELL` with no arguments. To select a

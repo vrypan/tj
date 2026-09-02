@@ -18,6 +18,29 @@
 #      the command line.
 
 _tj_bin() { print -r -- "${TJ:-tj}" }
+_tjctl_bin() { print -r -- "${TJCTL:-tjctl}" }
+
+# These are the interactive journal lifecycle commands. Outside a writer they
+# are ordinary wrappers around tjctl. Inside one they retain this zsh process,
+# ask the proxy to change its recorder, then apply the confirmed journal state.
+_tj_handoff() {
+  emulate -L zsh
+  local operation=$1
+  shift
+  if [[ -z ${TJ_JOURNAL:-} ]]; then
+    command "$(_tjctl_bin)" "$operation" "$@"
+    return
+  fi
+  local setup
+  setup=$(TJ_SHELL_HANDOFF=1 command "$(_tjctl_bin)" "$operation" "$@") || return
+  builtin eval -- "$setup"
+  typeset -gi _tj_count=$(( TJ_NEXT - 1 ))
+  _tj_publish
+  _tj_update_title
+}
+
+tj-new() { _tj_handoff new "$@" }
+tj-use() { _tj_handoff use "$@" }
 
 # Change the calling zsh process to the directory in which an entry ran. This
 # must be a shell function: an external process cannot change its parent's cwd.

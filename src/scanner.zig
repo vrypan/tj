@@ -62,6 +62,8 @@ pub const Event = union(enum) {
     noout_begin,
     /// `OSC 3110;END` - the current resource or noout region is complete.
     region_end,
+    /// `OSC 3110;HANDOFF;BASE64` - replace the current journal writer.
+    handoff: []const u8,
     /// A malformed or unsupported ELLO sequence. Carries a bounded payload or
     /// diagnostic for the journal log; the sequence itself is dropped.
     protocol_error: []const u8,
@@ -406,6 +408,16 @@ pub const Scanner = struct {
             return;
         }
 
+        if (std.mem.startsWith(u8, rest, "HANDOFF;")) {
+            const encoded = rest["HANDOFF;".len..];
+            if (encoded.len == 0) {
+                sink.event(.{ .protocol_error = payload });
+            } else {
+                sink.event(.{ .handoff = encoded });
+            }
+            return;
+        }
+
         sink.event(.{ .protocol_error = payload });
     }
 
@@ -492,7 +504,7 @@ const Recorder = struct {
 
     fn deinit(self: *Recorder) void {
         for (self.events.items) |recorded_event| switch (recorded_event) {
-            .command_line, .command_expanded, .working_directory, .protocol_error => |text| self.gpa.free(text),
+            .command_line, .command_expanded, .working_directory, .handoff, .protocol_error => |text| self.gpa.free(text),
             .resource_begin => |r| {
                 self.gpa.free(r.path);
                 self.gpa.free(r.mime);
@@ -519,6 +531,7 @@ const Recorder = struct {
             .command_line => |text| .{ .command_line = self.gpa.dupe(u8, text) catch unreachable },
             .command_expanded => |text| .{ .command_expanded = self.gpa.dupe(u8, text) catch unreachable },
             .working_directory => |text| .{ .working_directory = self.gpa.dupe(u8, text) catch unreachable },
+            .handoff => |text| .{ .handoff = self.gpa.dupe(u8, text) catch unreachable },
             .resource_begin => |r| .{ .resource_begin = .{
                 .path = self.gpa.dupe(u8, r.path) catch unreachable,
                 .mime = self.gpa.dupe(u8, r.mime) catch unreachable,
@@ -945,4 +958,26 @@ test "NOOUT with fields is a protocol error" {
     defer r.deinit();
     try std.testing.expectEqual(@as(usize, 1), r.events.items.len);
     try std.testing.expect(r.events.items[0] == .protocol_error);
+}
+
+test "handoff markers are stripped across reads" {
+    const gpa = std.testing.allocator;
+    const input = "before\x1b]3110;HANDOFF;AQID\x1b\\after";
+    var r = run(gpa, input, 1, false);
+    defer r.deinit();
+    try std.testing.expectEqualStrings("beforeafter", r.forwarded.items);
+    try std.testing.expectEqualStrings("beforeafter", r.recorded.items);
+    try std.testing.expectEqual(@as(usize, 1), r.events.items.len);
+    try std.testing.expect(r.events.items[0] == .handoff);
+    try std.testing.expectEqualStrings("AQID", r.events.items[0].handoff);
+}
+
+test "keep osc forwards handoff markers only as control" {
+    const gpa = std.testing.allocator;
+    const input = "a\x1b]3110;HANDOFF;AQID\x1b\\b";
+    var r = run(gpa, input, 1, true);
+    defer r.deinit();
+    try std.testing.expectEqualStrings(input, r.forwarded.items);
+    try std.testing.expectEqualStrings("ab", r.recorded.items);
+    try std.testing.expect(r.events.items[0] == .handoff);
 }

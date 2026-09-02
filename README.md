@@ -87,6 +87,10 @@ By default, `use` quickly replays the recorded terminal output before opening
 a new shell. Use `--no-replay` to skip it. Continuing a journal does not restore
 old processes, environment variables, or shell state.
 
+Use `tj-new` and `tj-use` from an interactive zsh. Outside TJ they behave like
+`tjctl new/use`; inside TJ they keep the current shell and move recording to
+the selected journal.
+
 Useful journal commands:
 
 ```sh

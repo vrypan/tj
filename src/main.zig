@@ -221,5 +221,6 @@ test {
     _ = @import("cmd_replay.zig");
     _ = @import("sqlite.zig");
     _ = @import("mutation_lock.zig");
+    _ = @import("handoff.zig");
     _ = commands;
 }

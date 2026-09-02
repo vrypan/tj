@@ -86,6 +86,7 @@ pub fn main(init: std.process.Init) !u8 {
         init.io,
         which,
         invocation.getValue([]const u8, "home"),
+        invocation.root.present("home"),
         child,
         &command.parsed,
         stdout,
@@ -108,7 +109,7 @@ fn rootErrorMessage(err: anyerror) []const u8 {
 
 fn isUsageError(err: anyerror) bool {
     return switch (err) {
-        error.MissingArgument, error.BadReplayOption, error.BadTitleBlink, error.BadListNumber, error.BadArguments => true,
+        error.MissingArgument, error.BadReplayOption, error.BadTitleBlink, error.BadListNumber, error.BadArguments, error.InsideJournalHandoffOptions => true,
         else => false,
     };
 }
@@ -128,6 +129,12 @@ fn commandErrorMessage(err: anyerror) []const u8 {
         error.Cancelled => "tjctl: journal removal cancelled\n",
         error.StartupCancelled => "tjctl: journal start cancelled\n",
         error.InsideJournal => "tjctl: cannot replay inside a live journal writer\n",
+        error.UseShellHandoff => "tjctl: use tj-new or tj-use inside an active journal\n",
+        error.InsideJournalHandoffOptions => "tjctl: --home and a child command are unavailable during journal handoff\n",
+        error.InsideMultiplexer => "tjctl: journal handoff is unavailable inside tmux or GNU Screen\n",
+        error.CurrentJournal => "tjctl: journal handoff target is already active\n",
+        error.NoControllingTerminal => "tjctl: no controlling terminal\n",
+        error.RequestTooLarge => "tjctl: handoff request is too large\n",
         error.MissingArgument => "tjctl: this subcommand needs an argument\n",
         error.BadReplayOption => "tjctl: invalid replay numeric option\n",
         error.BadTitleBlink => "tjctl: --title-blink needs milliseconds from 0 through 2147483647\n",

@@ -1,6 +1,8 @@
 # Shell integration
 
-`tjctl new/use` launches a PTY proxy. The zsh plugin tells it when a command starts and ends and
+`tjctl new/use` launches a PTY proxy. In an active direct TJ shell, use the
+plugin's `tj-new/tj-use` helpers instead: they move the active proxy to another
+journal without launching a nested proxy. The zsh plugin tells it when a command starts and ends and
 provides the command, expanded command, prompt, and working directory. Without
 the plugin, terminal bytes still pass through but shell entries are not
 recorded.

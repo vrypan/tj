@@ -21,6 +21,7 @@ const Store = journal_store.Store;
 const replay = @import("replay.zig");
 const splash = @import("splash.zig");
 const terminal_title = @import("terminal_title.zig");
+const handoff = @import("handoff.zig");
 
 const io_buf_size = 64 * 1024;
 const max_protocol_error_log_bytes = 384;
@@ -59,7 +60,9 @@ pub fn restoreOnPanic() void {
     if (panic_restore) |saved| tty.restore(saved);
 }
 
-pub const Result = struct { exit_code: u8 };
+pub const Result = struct {
+    exit_code: u8,
+};
 
 pub const JournalSelection = union(enum) {
     new: ?[]const u8,
@@ -80,12 +83,6 @@ pub const Options = struct {
 pub fn run(gpa: std.mem.Allocator, io: std.Io, opts: Options) !Result {
     const argv = try buildArgv(gpa, opts.argv);
     defer freeArgv(gpa, argv);
-
-    // Panes and multiplexers make nesting legitimate. A new writer shadows
-    // the outer journal environment; continuing it fails on the lock.
-    if (sys.env("TJ_JOURNAL")) |outer| {
-        warnStartup("tj: starting another journal writer inside {s}\r\n", .{outer});
-    }
 
     // Lifecycle acquisition is strict: selection, numbering, and locking all
     // complete before a pty or child process exists.
@@ -151,6 +148,7 @@ pub fn run(gpa: std.mem.Allocator, io: std.Io, opts: Options) !Result {
     );
 
     const sig_fds = try sys.selfPipe();
+    const handoff_fds = try sys.socketPair();
     sig_pipe_w.store(sig_fds[1], .monotonic);
 
     installSignalHandlers();
@@ -169,7 +167,7 @@ pub fn run(gpa: std.mem.Allocator, io: std.Io, opts: Options) !Result {
             blinker_storage.startJournal(store.journalId()) catch {};
         }
     }
-    exportEnvironment(&store, title_env, opts.title_blink_ms);
+    exportEnvironment(&store, title_env, opts.title_blink_ms, handoff_fds[1]);
 
     const pid = c.fork();
     if (pid < 0) {
@@ -180,6 +178,7 @@ pub fn run(gpa: std.mem.Allocator, io: std.Io, opts: Options) !Result {
     if (pid == 0) childExec(pty, argv);
 
     sys.close(pty.slave);
+    sys.close(handoff_fds[1]);
 
     var raw: ?tty.Saved = null;
     if (have_term) {
@@ -191,9 +190,9 @@ pub fn run(gpa: std.mem.Allocator, io: std.Io, opts: Options) !Result {
         if (raw) |saved| tty.restore(saved);
     }
 
-    var recorder: Recorder = .{ .store = &store, .blinker = blinker };
+    var recorder: Recorder = .{ .store = &store, .blinker = blinker, .handoff_reply_fd = handoff_fds[0] };
     var output: scanner.Scanner = .{ .keep_osc = opts.keep_osc };
-    pump(io, pty.master, sig_fds[0], pid, &recorder, &output) catch {};
+    pump(gpa, io, opts.home, pty.master, sig_fds[0], pid, &recorder, &output) catch {};
     // Nothing may stay withheld inside the scanner once the stream is over.
     output.flush(&recorder);
     if (blinker) |active| active.flush() catch {};
@@ -202,6 +201,7 @@ pub fn run(gpa: std.mem.Allocator, io: std.Io, opts: Options) !Result {
     sys.close(sig_fds[0]);
     sig_pipe_w.store(-1, .monotonic);
     sys.close(sig_fds[1]);
+    sys.close(handoff_fds[0]);
 
     const child_result = sys.waitFor(pid);
     if (!store.hasRecordedEntry()) warnNothingRecorded();
@@ -296,7 +296,7 @@ fn installSignalHandlers() void {
 }
 
 /// Exported before the fork so the shell and its plugin inherit them.
-fn exportEnvironment(store: *Store, title: [:0]const u8, title_blink_ms: u32) void {
+fn exportEnvironment(store: *Store, title: [:0]const u8, title_blink_ms: u32, handoff_fd: sys.Fd) void {
     var journal: [journal_name.max_len + 1]u8 = undefined;
     @memcpy(journal[0..store.journal.len], store.journal);
     journal[store.journal.len] = 0;
@@ -312,6 +312,10 @@ fn exportEnvironment(store: *Store, title: [:0]const u8, title_blink_ms: u32) vo
     const blink_text = std.fmt.bufPrint(&blink, "{d}", .{title_blink_ms}) catch unreachable;
     blink[blink_text.len] = 0;
     sys.setEnv("TJ_TITLE_BLINK", blink[0..blink_text.len :0]);
+    var handoff_fd_text: [16]u8 = undefined;
+    const handoff_fd_value = std.fmt.bufPrint(&handoff_fd_text, "{d}", .{handoff_fd}) catch unreachable;
+    handoff_fd_text[handoff_fd_value.len] = 0;
+    sys.setEnv("TJ_HANDOFF_FD", handoff_fd_text[0..handoff_fd_value.len :0]);
     // Also when it came from --home: every `tj` invoked inside the writer has
     // to resolve references against the selected journal root.
     var root: [std.fs.max_path_bytes + 1]u8 = undefined;
@@ -381,6 +385,8 @@ const Recorder = struct {
     has_cwd: bool = false,
     /// Set when the terminal can no longer be written to; the pump then stops.
     broken: bool = false,
+    handoff: ?handoff.Request = null,
+    handoff_reply_fd: ?sys.Fd = null,
 
     /// Bytes for the terminal that also belong in `out`.
     pub fn data(self: *Recorder, bytes: []const u8) void {
@@ -451,6 +457,15 @@ const Recorder = struct {
             .resource_begin => |r| self.store.beginResource(r.path, r.mime),
             .noout_begin => self.store.beginNoout(),
             .region_end => self.store.endRegion(),
+            .handoff => |encoded| {
+                self.handoff = handoff.decode(encoded) catch {
+                    self.store.warn("ignored invalid ELLO handoff request", .{});
+                    return;
+                };
+                // The marker comes from the active `tjctl new/use` command.
+                // Close its interaction before terminating the source shell.
+                if (self.store.isRecording()) self.store.finish(0);
+            },
             .protocol_error => |payload| {
                 const shown = payload[0..@min(payload.len, max_protocol_error_log_bytes)];
                 if (shown.len == payload.len) {
@@ -463,7 +478,7 @@ const Recorder = struct {
     }
 };
 
-fn pump(io: std.Io, master: sys.Fd, sig_r: sys.Fd, pid: c.pid_t, recorder: *Recorder, output: *scanner.Scanner) !void {
+fn pump(gpa: std.mem.Allocator, io: std.Io, home: ?[]const u8, master: sys.Fd, sig_r: sys.Fd, pid: c.pid_t, recorder: *Recorder, output: *scanner.Scanner) !void {
     var in_buf: [io_buf_size]u8 = undefined;
     var out_buf: [io_buf_size]u8 = undefined;
 
@@ -497,6 +512,7 @@ fn pump(io: std.Io, master: sys.Fd, sig_r: sys.Fd, pid: c.pid_t, recorder: *Reco
             if (n == 0) return;
             output.feed(out_buf[0..n], recorder);
             if (recorder.broken) return;
+            applyHandoff(gpa, io, home, recorder);
         } else {
             recorder.store.tick();
         }
@@ -522,6 +538,39 @@ fn pump(io: std.Io, master: sys.Fd, sig_r: sys.Fd, pid: c.pid_t, recorder: *Reco
         if (in.fd >= 0 and in.revents & (posix.POLL.ERR | posix.POLL.NVAL) != 0) in.fd = -1;
         if (out.revents & (posix.POLL.ERR | posix.POLL.NVAL) != 0) return;
     }
+}
+
+fn applyHandoff(gpa: std.mem.Allocator, io: std.Io, home: ?[]const u8, recorder: *Recorder) void {
+    const request = recorder.handoff orelse return;
+    // Acquire the target before giving up the source lock. If it cannot be
+    // acquired, the source writer remains active.
+    const target = switch (request.operation) {
+        .new => Store.createNamedJournal(gpa, io, home, if (request.selector_len == 0) null else request.selectorSlice()),
+        .use => Store.continueJournal(gpa, io, home, request.selectorSlice()),
+    } catch {
+        recorder.store.warn("journal handoff target could not be acquired", .{});
+        recorder.handoff = null;
+        handoffReply(recorder, 1);
+        return;
+    };
+    if (request.replay_before_start) {
+        var stdout_buffer: [io_buf_size]u8 = undefined;
+        var stdout_file: std.Io.File.Writer = .init(.stdout(), io, &stdout_buffer);
+        replay.play(gpa, io, target.root, target.journalId(), .{
+            .typing_ms = 0,
+            .max_pause_ms = 0,
+        }, &stdout_file.interface) catch {};
+        stdout_file.interface.flush() catch {};
+    }
+    recorder.store.close();
+    recorder.store.* = target;
+    if (recorder.blinker) |active| active.startJournal(recorder.store.journalId()) catch {};
+    recorder.handoff = null;
+    handoffReply(recorder, 0);
+}
+
+fn handoffReply(recorder: *Recorder, status: u8) void {
+    if (recorder.handoff_reply_fd) |fd| sys.writeAll(fd, &[_]u8{status}) catch {};
 }
 
 fn drainSignals(sig_r: sys.Fd, master: sys.Fd, pid: c.pid_t) !void {
