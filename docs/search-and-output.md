@@ -89,4 +89,4 @@ later entries record normally.
 Resource and noout regions do not nest. Invalid nesting is logged and ignored.
 No noout byte counts or flags are added to `meta.json`.
 
-See the [OSC SLOT protocol](osc-5107.md) for framing and direct emission.
+See the [OSC ELLO protocol](osc-3110.md) for framing and direct emission.

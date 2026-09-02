@@ -140,7 +140,7 @@ tags, pins, removal, completion, and the TUI.
 - [Search and output](docs/search-and-output.md)
 - [Agents and published resources](docs/agents-and-resources.md)
 - [Journal storage](docs/storage.md)
-- [OSC SLOT protocol](docs/osc-5107.md)
+- [OSC ELLO protocol](docs/osc-3110.md)
 - [Development](docs/development.md)
 - [TJ specification](TJ-spec.md)
 - [Open work](TODO.md)

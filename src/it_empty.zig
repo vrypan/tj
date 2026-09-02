@@ -183,7 +183,7 @@ test "new accepts canonical names generates readable defaults and requires child
     var scratch = try support.Scratch.open();
     defer scratch.close();
 
-    const warning_command = "printf '\\033]5107;BOGUS\\033\\\\'";
+    const warning_command = "printf '\\033]3110;BOGUS\\033\\\\'";
     var named = try support.runTjctl(gpa, &.{
         "--home", scratch.path(), "new", "release-build", "--", "/bin/sh", "-c", warning_command,
     }, 24, 80);
@@ -336,13 +336,13 @@ test "a new journal that could not record but said why is kept" {
     var scratch = try support.Scratch.open();
     defer scratch.close();
 
-    // A malformed SLOT sequence: no entry is opened, but the journal log
+    // A malformed ELLO sequence: no entry is opened, but the journal log
     // records that something was ignored, and that is worth keeping.
     var r = try support.runTjctl(gpa, &.{
         "--home",                             scratch.path(),
         "new",                                "--",
         "/bin/sh",                            "-c",
-        "printf '\\033]5107;BOGUS\\033\\\\'",
+        "printf '\\033]3110;BOGUS\\033\\\\'",
     }, 24, 80);
     defer r.out.deinit(gpa);
 
@@ -398,7 +398,7 @@ test "an explicit empty command line is not a missing command marker" {
         "--",
         "/bin/sh",
         "-c",
-        "printf '\\033]5107;CONTEXT;MTswOzQ7MDswOy90bXA=\\033\\\\\\033]133;C\\033\\\\output\\n\\033]133;D;0\\033\\\\'",
+        "printf '\\033]3110;CONTEXT;MTswOzQ7MDswOy90bXA=\\033\\\\\\033]133;C\\033\\\\output\\n\\033]133;D;0\\033\\\\'",
     }, 24, 80);
     defer result.out.deinit(gpa);
     try std.testing.expectEqual(@as(u8, 0), result.code);

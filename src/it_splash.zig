@@ -51,7 +51,7 @@ test "journal writers show a restorable splash unless disabled" {
     support.sys.setEnv("TJ_NO_SPLASH", "false");
 
     const seed_script =
-        "printf '\\033]5107;CONTEXT;MTsxMTs0OzA7MDtzZWVkLXJlcGxheS90bXA=\\033\\\\" ++
+        "printf '\\033]3110;CONTEXT;MTsxMTs0OzA7MDtzZWVkLXJlcGxheS90bXA=\\033\\\\" ++
         "\\033]133;C\\033\\\\REPLAY_ORDER_PAYLOAD\\n\\033]133;D;0\\033\\\\'";
     const seed = try support.spawnTjctlWithSplash(gpa, &.{
         support.tjctl, "--home", scratch.path(), "new", "replay-order", "--no-splash", "--", "/bin/sh", "-c", seed_script,
@@ -88,7 +88,7 @@ test "journal writers manage terminal titles without changing recorded bytes" {
     // plugin. The title itself uses ST so both bytes are exercised across the
     // PTY read boundary chosen by the kernel.
     const script =
-        "printf '\\033]5107;CONTEXT;MTsxMDs0OzA7MDt0aXRsZS10ZXN0L3RtcA==\\033\\\\" ++
+        "printf '\\033]3110;CONTEXT;MTsxMDs0OzA7MDt0aXRsZS10ZXN0L3RtcA==\\033\\\\" ++
         "\\033]133;C\\033\\\\'; " ++
         "printf 'TITLE_OPTIONS=%s ' \"$TJ_TITLE\"; " ++
         "printf '\\033]2;~/Devel/\\033\\\\" ++

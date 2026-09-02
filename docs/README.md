@@ -14,7 +14,7 @@
   resource publication, and write controls
 - [Journal storage](storage.md) — on-disk data, locking, and
   journal lifetime
-- [OSC SLOT protocol](osc-5107.md) — command context, published resources,
+- [OSC ELLO protocol](osc-3110.md) — command context, published resources,
   and noout regions
 - [Development](development.md) — builds, tests, dependencies, and releases
 

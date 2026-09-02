@@ -100,7 +100,7 @@ pub const Store = struct {
         /// screen keeps them out of the terminal's scrollback.
         fullscreen: altscreen.Filter = .{},
 
-        /// OSC SLOT permits one non-nesting resource or noout region.
+        /// OSC ELLO permits one non-nesting resource or noout region.
         open_region: ?OpenRegion = null,
         published: [max_resources]Published = undefined,
         published_count: usize = 0,

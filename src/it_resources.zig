@@ -20,9 +20,9 @@ test "a noout OSC region stays visible but is replaced in out" {
         gpa,
         "noout-producer.sh",
         "printf 'ordinary-before\\n'\n" ++
-            "printf '\\033]5107;NOOUT\\033\\\\'\n" ++
+            "printf '\\033]3110;NOOUT\\033\\\\'\n" ++
             "printf 'VISIBLE-BUT-OMITTED\\n'\n" ++
-            "printf '\\033]5107;END\\033\\\\'\n" ++
+            "printf '\\033]3110;END\\033\\\\'\n" ++
             "printf 'ordinary-after\\n'\n",
     );
     defer gpa.free(producer);
@@ -42,7 +42,7 @@ test "a noout OSC region stays visible but is replaced in out" {
 
     const visible = transcript.items[from..];
     try std.testing.expect(std.mem.indexOf(u8, visible, "VISIBLE-BUT-OMITTED") != null);
-    try std.testing.expect(std.mem.indexOf(u8, visible, "5107;") == null);
+    try std.testing.expect(std.mem.indexOf(u8, visible, "3110;") == null);
 
     const out = try journal.read(gpa, "1/out");
     defer gpa.free(out);
@@ -50,7 +50,7 @@ test "a noout OSC region stays visible but is replaced in out" {
     try std.testing.expect(std.mem.indexOf(u8, out, "<tj:noout>") != null);
     try std.testing.expect(std.mem.indexOf(u8, out, "ordinary-after") != null);
     try std.testing.expect(std.mem.indexOf(u8, out, "VISIBLE-BUT-OMITTED") == null);
-    try std.testing.expect(std.mem.indexOf(u8, out, "5107;") == null);
+    try std.testing.expect(std.mem.indexOf(u8, out, "3110;") == null);
 
     const meta = try journal.read(gpa, "1/meta.json");
     defer gpa.free(meta);
@@ -67,7 +67,7 @@ test "an unfinished noout OSC region cannot suppress the next entry" {
     const producer = try journal.fixture(
         gpa,
         "unfinished-noout.sh",
-        "printf '\\033]5107;NOOUT\\033\\\\'\n" ++
+        "printf '\\033]3110;NOOUT\\033\\\\'\n" ++
             "printf 'OMITTED-UNTIL-BOUNDARY\\n'\n",
     );
     defer gpa.free(producer);
@@ -134,7 +134,7 @@ test "tj noout preserves output argv and child statuses while omitting bytes" {
     try std.testing.expect(std.mem.indexOf(u8, visible, "WRAPPER-STDOUT:two words|*|--flag|--help") != null);
     try std.testing.expect(std.mem.indexOf(u8, visible, "WRAPPER-STDERR") != null);
     try std.testing.expect(std.mem.indexOf(u8, visible, "WRAPPER-CONTEXT:/|preserved|tty") != null);
-    try std.testing.expect(std.mem.indexOf(u8, visible, "5107;") == null);
+    try std.testing.expect(std.mem.indexOf(u8, visible, "3110;") == null);
 
     const first_out = try journal.read(gpa, "1/out");
     defer gpa.free(first_out);
@@ -161,21 +161,21 @@ test "tj noout syntax and journal preconditions fail without emitting OSC" {
     defer gpa.free(missing_separator.stdout);
     defer gpa.free(missing_separator.stderr);
     try std.testing.expectEqual(@as(u8, 2), missing_separator.term.exited);
-    try std.testing.expect(std.mem.indexOf(u8, missing_separator.stdout, "5107;") == null);
+    try std.testing.expect(std.mem.indexOf(u8, missing_separator.stdout, "3110;") == null);
     try std.testing.expect(std.mem.indexOf(u8, missing_separator.stderr, "requires `--`") != null);
 
     const misplaced_command = try support.runNonTty(gpa, &.{ "noout", "/bin/true" });
     defer gpa.free(misplaced_command.stdout);
     defer gpa.free(misplaced_command.stderr);
     try std.testing.expectEqual(@as(u8, 2), misplaced_command.term.exited);
-    try std.testing.expect(std.mem.indexOf(u8, misplaced_command.stdout, "5107;") == null);
+    try std.testing.expect(std.mem.indexOf(u8, misplaced_command.stdout, "3110;") == null);
     try std.testing.expect(std.mem.indexOf(u8, misplaced_command.stderr, "too many arguments") != null);
 
     const outside = try support.runNonTty(gpa, &.{ "noout", "--", "/bin/true" });
     defer gpa.free(outside.stdout);
     defer gpa.free(outside.stderr);
     try std.testing.expectEqual(@as(u8, 1), outside.term.exited);
-    try std.testing.expect(std.mem.indexOf(u8, outside.stdout, "5107;") == null);
+    try std.testing.expect(std.mem.indexOf(u8, outside.stdout, "3110;") == null);
     try std.testing.expect(std.mem.indexOf(u8, outside.stderr, "inside a tj journal writer") != null);
 }
 
@@ -449,7 +449,7 @@ test "terminal native grep omits its results while redirected output stays plain
         defer gpa.free(recorded);
         try std.testing.expect(std.mem.indexOf(u8, recorded, "<tj:noout>") != null);
         try std.testing.expect(std.mem.indexOf(u8, recorded, "NOOUT_GREP_PAYLOAD_012") == null);
-        try std.testing.expect(std.mem.indexOf(u8, recorded, "5107;") == null);
+        try std.testing.expect(std.mem.indexOf(u8, recorded, "3110;") == null);
     }
     const redirected = try journal.tmp.dir.readFileAlloc(std.testing.io, "redirected-grep", gpa, .limited(4096));
     defer gpa.free(redirected);
@@ -460,7 +460,7 @@ test "terminal native grep omits its results while redirected output stays plain
     const redirected_out = try journal.read(gpa, "4/out");
     defer gpa.free(redirected_out);
     try std.testing.expect(std.mem.indexOf(u8, redirected_out, "<tj:noout>") == null);
-    try std.testing.expect(std.mem.indexOf(u8, redirected_out, "5107;") == null);
+    try std.testing.expect(std.mem.indexOf(u8, redirected_out, "3110;") == null);
     const self_out = try journal.read(gpa, "5/out");
     defer gpa.free(self_out);
     try std.testing.expect(std.mem.indexOf(u8, self_out, "SELF-STATUS=1") != null);
@@ -475,9 +475,9 @@ test "a program can publish parts of its output as named resources" {
     defer journal.close();
 
     const script = try support.publisher(gpa, "before\\n" ++
-        "\\033]5107;RESOURCE;files/data.csv;text/csv\\033\\\\" ++
+        "\\033]3110;RESOURCE;files/data.csv;text/csv\\033\\\\" ++
         "date,amount\\n2026-08-01,12.50\\n" ++
-        "\\033]5107;END\\033\\\\" ++
+        "\\033]3110;END\\033\\\\" ++
         "after\\n");
     defer gpa.free(script);
     try support.recordJournal(gpa, &journal, &.{script});
@@ -493,7 +493,7 @@ test "a program can publish parts of its output as named resources" {
     try std.testing.expect(std.mem.indexOf(u8, out, "before") != null);
     try std.testing.expect(std.mem.indexOf(u8, out, "after") != null);
     // The markers themselves are protocol, not output.
-    try std.testing.expect(std.mem.indexOf(u8, out, "5107") == null);
+    try std.testing.expect(std.mem.indexOf(u8, out, "3110") == null);
 
     const meta = try journal.read(gpa, "1/meta.json");
     defer gpa.free(meta);
@@ -509,10 +509,10 @@ test "a resource name cannot escape the entry or overwrite tj's own files" {
     var journal = try support.Journal.open(gpa);
     defer journal.close();
 
-    const script = try support.publisher(gpa, "\\033]5107;RESOURCE;../../escape\\033\\\\PWNED\\033]5107;END\\033\\\\" ++
-        "\\033]5107;RESOURCE;out\\033\\\\CLOBBER\\033]5107;END\\033\\\\" ++
-        "\\033]5107;RESOURCE;/etc/passwd\\033\\\\ROOT\\033]5107;END\\033\\\\" ++
-        "\\033]5107;RESOURCE;ok/kept.txt\\033\\\\legit\\033]5107;END\\033\\\\");
+    const script = try support.publisher(gpa, "\\033]3110;RESOURCE;../../escape\\033\\\\PWNED\\033]3110;END\\033\\\\" ++
+        "\\033]3110;RESOURCE;out\\033\\\\CLOBBER\\033]3110;END\\033\\\\" ++
+        "\\033]3110;RESOURCE;/etc/passwd\\033\\\\ROOT\\033]3110;END\\033\\\\" ++
+        "\\033]3110;RESOURCE;ok/kept.txt\\033\\\\legit\\033]3110;END\\033\\\\");
     defer gpa.free(script);
     try support.recordJournal(gpa, &journal, &.{script});
 
@@ -547,7 +547,7 @@ test "a resource the program never closed is flagged truncated" {
     var journal = try support.Journal.open(gpa);
     defer journal.close();
 
-    const script = try support.publisher(gpa, "\\033]5107;RESOURCE;partial\\033\\\\half a file");
+    const script = try support.publisher(gpa, "\\033]3110;RESOURCE;partial\\033\\\\half a file");
     defer gpa.free(script);
     try support.recordJournal(gpa, &journal, &.{script});
 
@@ -567,7 +567,7 @@ test "published resources are addressable and completable" {
     var journal = try support.Journal.open(gpa);
     defer journal.close();
 
-    const script = try support.publisher(gpa, "\\033]5107;RESOURCE;files/note.txt;text/plain\\033\\\\hello resource\\033]5107;END\\033\\\\");
+    const script = try support.publisher(gpa, "\\033]3110;RESOURCE;files/note.txt;text/plain\\033\\\\hello resource\\033]3110;END\\033\\\\");
     defer gpa.free(script);
     try support.recordJournal(gpa, &journal, &.{script});
     try journal.enter(gpa);
@@ -605,10 +605,10 @@ test "zsh completion keeps special resource names as one inert argument" {
     defer out.deinit(gpa);
     try support.setupJournalZsh(gpa, child, &out);
 
-    const publish = try support.publisher(gpa, "\\033]5107;RESOURCE;files/note *$ file.txt;text/plain\\033\\\\" ++
-        "special-resource-content\\033]5107;END\\033\\\\" ++
-        "\\033]5107;RESOURCE;top *$ note.txt;text/plain\\033\\\\" ++
-        "top-resource-content\\033]5107;END\\033\\\\");
+    const publish = try support.publisher(gpa, "\\033]3110;RESOURCE;files/note *$ file.txt;text/plain\\033\\\\" ++
+        "special-resource-content\\033]3110;END\\033\\\\" ++
+        "\\033]3110;RESOURCE;top *$ note.txt;text/plain\\033\\\\" ++
+        "top-resource-content\\033]3110;END\\033\\\\");
     defer gpa.free(publish);
     var from = out.items.len;
     try child.write(publish);
@@ -859,9 +859,9 @@ test "a published resource survives arbitrary bytes" {
     const path = try journal.fixture(gpa, "blob.bin", blob.items);
     defer gpa.free(path);
 
-    const script = try std.fmt.allocPrint(gpa, "printf '\\033]5107;RESOURCE;files/blob.bin;application/octet-stream\\033\\\\'; " ++
+    const script = try std.fmt.allocPrint(gpa, "printf '\\033]3110;RESOURCE;files/blob.bin;application/octet-stream\\033\\\\'; " ++
         "cat {s}; " ++
-        "printf '\\033]5107;END\\033\\\\'", .{path});
+        "printf '\\033]3110;END\\033\\\\'", .{path});
     defer gpa.free(script);
     try support.recordJournal(gpa, &journal, &.{script});
 

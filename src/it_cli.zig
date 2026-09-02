@@ -129,14 +129,14 @@ test "tui requires the current journal and an interactive terminal" {
     defer gpa.free(outside.stderr);
     try std.testing.expectEqual(@as(u8, 1), outside.term.exited);
     try std.testing.expect(std.mem.indexOf(u8, outside.stderr, "inside a tj journal writer") != null);
-    try std.testing.expect(std.mem.indexOf(u8, outside.stdout, "5107;") == null);
+    try std.testing.expect(std.mem.indexOf(u8, outside.stdout, "3110;") == null);
 
     const redirected = try support.runNonTtyInJournal(gpa, &.{"tui"}, "test-journal", "2");
     defer gpa.free(redirected.stdout);
     defer gpa.free(redirected.stderr);
     try std.testing.expectEqual(@as(u8, 1), redirected.term.exited);
     try std.testing.expect(std.mem.indexOf(u8, redirected.stderr, "interactive terminal") != null);
-    try std.testing.expect(std.mem.indexOf(u8, redirected.stdout, "5107;") == null);
+    try std.testing.expect(std.mem.indexOf(u8, redirected.stdout, "3110;") == null);
 }
 
 test "a closed stdout pipe exits quietly" {

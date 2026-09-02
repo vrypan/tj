@@ -64,5 +64,5 @@ was empty. A journal containing a diagnostic log is also preserved.
 The journal warning log is bounded. Recording failures are logged when
 possible while the PTY continues forwarding terminal traffic.
 
-See the [OSC SLOT protocol](osc-5107.md) for TJ's in-band messages and
+See the [OSC ELLO protocol](osc-3110.md) for TJ's in-band messages and
 [TJ-spec.md](../TJ-spec.md) for the complete storage contract.

@@ -284,7 +284,7 @@ The proxy:
 A PTY carries a single byte stream: the program's stdout and stderr are
 already merged by the time TJ sees them. TJ therefore does not attempt
 to separate them. There is no `err` core resource; a program that wants
-to expose its errors as a distinct resource can do so with OSC SLOT
+to expose its errors as a distinct resource can do so with OSC ELLO
 (see below).
 
 ## Journals and numbering
@@ -502,8 +502,8 @@ the next command that actually starts. It does not read or re-evaluate prompt
 variables, so prompt substitutions and external engines such as Starship are
 captured exactly as displayed.
 
-At `preexec`, the plugin emits one `OSC SLOT;CONTEXT;PAYLOAD ST` marker, where
-`SLOT` is the mnemonic for numeric OSC code 5107. `PAYLOAD` is the base64
+At `preexec`, the plugin emits one `OSC ELLO;CONTEXT;PAYLOAD ST` marker, where
+`ELLO` is the mnemonic for numeric OSC code 3110. `PAYLOAD` is the base64
 encoding of an ASCII header followed by its three concatenated fields:
 
 ``` text
@@ -774,7 +774,7 @@ name/tag metadata are green, dates are blue, and failures are red.
 For terminal output, TJ obtains the width with `TIOCGWINSZ`, reserves the fixed
 columns, and word-wraps the command and suffix in the remaining cells.
 Oversized words are hard-wrapped. When stdout is a terminal and a current
-journal exists, history lazily encloses the listing in one OSC SLOT `NOOUT`
+journal exists, history lazily encloses the listing in one OSC ELLO `NOOUT`
 region. No markers are emitted when filters select no entries. Redirected or
 piped history is one physical line per entry, with no styling or OSC markers.
 Before layout, recorded command text is sanitized as untrusted terminal input:
@@ -898,7 +898,7 @@ Zooi owns raw mode, resize input, retained rendering, synchronized output, and
 the alternate screen. Normal and error returns restore the terminal through
 Zooi teardown; the process panic path and fatal `SIGTERM`/`SIGHUP` paths call
 Zooi's allocation-free restoration hook. The complete terminal session,
-including alternate-screen teardown, is inside one OSC SLOT `NOOUT` region.
+including alternate-screen teardown, is inside one OSC ELLO `NOOUT` region.
 Consequently the browser remains visible but its entry records one
 `<tj:noout>` placeholder rather than screen frames. After teardown TJ closes
 the region before returning control to the shell.
@@ -1086,7 +1086,7 @@ spans are copied by positional reads, so memory use is proportional to the
 pattern and fixed buffers rather than to the resource, line, or match count.
 
 When stdout is a terminal and a current journal exists, search lazily encloses
-all result lines in one OSC SLOT `NOOUT` region. No markers are emitted for help,
+all result lines in one OSC ELLO `NOOUT` region. No markers are emitted for help,
 errors, or no matches. Redirected or piped stdout is plain marker-free data.
 The result is status 0 when any line matched, 1 for no matches, and 2 for grep
 argument errors or current-journal mode without a current journal. Storage and
@@ -1103,10 +1103,10 @@ writes human-readable output, and can explicitly keep visible output out of
 the recorded resource.
 
 A cooperating program marks the beginning and end of a resource using
-**OSC SLOT**, where `SLOT` is the mnemonic for numeric OSC code 5107 (`5107`
-reads as `SLOT` in leetspeak). `SLOT` is written as `5107` on the wire; message
+**OSC ELLO**, where `ELLO` is the mnemonic for numeric OSC code 3110 (`3110`
+reads as `ELLO` in leetspeak). `ELLO` is written as `3110` on the wire; message
 names are uppercase and case-sensitive, and there is no additional namespace
-field. SLOT messages end with `ST`. The resource contents remain ordinary
+field. ELLO messages end with `ST`. The resource contents remain ordinary
 program output; TJ interprets the control sequences as annotations over that
 output.
 
@@ -1125,17 +1125,17 @@ The four message forms have distinct producers and roles:
 The protocol is:
 
 ``` text
-OSC SLOT ; RESOURCE ; <path> [ ; <mime> ] ST
+OSC ELLO ; RESOURCE ; <path> [ ; <mime> ] ST
 <ordinary output bytes>
-OSC SLOT ; END ST
+OSC ELLO ; END ST
 ```
 
 The same non-nesting protocol has a noout region:
 
 ``` text
-OSC SLOT ; NOOUT ST
+OSC ELLO ; NOOUT ST
 <ordinary output bytes>
-OSC SLOT ; END ST
+OSC ELLO ; END ST
 ```
 
 TJ removes both markers before forwarding output. On `NOOUT`, it writes the
@@ -1148,16 +1148,16 @@ For example, an agent might produce a reply containing a CSV data set
 and a shell script:
 
 ``` text
-OSC SLOT ; RESOURCE ; files/data.csv ; text/csv ST
+OSC ELLO ; RESOURCE ; files/data.csv ; text/csv ST
 date,amount
 2026-08-01,12.50
 2026-08-02,19.20
-OSC SLOT ; END ST
+OSC ELLO ; END ST
 
-OSC SLOT ; RESOURCE ; files/script.sh ; text/x-shellscript ST
+OSC ELLO ; RESOURCE ; files/script.sh ; text/x-shellscript ST
 #!/bin/sh
 awk -F, '{ sum += $2 } END { print sum }'
-OSC SLOT ; END ST
+OSC ELLO ; END ST
 ```
 
 The user still sees normal terminal output. TJ additionally exposes:
@@ -1174,9 +1174,9 @@ The same mechanism lets a program publish its own error output as a
 resource, for example:
 
 ``` text
-OSC SLOT ; RESOURCE ; err ; text/plain ST
+OSC ELLO ; RESOURCE ; err ; text/plain ST
 parse error at line 12
-OSC SLOT ; END ST
+OSC ELLO ; END ST
 ```
 
 exposing `@42/err`. Whether such a resource exists is up to the program.
@@ -1200,12 +1200,12 @@ The v1 protocol has deliberately simple rules:
     cannot affect the next entry
 -   noout payload sizes or flags are not stored in `meta.json`
 
-By default, TJ strips OSC SLOT sequences from the stream before
+By default, TJ strips OSC ELLO sequences from the stream before
 forwarding it to the terminal emulator. An option keeps them in the
 forwarded stream, for debugging or for emulators and multiplexers that
 want to interpret them.
 
-Programs that do not emit OSC SLOT still work normally and expose the core
+Programs that do not emit OSC ELLO still work normally and expose the core
 resources produced by their shell integration.
 
 `tj noout -- command args...` is the user-facing wrapper for a whole command.

@@ -231,8 +231,8 @@ test "tj's own control sequences never reach the terminal" {
     try std.testing.expectEqual(@as(u8, 0), try child.finish(gpa, &out, support.timeout_ms));
 
     try std.testing.expect(std.mem.indexOf(u8, out.items, "marker") != null);
-    // The command line travels inside a SLOT sequence; none of it may be shown.
-    try std.testing.expect(std.mem.indexOf(u8, out.items, "5107") == null);
+    // The command line travels inside an ELLO sequence; none of it may be shown.
+    try std.testing.expect(std.mem.indexOf(u8, out.items, "3110") == null);
     // OSC 133 is another matter: it is forwarded, because the outer terminal
     // may implement shell integration itself.
     try std.testing.expect(std.mem.indexOf(u8, out.items, "133;") != null);

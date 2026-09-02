@@ -338,13 +338,13 @@ test "terminal history omits its listing while piped history remains recordable"
     defer gpa.free(direct_out);
     try std.testing.expect(std.mem.indexOf(u8, direct_out, "<tj:noout>") != null);
     try std.testing.expect(std.mem.indexOf(u8, direct_out, "HIST_NOOUT_PAYLOAD_012") == null);
-    try std.testing.expect(std.mem.indexOf(u8, direct_out, "5107;") == null);
+    try std.testing.expect(std.mem.indexOf(u8, direct_out, "3110;") == null);
 
     const piped_out = try journal.read(gpa, "3/out");
     defer gpa.free(piped_out);
     try std.testing.expect(std.mem.indexOf(u8, piped_out, "HIST_NOOUT_PAYLOAD_012") != null);
     try std.testing.expect(std.mem.indexOf(u8, piped_out, "<tj:noout>") == null);
-    try std.testing.expect(std.mem.indexOf(u8, piped_out, "5107;") == null);
+    try std.testing.expect(std.mem.indexOf(u8, piped_out, "3110;") == null);
 }
 
 test "history shows positional annotation flags size UTC date and wrapped commands" {
@@ -1073,7 +1073,7 @@ test "concurrent namespace operations leave one complete winner" {
         "--",
         "/bin/sh",
         "-c",
-        "printf '\\033]5107;BOGUS\\033\\\\'",
+        "printf '\\033]3110;BOGUS\\033\\\\'",
     }, 24, 80);
     const renaming = try support.spawnTjctl(gpa, &.{ support.tjctl, "--home", scratch.path(), "mv", "new-source", "shared-destination" }, 24, 80);
     var create_out: std.ArrayList(u8) = .empty;

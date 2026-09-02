@@ -99,7 +99,7 @@ _tj_preexec() {
     expanded=$_tj_expanded
     expanded_flag=1
   fi
-  _tj_emit "5107;CONTEXT;$(_tj_encode_context "$typed" "$PWD" "$expanded_flag" "$expanded")"
+  _tj_emit "3110;CONTEXT;$(_tj_encode_context "$typed" "$PWD" "$expanded_flag" "$expanded")"
   _tj_emit "133;C"
 
   (( _tj_count++ ))

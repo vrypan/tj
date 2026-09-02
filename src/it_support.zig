@@ -539,7 +539,7 @@ pub const Scratch = struct {
     }
 };
 
-/// Emits the OSC SLOT sequences a cooperating program would, from a plain sh
+/// Emits the OSC ELLO sequences a cooperating program would, from a plain sh
 /// script, so the test does not depend on any program that happens to.
 pub fn publisher(gpa: std.mem.Allocator, body: []const u8) ![]u8 {
     return std.fmt.allocPrint(gpa, "printf '{s}'", .{body});

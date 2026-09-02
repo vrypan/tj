@@ -133,7 +133,7 @@ test "tui shows details, confirms deletion, and shares annotation semantics" {
 
     try child.write("exit 0\r");
     try std.testing.expectEqual(@as(u8, 0), try child.finish(gpa, &transcript, support.timeout_ms));
-    try std.testing.expect(std.mem.indexOf(u8, transcript.items, "5107;") == null);
+    try std.testing.expect(std.mem.indexOf(u8, transcript.items, "3110;") == null);
 
     const home = try journal.homeArg(gpa);
     defer gpa.free(home);
@@ -201,5 +201,5 @@ test "grep tui deduplicates matching entries" {
     defer gpa.free(grep_out);
     try std.testing.expect(std.mem.startsWith(u8, grep_out, store.noout_placeholder));
     try std.testing.expect(std.mem.indexOf(u8, grep_out, "DEDUP_TUI_HIT") == null);
-    try std.testing.expect(std.mem.indexOf(u8, grep_out, "5107;") == null);
+    try std.testing.expect(std.mem.indexOf(u8, grep_out, "3110;") == null);
 }

@@ -1,4 +1,4 @@
-//! Runs one command inside an OSC SLOT NOOUT region.
+//! Runs one command inside an OSC ELLO NOOUT region.
 //!
 //! Markers go to the controlling terminal, independently of the child's
 //! standard streams. The child otherwise inherits the caller's process and
@@ -9,8 +9,8 @@ const posix = std.posix;
 const c = std.c;
 const sys = @import("sys.zig");
 
-pub const begin_marker = "\x1b]5107;NOOUT\x1b\\";
-pub const end_marker = "\x1b]5107;END\x1b\\";
+pub const begin_marker = "\x1b]3110;NOOUT\x1b\\";
+pub const end_marker = "\x1b]3110;END\x1b\\";
 
 pub const Result = struct { exit_code: u8 };
 
@@ -73,6 +73,6 @@ fn childExec(tty_fd: sys.Fd, argv: [:null]const ?[*:0]const u8) noreturn {
 }
 
 test "protocol markers are exact" {
-    try std.testing.expectEqualStrings("\x1b]5107;NOOUT\x1b\\", begin_marker);
-    try std.testing.expectEqualStrings("\x1b]5107;END\x1b\\", end_marker);
+    try std.testing.expectEqualStrings("\x1b]3110;NOOUT\x1b\\", begin_marker);
+    try std.testing.expectEqualStrings("\x1b]3110;END\x1b\\", end_marker);
 }

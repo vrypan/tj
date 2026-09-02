@@ -50,5 +50,5 @@ A cooperating terminal program may mark spans of ordinary output as named
 resources. The output remains visible and is also available below the entry,
 for example `@ENTRY/files/data.csv`.
 
-See the [OSC SLOT protocol](osc-5107.md) for message framing, path validation,
+See the [OSC ELLO protocol](osc-3110.md) for message framing, path validation,
 noout regions, and binary-data limits.

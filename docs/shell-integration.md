@@ -52,7 +52,7 @@ sequenceDiagram
     Proxy->>Shell: Input through the inner PTY
 
     Shell->>Plugin: Run preexec hook
-    Plugin-->>Proxy: OSC SLOT#59;CONTEXT#59;… ST
+    Plugin-->>Proxy: OSC ELLO#59;CONTEXT#59;… ST
     Note right of Proxy: Consume command, cwd, and expanded command
     Plugin-->>Proxy: OSC 133#59;C ST
     Proxy->>Journal: Start entry
@@ -63,19 +63,19 @@ sequenceDiagram
     Proxy->>Journal: Append ordinary output to out
 
     opt Published resource
-        Command-->>Proxy: OSC SLOT#59;RESOURCE#59;… ST
+        Command-->>Proxy: OSC ELLO#59;RESOURCE#59;… ST
         Command->>Proxy: Resource bytes
         Proxy->>Terminal: Display resource bytes
         Proxy->>Journal: Append to out and named resource
-        Command-->>Proxy: OSC SLOT#59;END ST
+        Command-->>Proxy: OSC ELLO#59;END ST
     end
 
     opt Output omitted from the journal
-        Command-->>Proxy: OSC SLOT#59;NOOUT ST
+        Command-->>Proxy: OSC ELLO#59;NOOUT ST
         Command->>Proxy: Visible bytes
         Proxy->>Terminal: Display visible bytes
         Proxy->>Journal: Write the noout placeholder once
-        Command-->>Proxy: OSC SLOT#59;END ST
+        Command-->>Proxy: OSC ELLO#59;END ST
     end
 
     Command->>Shell: Exit status
@@ -97,7 +97,7 @@ Solid arrows in the lifecycle are ordinary input, output, execution, or
 journal writes. Dashed arrows are OSC metadata added by the plugin or a
 cooperating command.
 
-OSC SLOT messages are private instructions for TJ. The proxy consumes them, so
+OSC ELLO messages are private instructions for TJ. The proxy consumes them, so
 they do not appear on screen or in `out`. OSC 133 command-boundary messages are
 observed by TJ and also forwarded to the terminal. Ordinary output remains
 ordinary terminal data. The proxy also observes OSC 0 and OSC 2 title changes
