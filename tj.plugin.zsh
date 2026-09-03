@@ -19,6 +19,27 @@
 _tj_bin() { print -r -- "${TJ:-tj}" }
 _tjctl_bin() { print -r -- "${TJCTL:-tjctl}" }
 
+# The generated command completers are installed beside this plugin under
+# `share/zsh/site-functions`. Make them discoverable whether the plugin is
+# sourced before or after the user's `compinit` call. A source checkout has no
+# such sibling directory, so it remains convenient for development too.
+typeset -g _TJ_PLUGIN_PATH=${${(%):-%N}:A}
+_tj_register_command_completions() {
+  emulate -L zsh
+  local completion_dir=${_TJ_PLUGIN_PATH:h:h}/zsh/site-functions
+  [[ -r $completion_dir/_tjctl ]] || return 0
+  (( ${fpath[(Ie)$completion_dir]} )) || fpath=($completion_dir $fpath)
+
+  # `compinit` has already defined compdef in configurations that load this
+  # plugin late. Register now in that case; otherwise compinit finds the
+  # directory above when it runs later.
+  (( ${+functions[compdef]} )) || return 0
+  autoload -Uz _tj _tjctl
+  compdef _tj tj
+  compdef _tjctl tjctl
+}
+_tj_register_command_completions
+
 # These are the interactive journal lifecycle commands. Outside a writer they
 # are ordinary wrappers around tjctl. Inside one they retain this zsh process,
 # ask the proxy to change its recorder, then apply the confirmed journal state.

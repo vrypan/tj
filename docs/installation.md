@@ -73,7 +73,8 @@ source "$(brew --prefix)/share/tj/tj.plugin.zsh"
 ```
 
 For a custom prefix, use its `share/tj/tj.plugin.zsh` path. Start a new shell
-after changing the file.
+after changing the file. The plugin makes TJ's installed zsh command
+completions available automatically.
 
 ## Configure Fish
 
