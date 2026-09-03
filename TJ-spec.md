@@ -502,11 +502,11 @@ name is unresolved.
 ## Shell integration
 
 A zsh plugin provides semantic command boundaries and resolution/completion of
-the journal namespace. A Fish plugin provides command boundaries,
-journal-aware completion, `tjcd`, and the same handoff helpers. Fish uses
-`fish_preexec` and `fish_postexec`; it records command, cwd, output, and exit
-status but does not capture the rendered prompt or zsh expanded-command
-metadata.
+the journal namespace. A Fish 4.0.0-or-later plugin provides journal-aware
+completion, `tjcd`, and the same handoff helpers. Fish supplies its own OSC 133
+command/prompt markers and OSC 7 working-directory reports; TJ uses those to
+record command, cwd, output, exit status, and prompt boundaries. Earlier Fish
+versions are unsupported. Fish does not capture zsh expanded-command metadata.
 
 ## Zsh integration
 
@@ -1051,9 +1051,8 @@ output.
 
 The four message forms have distinct producers and roles:
 
--   `CONTEXT` is a self-contained message normally emitted by a shell plugin
-    once per command from zsh `preexec` or Fish `fish_preexec`; it does not
-    open a region.
+-   `CONTEXT` is a self-contained message normally emitted once per command by
+    the zsh `preexec` plugin; it does not open a region.
 -   `RESOURCE` is normally emitted by a cooperating program or an output
     wrapper such as `tj-fence`; it opens a published-resource region.
 -   `NOOUT` is emitted by `tj noout`, by TJ's terminal reports (`hist`, `grep`,

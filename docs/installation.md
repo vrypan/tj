@@ -77,6 +77,8 @@ after changing the file.
 
 ## Configure Fish
 
+Fish 4.0.0 or later is required for recording.
+
 Load the plugin from `~/.config/fish/config.fish`:
 
 ```fish

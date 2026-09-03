@@ -55,7 +55,7 @@ Homebrew installs the plugin under its own prefix:
 source "$(brew --prefix)/share/tj/tj.plugin.zsh"
 ```
 
-For Fish, add this to `~/.config/fish/config.fish`:
+For Fish 4.0.0 or later, add this to `~/.config/fish/config.fish`:
 
 ```fish
 source ~/.local/share/tj/tj.plugin.fish

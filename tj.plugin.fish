@@ -84,19 +84,10 @@ if not set -q TJ_JOURNAL
     return
 end
 
-function _tj_emit
-    printf '\e]%s\e\\' "$argv[1]" >/dev/tty 2>/dev/null
-end
-
-function _tj_encode_context
-    set -l command $argv[1]
-    set -l cwd $argv[2]
-    # Fish measures strings in characters. The OSC context frame specifies
-    # byte lengths, so use wc rather than corrupting UTF-8 command lines.
-    set -l command_bytes (printf '%s' "$command" | wc -c | string trim)
-    set -l cwd_bytes (printf '%s' "$cwd" | wc -c | string trim)
-    set -l header "1;$command_bytes;$cwd_bytes;0;0;"
-    printf '%s' "$header$command$cwd" | base64 | string join ''
+set -l _tj_fish_version (string split . -- $version)
+if test (count $_tj_fish_version) -eq 0; or test $_tj_fish_version[1] -lt 4
+    printf '%s\n' 'tj: Fish 4.0.0 or later is required; earlier Fish releases do not emit the OSC 133 markers TJ needs' >&2
+    return
 end
 
 function _tj_publish_next
@@ -105,22 +96,12 @@ function _tj_publish_next
 end
 
 function _tj_preexec --on-event fish_preexec
-    # Fish passes the accepted interactive command as the first event
-    # argument. A plugin sourced manually at a prompt may subscribe during
-    # that prompt's preexec event, which has no argument; ignore it.
-    set -l command $argv[1]
-    if test -z "$command"
-        return
+    # Fish 4 emits OSC 133 command boundaries and OSC 7 working-directory
+    # reports itself. TJ consumes those native markers; this hook only keeps
+    # prompt variables aligned with the entry Fish has just started.
+    if test -n "$argv[1]"
+        _tj_publish_next
     end
-    set -l encoded (_tj_encode_context "$command" "$PWD")
-    _tj_emit "3110;CONTEXT;$encoded"
-    _tj_emit '133;C'
-    _tj_publish_next
-end
-
-function _tj_postexec --on-event fish_postexec
-    set -l exit_code $status
-    _tj_emit "133;D;$exit_code"
 end
 
 function _tj_complete_reference
@@ -129,7 +110,7 @@ function _tj_complete_reference
         return
     end
     set -l tj_bin (_tj_bin)
-    command $tj_bin complete -- "$token"
+    command $tj_bin complete "$token"
 end
 
 # The generated completion files handle TJ's command grammar. Add the

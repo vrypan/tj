@@ -1,12 +1,14 @@
 //! Streaming scanner over the shell-to-terminal byte stream.
 //!
-//! It recognises exactly two OSC families and treats everything else as
+//! It recognises three OSC families and treats everything else as
 //! opaque bytes:
 //!
 //!   * `OSC 3110 ; ...`       the ELLO protocol - consumed, not shown to the
 //!     terminal (unless `keep_osc`), and turned into events.
 //!   * `OSC 133 ; ...`        shell integration boundaries - turned into
 //!     events *and* forwarded, since the outer terminal may implement them too.
+//!   * `OSC 7 ; file://...`   shell working-directory reports - turned into
+//!     events *and* forwarded.
 //!
 //! Two rules drive the design. Any sequence may be split across reads, so all
 //! partial-match state lives in the struct rather than on the stack. And no
@@ -37,6 +39,7 @@ const ello_prefix = "3110;";
 /// What a resource is assumed to hold when the program does not say.
 pub const default_mime = "application/octet-stream";
 const osc133_prefix = "133;";
+const osc7_file_prefix = "7;file://";
 
 pub const Event = union(enum) {
     /// `OSC 133;A` - the shell is about to draw a prompt.
@@ -481,6 +484,13 @@ pub const Scanner = struct {
     fn finishPassthrough(self: *Scanner, sink: anytype) void {
         if (self.overflowed) return;
         const payload = self.buf[0..self.len];
+        if (std.mem.startsWith(u8, payload, osc7_file_prefix)) {
+            const authority_and_path = osc7_file_prefix.len;
+            const path_at = std.mem.indexOfScalar(u8, payload[authority_and_path..], '/') orelse return;
+            const path = percentDecodeInPlace(self.buf[authority_and_path + path_at .. self.len]) orelse return;
+            sink.event(.{ .working_directory = path });
+            return;
+        }
         if (!std.mem.startsWith(u8, payload, osc133_prefix)) return;
 
         var fields = std.mem.splitScalar(u8, payload[osc133_prefix.len..], ';');
@@ -490,7 +500,17 @@ pub const Scanner = struct {
         switch (kind[0]) {
             'A' => sink.event(.prompt_start),
             'B' => sink.event(.prompt_end),
-            'C' => sink.event(.command_run),
+            'C' => {
+                while (fields.next()) |field| {
+                    const prefix = "cmdline_url=";
+                    if (!std.mem.startsWith(u8, field, prefix)) continue;
+                    const offset = @intFromPtr(field.ptr) - @intFromPtr(self.buf[0..].ptr);
+                    const command = percentDecodeInPlace(self.buf[offset + prefix.len .. offset + field.len]) orelse break;
+                    sink.event(.{ .command_line = command });
+                    break;
+                }
+                sink.event(.command_run);
+            },
             'D' => {
                 const code = fields.next();
                 sink.event(.{ .command_end = if (code) |text| std.fmt.parseInt(u8, text, 10) catch null else null });
@@ -499,6 +519,36 @@ pub const Scanner = struct {
         }
     }
 };
+
+/// OSC 7 and Fish's `cmdline_url` encode arbitrary UTF-8 bytes as URL percent
+/// escapes. Decode in place: every `%XX` sequence only shrinks the payload.
+fn percentDecodeInPlace(bytes: []u8) ?[]const u8 {
+    var read: usize = 0;
+    var write: usize = 0;
+    while (read < bytes.len) {
+        if (bytes[read] == '%') {
+            if (read + 2 >= bytes.len) return null;
+            const hi = hexDigit(bytes[read + 1]) orelse return null;
+            const lo = hexDigit(bytes[read + 2]) orelse return null;
+            bytes[write] = (hi << 4) | lo;
+            read += 3;
+        } else {
+            bytes[write] = bytes[read];
+            read += 1;
+        }
+        write += 1;
+    }
+    return bytes[0..write];
+}
+
+fn hexDigit(byte: u8) ?u8 {
+    return switch (byte) {
+        '0'...'9' => byte - '0',
+        'a'...'f' => byte - 'a' + 10,
+        'A'...'F' => byte - 'A' + 10,
+        else => null,
+    };
+}
 
 // --- tests -----------------------------------------------------------------
 
@@ -675,6 +725,23 @@ test "OSC 133 boundaries are forwarded and reported" {
     try std.testing.expect(r.events.items[1] == .prompt_end);
     try std.testing.expect(r.events.items[2] == .command_run);
     try std.testing.expectEqual(@as(?u8, 7), r.events.items[3].command_end);
+}
+
+test "Fish native OSC markers provide command and cwd" {
+    const gpa = std.testing.allocator;
+    const input =
+        "\x1b]7;file://host/tmp/fish%20dir\x1b\\" ++
+        "\x1b]133;C;cmdline_url=printf%20%27fish-%CF%80%5Cn%27\x1b\\" ++
+        "fish-\xcf\x80\r\n\x1b]133;D;0\x1b\\";
+    var r = run(gpa, input, 3, false);
+    defer r.deinit();
+
+    try std.testing.expectEqualStrings(input, r.forwarded.items);
+    try std.testing.expectEqual(@as(usize, 4), r.events.items.len);
+    try std.testing.expectEqualStrings("/tmp/fish dir", r.events.items[0].working_directory);
+    try std.testing.expectEqualStrings("printf 'fish-π\\n'", r.events.items[1].command_line);
+    try std.testing.expect(r.events.items[2] == .command_run);
+    try std.testing.expectEqual(@as(?u8, 0), r.events.items[3].command_end);
 }
 
 test "OSC 133;D without a status reports no status" {

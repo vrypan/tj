@@ -506,12 +506,38 @@ pub fn fishExecutable() ?[]const u8 {
     return null;
 }
 
+pub fn fishSupportsNativeMarkers() bool {
+    const fish = fishExecutable() orelse return false;
+    const result = std.process.run(std.testing.allocator, std.testing.io, .{
+        .argv = &.{ fish, "--version" },
+        .stdout_limit = .limited(256),
+        .stderr_limit = .limited(256),
+    }) catch return false;
+    defer std.testing.allocator.free(result.stdout);
+    defer std.testing.allocator.free(result.stderr);
+    if (result.term != .exited or result.term.exited != 0) return false;
+
+    const prefix = "fish, version ";
+    if (!std.mem.startsWith(u8, result.stdout, prefix)) return false;
+    const version = std.mem.trim(u8, result.stdout[prefix.len..], " \r\n");
+    const dot = std.mem.indexOfScalar(u8, version, '.') orelse return false;
+    const major = std.fmt.parseInt(u32, version[0..dot], 10) catch return false;
+    return major >= 4;
+}
+
 pub fn spawnJournalFish(gpa: std.mem.Allocator, journal: *const Journal) !harness.PtyChild {
     const fish = fishExecutable() orelse return error.FishNotFound;
     leaveJournal();
     const home = try journal.homeArg(gpa);
     defer gpa.free(home);
-    return spawnTjctl(gpa, &.{ tjctl, "--home", home, "new", "--", "/usr/bin/env", "TERM=dumb", fish, "--no-config", "--interactive" }, 24, 80);
+
+    var init: std.ArrayList(u8) = .empty;
+    defer init.deinit(gpa);
+    try init.appendSlice(gpa, "source ");
+    try appendFishQuoted(gpa, &init, options.fish_plugin);
+    try init.appendSlice(gpa, "; function tj; command $TJ $argv; end; function fish_prompt; printf 'TJ_TEST_'PROMPT'> '; end");
+
+    return spawnTjctl(gpa, &.{ tjctl, "--home", home, "new", "--", "/usr/bin/env", "TERM=xterm-256color", "fish_features=no-query-term", fish, "--no-config", "--interactive", "--init-command", init.items }, 24, 80);
 }
 
 pub fn appendFishQuoted(gpa: std.mem.Allocator, out: *std.ArrayList(u8), text: []const u8) !void {
@@ -523,12 +549,6 @@ pub fn appendFishQuoted(gpa: std.mem.Allocator, out: *std.ArrayList(u8), text: [
 }
 
 pub fn setupJournalFish(gpa: std.mem.Allocator, child: harness.PtyChild, out: *std.ArrayList(u8)) !void {
-    var command: std.ArrayList(u8) = .empty;
-    defer command.deinit(gpa);
-    try command.appendSlice(gpa, "source ");
-    try appendFishQuoted(gpa, &command, options.fish_plugin);
-    try command.appendSlice(gpa, "; function fish_prompt; printf 'TJ_TEST_'PROMPT'> '; end\n");
-    try child.write(command.items);
     if (!try child.readUntil(gpa, out, test_prompt, timeout_ms)) {
         std.debug.print("Fish setup did not reach a prompt; transcript follows:\n{s}\n", .{out.items});
         return error.ShellNotReady;

@@ -2,10 +2,11 @@
 
 `tjctl new/use` launches a PTY proxy. In an active direct TJ shell, use the
 plugin's `tj-new/tj-use` helpers instead: they move the active proxy to another
-journal without launching a nested proxy. The zsh and Fish plugins tell it when
-a command starts and ends and provide the command and working directory.
-Zsh additionally records the rendered prompt and expanded command. Without a
-plugin, terminal bytes still pass through but shell entries are not recorded.
+journal without launching a nested proxy. The zsh plugin tells it when a command
+starts and ends and provides the command and working directory. Fish 4 provides
+those markers itself. Zsh additionally records the rendered prompt and expanded
+command. Without a plugin, terminal bytes still pass through but shell entries
+are not recorded.
 
 ## How recording works
 
@@ -126,6 +127,10 @@ The plugin preserves existing completion handlers.
 
 ### Fish
 
+Fish **4.0.0 or later** is required. TJ uses Fish's native OSC 133 command
+markers and OSC 7 working-directory reports. Earlier Fish versions do not
+provide those markers; the plugin prints a warning and does not record entries.
+
 Add one line to `~/.config/fish/config.fish`:
 
 ```fish
@@ -138,9 +143,9 @@ For Homebrew:
 source "(brew --prefix)/share/tj/tj.plugin.fish"
 ```
 
-Fish records the command, cwd, output, and exit status through its
-`fish_preexec` and `fish_postexec` events. It does not currently record the
-rendered prompt or zsh's expanded-command metadata.
+Fish records the command, cwd, output, exit status, and prompt boundaries from
+Fish's native terminal integration. It does not record zsh's expanded-command
+metadata.
 
 ## TUI key binding
 
