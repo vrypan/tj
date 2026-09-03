@@ -120,7 +120,10 @@ complete -c tjcd -f -a '(_tj_complete_reference)'
 
 function _tj_tui
     set -l tj_bin (_tj_bin)
-    set -l selection (command $tj_bin tui </dev/tty)
+    # Keep stdin on the terminal inherited by Fish. Reopening /dev/tty here
+    # produces a descriptor that poll() rejects on macOS. Stdout remains
+    # captured for the selected detail text; the TUI paints through stderr.
+    set -l selection (command $tj_bin tui <&2)
     set -l tui_status $status
     if test $tui_status -eq 0; and test -n "$selection"
         commandline --insert (string join \n $selection)
