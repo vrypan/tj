@@ -129,6 +129,7 @@ fn drawDetail(model: anytype, screen: *zooi.Screen) !void {
         const item_index = model.detail_viewport.offset + row;
         const item = detail.items[item_index];
         const text = detail.document[item.section_start..item.section_end];
+        const output_separator = std.mem.eql(u8, text, "=== out ===");
         const focused = item_index == model.detail_viewport.cursor;
         const selected = model.detail_selected.isSet(item_index);
         const style: zooi.Style = if (focused and selected)
@@ -137,14 +138,34 @@ fn drawDetail(model: anytype, screen: *zooi.Screen) !void {
             cursor_style
         else if (selected)
             selected_style
-        else if (std.mem.eql(u8, text, "out"))
+        else if (output_separator)
             .{ .bold = true, .fg = .{ .ansi = 3 } }
         else
             .{};
         screen.move(@intCast(row + 1), 0);
         if (focused) screen.fillToEndOfLine(style);
         screen.move(@intCast(row + 1), 0);
-        screen.writeStyled(text, style);
+        if (output_separator) {
+            const label = " out ";
+            const columns: usize = model.size.cols;
+            const padding = if (columns > label.len) columns - label.len else 0;
+            const left = padding / 2;
+            const right = padding - left;
+            for (0..left) |_| screen.writeStyled("=", style);
+            screen.writeStyled(label, style);
+            for (0..right) |_| screen.writeStyled("=", style);
+        } else {
+            // Detail loaders identify values separately from their labels.
+            // Outside a selection, yellow text makes those non-printable
+            // labels and placeholders visible without changing the compact
+            // layout. A focus or selection deliberately takes precedence.
+            const prefix_len = item.payload_start - item.section_start;
+            const payload_len = item.payload_end - item.payload_start;
+            const structural_style: zooi.Style = if (focused or selected) style else .{ .fg = .{ .ansi = 3 } };
+            screen.writeStyled(text[0..prefix_len], structural_style);
+            screen.writeStyled(text[prefix_len .. prefix_len + payload_len], style);
+            screen.writeStyled(text[prefix_len + payload_len ..], structural_style);
+        }
     }
 
     screen.move(model.size.rows - 1, 0);
@@ -306,7 +327,7 @@ test "detail render fills the focused logical line" {
     defer detail_selected.deinit(gpa);
     var items = [_]TestDetailItem{
         .{ .section_start = 0, .section_end = 3 },
-        .{ .section_start = 4, .section_end = 7 },
+        .{ .section_start = 4, .section_end = 15 },
     };
     var model: TestModel = .{
         .numbers = &.{1},
@@ -314,7 +335,7 @@ test "detail render fills the focused logical line" {
         .size = .{ .rows = 4, .cols = 32 },
         .mode = .detail,
         .selected = selected,
-        .detail = .{ .number = 1, .document = "cmd\nout", .items = &items },
+        .detail = .{ .number = 1, .document = "cmd\n=== out ===", .items = &items },
         .detail_viewport = .{ .cursor = 1 },
         .detail_selected = detail_selected,
     };

@@ -153,7 +153,19 @@ pub fn load(
         for (resources) |resource| try document.print(gpa, " {s}", .{resource});
     }
 
-    try document.appendSlice(gpa, "\n\nout\n");
+    try document.appendSlice(gpa, "\n\n");
+    const output_separator_start = document.items.len;
+    // The renderer expands this logical marker to a terminal-width separator.
+    // Keeping a short document value means detail selection remains stable
+    // across terminal resizes.
+    try document.appendSlice(gpa, "=== out ===");
+    try special_items.append(gpa, .{
+        .section_start = output_separator_start,
+        .section_end = document.items.len,
+        .payload_start = document.items.len,
+        .payload_end = document.items.len,
+    });
+    try document.append(gpa, '\n');
     if (!output.present or output.text.len == 0) {
         item_start = document.items.len;
         try document.appendSlice(gpa, if (output.present) "(empty)" else "(removed)");
@@ -198,10 +210,12 @@ pub fn load(
             try items.append(gpa, special_items.items[special_index]);
             special_index += 1;
         } else {
+            const text = document.items[line_start..line_end];
+            const label_len = if (line_start < output_separator_start) fieldLabelLength(text) else null;
             try items.append(gpa, .{
                 .section_start = line_start,
                 .section_end = line_end,
-                .payload_start = line_start,
+                .payload_start = line_start + (label_len orelse 0),
                 .payload_end = line_end,
             });
         }
@@ -217,6 +231,27 @@ pub fn load(
         .document = owned_document,
         .items = owned_items,
     };
+}
+
+/// Field labels are structural: they explain a value but are not included when
+/// a user selects a detail row for insertion into the shell.
+fn fieldLabelLength(line: []const u8) ?usize {
+    const labels = [_][]const u8{
+        "entry     ",
+        "rc        ",
+        "pinned    ",
+        "name      ",
+        "tags      ",
+        "started   ",
+        "ended     ",
+        "duration  ",
+        "out size  ",
+        "resources ",
+    };
+    inline for (labels) |label| {
+        if (std.mem.startsWith(u8, line, label)) return label.len;
+    }
+    return null;
 }
 
 const PlainOutput = struct {
