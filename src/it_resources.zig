@@ -691,6 +691,13 @@ test "zsh completion keeps special resource names as one inert argument" {
     try child.write("command \"$TJ\" name @1 build-failure\n");
     try std.testing.expect(try child.readUntilFrom(gpa, &out, from, support.test_prompt, support.timeout_ms));
 
+    // Tab remains resource completion until Enter accepts the completed word.
+    from = out.items.len;
+    try child.write("cat @1/");
+    try child.write("\t");
+    try std.testing.expect(try child.readUntilFrom(gpa, &out, from, "files/", support.timeout_ms));
+    try support.cancelZleLine(gpa, child, &out);
+
     // Expose preexec's exact command without changing the ZLE probe above.
     from = out.items.len;
     try child.write(

@@ -23,8 +23,11 @@ test "the tj zle hooks preserve prompt and tui widgets when sourced again" {
     var out: std.ArrayList(u8) = .empty;
     defer out.deinit(gpa);
     const prefix =
+        "typeset -gi TJ_PRIOR_ACCEPT_COUNT=0; " ++
         "typeset -gi TJ_PRIOR_LINE_INIT_COUNT=0; " ++
+        "_tj_prior_accept_line() { (( TJ_PRIOR_ACCEPT_COUNT++ )); zle .accept-line; }; " ++
         "_tj_prior_line_init() { (( TJ_PRIOR_LINE_INIT_COUNT++ )); }; " ++
+        "zle -N accept-line _tj_prior_accept_line; " ++
         "zle -N zle-line-init _tj_prior_line_init";
     try support.setupJournalZshWithPrefix(gpa, child, &out, prefix);
 
@@ -39,7 +42,8 @@ test "the tj zle hooks preserve prompt and tui widgets when sourced again" {
     try std.testing.expect(try child.readUntilFrom(gpa, &out, from, support.test_prompt, support.timeout_ms));
 
     from = out.items.len;
-    try child.write("print -r -- TJ_PRIOR_LINE_INIT_COUNT=$TJ_PRIOR_LINE_INIT_COUNT\n");
+    try child.write("print -r -- TJ_PRIOR_ACCEPT_COUNT=$TJ_PRIOR_ACCEPT_COUNT TJ_PRIOR_LINE_INIT_COUNT=$TJ_PRIOR_LINE_INIT_COUNT\n");
+    try std.testing.expect(try child.readUntilFrom(gpa, &out, from, "TJ_PRIOR_ACCEPT_COUNT=2", support.timeout_ms));
     try std.testing.expect(try child.readUntilFrom(gpa, &out, from, "TJ_PRIOR_LINE_INIT_COUNT=2", support.timeout_ms));
     try std.testing.expect(try child.readUntilFrom(gpa, &out, from, support.test_prompt, support.timeout_ms));
 
@@ -99,6 +103,34 @@ test "a direct tj reference remains literal in an interactive zsh" {
     try std.testing.expect(try child.readUntilFrom(gpa, &out, from, "/1/out", support.timeout_ms));
     try child.write("exit 0\n");
     try std.testing.expectEqual(@as(u8, 0), try child.finish(gpa, &out, support.timeout_ms));
+}
+
+test "accepting a bare reference expands it in zsh" {
+    if (!support.haveZsh()) return error.SkipZigTest;
+    const gpa = std.testing.allocator;
+
+    var journal = try support.Journal.open(gpa);
+    defer journal.close();
+    const child = try support.spawnJournalZsh(gpa, &journal);
+    var out: std.ArrayList(u8) = .empty;
+    defer out.deinit(gpa);
+    try support.setupJournalZsh(gpa, child, &out);
+
+    var from = out.items.len;
+    try child.write("printf 'accept-marker\\n'\n");
+    try std.testing.expect(try child.readUntilFrom(gpa, &out, from, support.test_prompt, support.timeout_ms));
+
+    from = out.items.len;
+    try child.write("cat @1/out\n");
+    try std.testing.expect(try child.readUntilFrom(gpa, &out, from, "accept-marker", support.timeout_ms));
+    try std.testing.expect(try child.readUntilFrom(gpa, &out, from, support.test_prompt, support.timeout_ms));
+
+    try child.write("exit 0\n");
+    try std.testing.expectEqual(@as(u8, 0), try child.finish(gpa, &out, support.timeout_ms));
+
+    const command = try journal.read(gpa, "2/cmd");
+    defer gpa.free(command);
+    try std.testing.expectEqualStrings("cat @1/out", command);
 }
 
 test "a malformed reference and a missing one are told apart" {
@@ -1040,7 +1072,7 @@ test "concurrent namespace operations leave one complete winner" {
     }
 }
 
-test "bare references remain literal in ordinary zsh commands" {
+test "resolved bare references expand while unknown handles stay literal" {
     if (!support.haveZsh()) return error.SkipZigTest;
     const gpa = std.testing.allocator;
     var journal = try support.Journal.open(gpa);
@@ -1065,7 +1097,8 @@ test "bare references remain literal in ordinary zsh commands" {
     try child.write("exit 0\n");
     try std.testing.expectEqual(@as(u8, 0), try child.finish(gpa, &out, support.timeout_ms));
 
-    try std.testing.expect(std.mem.indexOf(u8, out.items, "NAMED=@build-failure/out") != null);
+    try std.testing.expect(std.mem.indexOf(u8, out.items, "NAMED=") != null);
+    try std.testing.expect(std.mem.indexOf(u8, out.items, "/1/out") != null);
     try std.testing.expect(std.mem.indexOf(u8, out.items, "HANDLE=@someone") != null);
     const typed = try journal.read(gpa, "3/cmd");
     defer gpa.free(typed);
@@ -1235,7 +1268,7 @@ test "qualified command substitution resolves through a reused journal" {
     try std.testing.expect(std.mem.indexOf(u8, meta, "expanded_cmd") == null);
 }
 
-test "history keeps literal references without rewriting" {
+test "history contains the accepted reference substitution" {
     if (!support.haveZsh()) return error.SkipZigTest;
     const gpa = std.testing.allocator;
 
@@ -1265,7 +1298,7 @@ test "history keeps literal references without rewriting" {
 
     from = out.items.len;
     try child.write("fc -ln -1\n");
-    try std.testing.expect(try child.readUntilFrom(gpa, &out, from, "cat @1/out >/dev/null", support.timeout_ms));
+    try std.testing.expect(try child.readUntilFrom(gpa, &out, from, "cat \"$(tj @1/out)\" >/dev/null", support.timeout_ms));
     try child.write("exit 0\n");
     try std.testing.expectEqual(@as(u8, 0), try child.finish(gpa, &out, support.timeout_ms));
 

@@ -8,11 +8,12 @@
 # `tjcd` remains available so qualified references can be used from an
 # ordinary shell.
 #
-# Two jobs:
+# Three jobs:
 #
 #   1. Mark command boundaries, because the proxy sees one undifferentiated
 #      byte stream and cannot tell where one command ends and the next begins.
-#   2. Open the journal browser from ZLE and insert a chosen detail value into
+#   2. Turn accepted bare references into quoted path expressions.
+#   3. Open the journal browser from ZLE and insert a chosen detail value into
 #      the command line.
 
 _tj_bin() { print -r -- "${TJ:-tj}" }
@@ -101,8 +102,10 @@ _tj_encode_context() {
 }
 
 _tj_preexec() {
-  # The journal records the line zsh accepted without rewriting references.
-  local typed=$1
+  # The journal records the line the user entered, before accept-line expands
+  # an explicit bare reference into a command substitution.
+  local typed=${_TJ_TYPED:-$1}
+  _TJ_TYPED=
 
   # Match the terminal convention: the configured format describes the idle
   # prompt, while a running command gets a short, immediately useful title.
@@ -231,6 +234,151 @@ _tj_register_tui_widget() {
 }
 
 _tj_register_tui_widget
+
+# --- accepted reference expansion ------------------------------------------
+
+_tj_valid_reference_head() {
+  emulate -L zsh
+  setopt extendedglob
+
+  local head=$1 body qualifier target significant
+  [[ $head == @- ]] && return 0
+  [[ $head == @?* ]] || return 1
+  body=${head#@}
+
+  if [[ $body == *.* ]]; then
+    qualifier=${body%.*}
+    target=${body##*.}
+    (( ${#qualifier} >= 1 && ${#qualifier} <= 63 )) || return 1
+    [[ $qualifier == [a-z0-9] || $qualifier == [a-z0-9][a-z0-9-]#[a-z0-9] ]] || return 1
+  else
+    target=$body
+  fi
+
+  if [[ $target == [0-9]## ]]; then
+    significant=${target##0#}
+    [[ -n $significant ]] || return 1
+    (( ${#significant} < 10 )) && return 0
+    (( ${#significant} == 10 )) || return 1
+    [[ $significant == 4294967295 || $significant < 4294967295 ]]
+    return
+  fi
+
+  (( ${#target} >= 1 && ${#target} <= 63 )) || return 1
+  [[ $target == [a-z]* && $target == [a-z0-9-]## && $target != *- ]]
+}
+
+_tj_is_literal_tjcd() {
+  emulate -L zsh
+  setopt extendedglob
+
+  local line=${1##[[:space:]]#} target
+  line=${line%%[[:space:]]#}
+  [[ $line == tjcd[[:space:]]##* ]] || return 1
+  target=${line#tjcd}
+  target=${target##[[:space:]]#}
+  [[ -n $target && $target != *[[:space:]]* ]] || return 1
+  _tj_valid_reference_head "$target"
+}
+
+# TJ already accepts references as data. Do not turn its own arguments into
+# paths, particularly the bare `tj @REF` resolver shorthand.
+_tj_is_tj_command_line() {
+  emulate -L zsh
+  local line=${1##[[:space:]]#}
+  [[ $line == tj' '* || $line == tj$'\t'* ]]
+}
+
+# Scan one command line without evaluating it. The transformer only receives
+# unquoted shell words and may replace the dynamically scoped `_tj_scan_word`.
+_tj_transform_command_line() {
+  emulate -L zsh
+
+  local transformer=$1 buf=$2 out='' word='' ch _tj_scan_word
+  local -i i=1 n=${#buf} at_word_start=1 changed=0
+
+  while (( i <= n )); do
+    ch=${buf[i]}
+    case $ch in
+      "'")
+        out+=$ch; (( i++ ))
+        while (( i <= n )) && [[ ${buf[i]} != "'" ]]; do out+=${buf[i]}; (( i++ )); done
+        (( i <= n )) && { out+=${buf[i]}; (( i++ )); }
+        at_word_start=0
+        ;;
+      '"')
+        out+=$ch; (( i++ ))
+        while (( i <= n )) && [[ ${buf[i]} != '"' ]]; do
+          if [[ ${buf[i]} == '\\' ]] && (( i < n )); then out+=${buf[i]}; (( i++ )); fi
+          out+=${buf[i]}; (( i++ ))
+        done
+        (( i <= n )) && { out+=${buf[i]}; (( i++ )); }
+        at_word_start=0
+        ;;
+      ' '|$'\t'|$'\n'|'|'|'&'|';'|'('|')'|'<'|'>')
+        out+=$ch; (( i++ )); at_word_start=1
+        ;;
+      *)
+        word=''
+        while (( i <= n )); do
+          if [[ ${buf[i]} == '\\' ]] && (( i < n )); then
+            word+=${buf[i]}; (( i++ ))
+            word+=${buf[i]}; (( i++ ))
+            continue
+          fi
+          case ${buf[i]} in
+            (' '|$'\t'|$'\n'|'|'|'&'|';'|'('|')'|'<'|'>'|"'"|'"') break ;;
+          esac
+          word+=${buf[i]}; (( i++ ))
+        done
+        _tj_scan_word=$word
+        "$transformer" "$word" "$at_word_start"
+        [[ $_tj_scan_word != $word ]] && changed=1
+        out+=$_tj_scan_word
+        at_word_start=0
+        ;;
+    esac
+  done
+
+  _tj_expanded=$out
+  return $(( ! changed ))
+}
+
+_tj_transform_reference_word() {
+  local word=$1 at_word_start=$2 head suffix
+  (( at_word_start )) || return 0
+  head=${word%%/*}
+  suffix=${word#$head}
+  [[ $head == @* ]] && _tj_valid_reference_head "$head" || return 0
+
+  # The resolver remains authoritative for both named references and resource
+  # suffixes. Unknown handles and missing paths stay literal.
+  command "$(_tj_bin)" resolve "$word" >/dev/null 2>&1 || return 0
+  _tj_scan_word="\"\$(tj ${(q)word})\""
+}
+
+_tj_rewrite_references() {
+  _tj_transform_command_line _tj_transform_reference_word "$1"
+}
+
+_tj_accept_line() {
+  if ! _tj_is_literal_tjcd "$BUFFER" && ! _tj_is_tj_command_line "$BUFFER" &&
+     [[ $BUFFER == *@* ]] && _tj_rewrite_references "$BUFFER"; then
+    _TJ_TYPED=$BUFFER
+    BUFFER=$_tj_expanded
+    zle redisplay
+  fi
+  zle _tj_accept_line_next -- "$@"
+}
+
+_tj_register_accept_line() {
+  (( ${+_TJ_ACCEPT_LINE_REGISTERED} )) && return 0
+  zle -A accept-line _tj_accept_line_next || return 1
+  zle -N accept-line _tj_accept_line || return 1
+  typeset -g _TJ_ACCEPT_LINE_REGISTERED=1
+}
+
+_tj_register_accept_line
 
 typeset -ga _tj_completion_candidates
 

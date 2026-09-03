@@ -68,7 +68,7 @@ tj cat @42/out
 tj cat @42/cmd @42/rc
 ```
 
-For an ordinary command, use `"$(tj @REF)"` to obtain a filesystem path:
+`"$(tj @REF)"` is the canonical shell form for an entry filesystem path:
 
 ```zsh
 jq .items "$(tj @42/out)"
@@ -85,6 +85,10 @@ cat (tj @42/out)
 ```zsh
 cat "$(tj @42/out)"
 ```
+
+In interactive zsh, the plugin rewrites a valid bare reference when Enter
+accepts the line, so `cat @42/out` is a convenience spelling for the canonical
+form. Use the canonical form in scripts and in shells without the zsh plugin.
 
 ## Entry resources
 

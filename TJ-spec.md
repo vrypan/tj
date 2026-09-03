@@ -566,8 +566,9 @@ TJ references are shell-neutral identifiers accepted by TJ commands:
 ```
 
 `tj @REF` is shorthand for `tj resolve @REF`: it prints the filesystem path
-for the named entry or resource. Ordinary programs use it through command
-substitution and remain unaware of TJ's storage layout:
+for the named entry or resource. `"$(tj @REF)"` is the canonical shell form
+for passing that path to an ordinary program, without exposing TJ's storage
+layout:
 
 ```sh
 cat "$(tj @10/out)"
@@ -580,11 +581,19 @@ Fish uses its native command-substitution form:
 cat (tj @10/out)
 ```
 
-The zsh plugin does not rewrite references. Bare `@REF` therefore remains
-literal in ordinary command lines, including quoted text and values such as
-`user@host`. Use the explicit command substitution where a program needs a
-path. `preexec` records zsh's accepted command text; `expanded_cmd` is present
-only when zsh's executable form differs, for example after alias expansion.
+In interactive zsh, the plugin rewrites a valid unquoted reference at the
+start of a shell word when the line is accepted as a convenience:
+
+```text
+cat @10/out  →  cat "$(tj @10/out)"
+```
+
+Tab retains ordinary reference and resource completion, so `@10/<Tab>` offers
+the entry's resources. Quoted references, unresolved names, and words such as
+`user@host` remain unchanged. The plugin records the pre-rewrite command as
+`cmd`; zsh history contains the accepted command substitution. `expanded_cmd`
+is present only when zsh's executable form differs further, for example after
+alias expansion.
 
 The plugin defines `tjcd REF` as a zsh function because a subprocess cannot
 change its parent shell's directory. It resolves a literal `tjcd @REF` target.

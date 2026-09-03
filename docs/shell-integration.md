@@ -144,8 +144,17 @@ The widget is named `_tj_tui_widget`, so it can also be bound explicitly with
 
 ## Reference expansion
 
-The plugin does not rewrite references. Use `"$(tj @42/out)"` when an
-ordinary command needs a filesystem path.
+`"$(tj @REF)"` is the canonical shell form for an entry filesystem path. The
+plugin provides a zsh-only convenience: it rewrites a valid unquoted reference
+at the start of a shell word when you press Enter:
+
+```text
+cat @42/out  ->  cat "$(tj @42/out)"
+```
+
+Tab retains ordinary reference and resource completion, so `@42/<Tab>` offers
+the entry's resources. Quoted words, unresolved names, and words such as
+`user@host` remain unchanged.
 
 ## Completion
 

@@ -136,8 +136,9 @@ Every entry has core resources:
 - `rc` — the exit status, when the command finished
 - `meta.json` — timing, recording, and optional expanded-command metadata
 
-Use `"$(tj @12/out)"` when an ordinary zsh command needs an entry's filesystem
-path without exposing TJ's storage location.
+`"$(tj @REF)"` is TJ's canonical shell form for an entry filesystem path. In
+interactive zsh, the plugin rewrites a valid bare `@REF` on Enter as a
+convenience, so `cat @12/out` runs as `cat "$(tj @12/out)"`.
 Qualified references select another journal: `@work.12/out`. Commands that
 change entries only operate on the current journal.
 
