@@ -313,15 +313,19 @@ fn normalKey(model: *Model, key: zooi.Key) Effect {
         model.quit = true;
         return .quit;
     }
-    if (key != .shift_up and key != .shift_down) model.range_anchor = null;
+    if (!isRangeExtensionKey(key)) model.range_anchor = null;
     const page = @max(model.listRows(), 1);
     switch (key) {
         .up => model.moveCursor(-1),
         .down => model.moveCursor(1),
         .shift_up => model.extendSelection(-1),
         .shift_down => model.extendSelection(1),
+        .shift_page_up => model.extendSelection(-@as(isize, @intCast(page))),
+        .shift_page_down => model.extendSelection(@intCast(page)),
         .page_up => model.moveCursor(-@as(isize, @intCast(page))),
         .page_down => model.moveCursor(@intCast(page)),
+        .shift_home => model.extendSelection(-@as(isize, @intCast(model.viewport.cursor))),
+        .shift_end => if (model.count != 0) model.extendSelection(@intCast(model.count - 1 - model.viewport.cursor)),
         .home => model.setCursor(0),
         .end => if (model.count != 0) model.setCursor(model.count - 1),
         .escape => model.clearSelection(),
@@ -422,15 +426,21 @@ fn detailKey(model: *Model, key: zooi.Key) Effect {
         model.quit = true;
         return .quit;
     }
-    if (key != .shift_up and key != .shift_down) model.detail_range_anchor = null;
+    if (!isRangeExtensionKey(key)) model.detail_range_anchor = null;
     const page = @max(model.listRows(), 1);
     switch (key) {
         .up => model.detailMove(-1),
         .down => model.detailMove(1),
         .shift_up => model.detailExtend(-1),
         .shift_down => model.detailExtend(1),
+        .shift_page_up => model.detailExtend(-@as(isize, @intCast(page))),
+        .shift_page_down => model.detailExtend(@intCast(page)),
         .page_up => model.detailMove(-@as(isize, @intCast(page))),
         .page_down => model.detailMove(@intCast(page)),
+        .shift_home => model.detailExtend(-@as(isize, @intCast(model.detail_viewport.cursor))),
+        .shift_end => if (model.detail) |detail| {
+            if (detail.items.len != 0) model.detailExtend(@intCast(detail.items.len - 1 - model.detail_viewport.cursor));
+        },
         .home => {
             const count = if (model.detail) |detail| detail.items.len else 0;
             model.detail_viewport.setCursor(0, count, model.listRows());
@@ -467,6 +477,13 @@ fn detailKey(model: *Model, key: zooi.Key) Effect {
         else => {},
     }
     return .none;
+}
+
+fn isRangeExtensionKey(key: zooi.Key) bool {
+    return switch (key) {
+        .shift_up, .shift_down, .shift_page_up, .shift_page_down, .shift_home, .shift_end => true,
+        else => false,
+    };
 }
 
 test "browser navigation clamps and scrolls" {
@@ -559,6 +576,31 @@ test "browser selects individual entries and inclusive ranges" {
     try std.testing.expectEqualSlices(u32, &.{10}, focused);
 }
 
+test "browser extends selections by pages and to boundaries" {
+    const gpa = std.testing.allocator;
+    var model: Model = .{
+        .numbers = try gpa.dupe(u32, &.{ 1, 2, 3, 4, 5, 6, 7 }),
+        .count = 7,
+        .size = .{ .rows = 6, .cols = 80 },
+        .selected = try std.DynamicBitSetUnmanaged.initEmpty(gpa, 7),
+        .range_base = try std.DynamicBitSetUnmanaged.initEmpty(gpa, 7),
+    };
+    defer model.deinit(gpa);
+
+    model.setCursor(1);
+    _ = normalKey(&model, .shift_page_down);
+    try std.testing.expectEqual(@as(usize, 4), model.viewport.cursor);
+    try std.testing.expectEqual(@as(usize, 4), model.selectedCount());
+
+    _ = normalKey(&model, .shift_end);
+    try std.testing.expectEqual(@as(usize, 6), model.viewport.cursor);
+    try std.testing.expectEqual(@as(usize, 6), model.selectedCount());
+
+    _ = normalKey(&model, .shift_home);
+    try std.testing.expectEqual(@as(usize, 0), model.viewport.cursor);
+    try std.testing.expectEqual(@as(usize, 2), model.selectedCount());
+}
+
 test "detail navigation selects values and inclusive ranges" {
     const gpa = std.testing.allocator;
     var items = [_]DetailItem{
@@ -595,6 +637,33 @@ test "detail navigation selects values and inclusive ranges" {
     try std.testing.expectEqual(@as(usize, 0), model.detailSelectedCount());
     try std.testing.expectEqual(Effect.choose_detail, detailKey(&model, .enter));
     try std.testing.expectEqual(Effect.close_detail, detailKey(&model, .escape));
+}
+
+test "detail navigation extends selections by pages and to boundaries" {
+    const gpa = std.testing.allocator;
+    var items: [7]DetailItem = @splat(.{ .section_start = 0, .section_end = 0, .payload_start = 0, .payload_end = 0 });
+    var model: Model = .{
+        .mode = .detail,
+        .size = .{ .rows = 6, .cols = 80 },
+        .detail = .{ .number = 1, .document = @constCast(""), .items = &items },
+        .detail_selected = try std.DynamicBitSetUnmanaged.initEmpty(gpa, items.len),
+        .detail_range_base = try std.DynamicBitSetUnmanaged.initEmpty(gpa, items.len),
+    };
+    defer model.detail_selected.deinit(gpa);
+    defer model.detail_range_base.deinit(gpa);
+
+    model.detail_viewport.setCursor(1, items.len, model.listRows());
+    _ = detailKey(&model, .shift_page_down);
+    try std.testing.expectEqual(@as(usize, 4), model.detail_viewport.cursor);
+    try std.testing.expectEqual(@as(usize, 4), model.detailSelectedCount());
+
+    _ = detailKey(&model, .shift_home);
+    try std.testing.expectEqual(@as(usize, 0), model.detail_viewport.cursor);
+    try std.testing.expectEqual(@as(usize, 2), model.detailSelectedCount());
+
+    _ = detailKey(&model, .shift_end);
+    try std.testing.expectEqual(@as(usize, 6), model.detail_viewport.cursor);
+    try std.testing.expectEqual(@as(usize, 6), model.detailSelectedCount());
 }
 
 test "detail scrolling moves only when focus crosses a viewport edge" {
