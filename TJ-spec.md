@@ -89,7 +89,7 @@ With a Terminal Journal, composition can happen afterwards.
 
 ``` sh
 $ curl ...
-$ jq . @42/out
+$ jq . "$(tj @42/out)"
 ```
 
 or
@@ -122,7 +122,7 @@ pi explain @87
 or
 
 ``` sh
-diff @42/out @87/out
+diff "$(tj @42/out)" "$(tj @87/out)"
 ```
 
 Entries become stable references rather than anonymous text.
@@ -161,8 +161,8 @@ named resources:
 These resources can be consumed later by ordinary CLI tools:
 
 ``` sh
-python @103/files/script.sh
-cat @103/files/data.csv
+python "$(tj @103/files/script.sh)"
+cat "$(tj @103/files/data.csv)"
 ```
 
 ## A second namespace
@@ -565,130 +565,41 @@ TJ references are shell-neutral identifiers accepted by TJ commands:
 @-
 ```
 
-The canonical zsh filesystem namespace uses dynamic named directories. The
-name inside the brackets identifies an entry directory; resource paths
-are ordinary filesystem suffixes:
+`tj @REF` is shorthand for `tj resolve @REF`: it prints the filesystem path
+for the named entry or resource. Ordinary programs use it through command
+substitution and remain unaware of TJ's storage layout:
 
-``` text
-~[@10]/out
-~[@build-failure]/out
-~[@10]/files/data.csv
-~[@release-build.10]/out
-~[@release-build.build-failure]/out
-~[@-]/out
+```sh
+cat "$(tj @10/out)"
+diff "$(tj @10/out)" "$(tj @12/out)"
 ```
 
-Ordinary programs do not need to understand either form. zsh expands the
-canonical dynamic named directory during normal command parsing and passes an
-ordinary filesystem path to the program.
+Fish uses its native command-substitution form:
 
-Conceptually:
-
-``` text
-~[@10]/out                 → ~/.tj/<journal>/10/out
-~[@10]/files/data.csv      → ~/.tj/<journal>/10/files/data.csv
-~[@release-build.10]/out   → ~/.tj/release-build/10/out
-~[@-]/out                  → ~/.tj/<journal>/<previous>/out
+```fish
+cat (tj @10/out)
 ```
 
-Thus:
-
-``` sh
-cat ~[@10]/out
-```
-
-is executed equivalently to:
-
-``` sh
-cat ~/.tj/<journal>/10/out
-```
-
-and `cat` remains completely unaware of TJ.
-
-This is zsh named-directory expansion rather than a parallel emulation:
-
-``` text
-~name/path       static named filesystem location
-~[@N]/path       dynamic named journal entry
-```
-
-For interactive convenience, an accept-line widget canonicalizes valid,
-unquoted shorthand at the start of shell words. It changes only the reference
-head and preserves the resource suffix:
-
-``` text
-@10/out       → ~[@10]/out
-@build-failure/out → ~[@build-failure]/out
-@-/out        → ~[@-]/out
-@release-build.10/out  → ~[@release-build.10]/out
-```
-
-Quoted references, malformed references, and words such as `user@host` are
-unaffected. A syntactically valid named shorthand is rewritten only after
-`tj resolve` confirms that the name is assigned; unresolved `@handles` remain
-literal. Explicit `~[@REF]` input is already canonical and is not rewritten.
-The widget never inserts a storage path. Its canonical buffer is what the
-terminal accepts and zsh history stores.
-
-The plugin registers its handler by appending it once to
-`zsh_directory_name_functions`; it does not replace the special
-`zsh_directory_name` function or other array handlers. In `n` mode it accepts
-an `@` name, calls `tj resolve` for that entry reference, and returns the
-entry directory as the single global `reply` element. `d` mode is not
-implemented and returns failure, so paths are not abbreviated back to names.
-
-`preexec` runs before dynamic named-directory expansion. Its first argument is
-the accepted/history line; its third argument is the full executable shell
-text with aliases expanded, but it still contains `~[@REF]`. The widget saves
-pre-canonical shorthand in `_TJ_TYPED`, which is recorded as `cmd`. For
-`expanded_cmd`, the plugin starts from `$3` and safely resolves only unquoted
-canonical TJ directory tokens for diagnostic metadata. It never evaluates the
-command line, and zsh remains solely responsible for the expansion used by the
-actual process.
+The zsh plugin does not rewrite references. Bare `@REF` therefore remains
+literal in ordinary command lines, including quoted text and values such as
+`user@host`. Use the explicit command substitution where a program needs a
+path. `preexec` records zsh's accepted command text; `expanded_cmd` is present
+only when zsh's executable form differs, for example after alias expansion.
 
 The plugin defines `tjcd REF` as a zsh function because a subprocess cannot
-change its parent shell's directory. For a simple `tjcd @REF` line, the
-accept-line widget exempts the target from shorthand canonicalization. The
-function resolves the literal reference. In compound command lines and for an
-explicit `tjcd ~[@REF]`, zsh may instead pass the already-expanded entry
-directory; the function accepts that form directly. It then reads `cwd`,
-requires an absolute path naming an existing directory, and invokes
-`builtin cd --`. Qualified references work when no current journal is active.
-Missing `cwd` resources in older entries are reported rather than inferred.
+change its parent shell's directory. It resolves a literal `tjcd @REF` target.
+The function also accepts an already resolved entry directory, then reads
+`cwd`, requires an absolute path naming an existing directory, and invokes
+`builtin cd --`.
+Qualified references work when no current journal is active. Missing `cwd`
+resources in older entries are reported rather than inferred.
 
 ### Completion
 
-Dynamic-directory `c` mode completes entry names inside `~[...]` and
-appends the closing bracket:
-
-``` sh
-cat ~[@<TAB>
-```
-
-Once the bracket is closed, ordinary zsh filesystem completion operates on
-the resolved entry directory. For example:
-
-``` sh
-cat ~[@10]/<TAB>
-```
-
-can offer:
-
-``` text
-cmd  cwd  files/  out  prompt  rc
-```
-
-and:
-
-``` sh
-cat ~[@10]/files/<TAB>
-```
-
-can offer resources published by the program.
-
-The global shorthand completer remains available for `@10/<TAB>`. Normal zsh
-completion runs before that fallback so dynamic named-directory and ordinary
-filesystem completion retain their native behavior.
+The global zsh shorthand completer offers entry names and resources for
+`@10/<TAB>`. It runs before acceptance, while the line still contains a TJ
+reference. Completion within explicit `$(tj @REF)` command substitutions is
+not provided.
 
 The installed command-completion scripts use `tj complete` for positional
 entry-reference arguments accepted by TJ commands. Thus `tj cat @10/<TAB>`
@@ -708,13 +619,8 @@ Numeric and assigned-name candidates are offered in both completion paths.
 Resources below a named entry complete exactly as resources below its
 numeric identity.
 
-The suffix after `~[@REF]` has ordinary filesystem semantics, including `.`
-and `..`. This differs deliberately from `tj resolve @REF/subpath`, whose
-shell-neutral reference subpath remains containment-validated by TJ.
-
-This makes the journal namespace behave like a filesystem from the
-user's perspective while allowing TJ to change its underlying storage
-implementation later.
+The suffix after `@REF` is containment-validated by TJ before it prints a
+filesystem path. This allows TJ to change its storage implementation later.
 
 ## Entry annotations
 

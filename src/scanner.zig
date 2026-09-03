@@ -45,9 +45,8 @@ pub const Event = union(enum) {
     prompt_end,
     /// The command line as the user typed it, decoded from the context marker.
     command_line: []const u8,
-    /// Executable shell text after the zsh
-    /// integration resolved canonical TJ named-directory tokens for metadata.
-    /// Only sent when such a token was resolved.
+    /// Executable shell text after zsh has expanded aliases. Only sent when it
+    /// differs from the command line that was typed.
     command_expanded: []const u8,
     /// The absolute logical working directory at the command boundary.
     working_directory: []const u8,
@@ -616,10 +615,10 @@ test "one context sequence carries command cwd and optional expansion" {
             .expanded = null,
         },
         .{
-            .encoded = "MTsxMzs4OzE7MjI7Y2F0IH5bQDFdL291dC90bXAvYSBiY2F0IC90bXAvam91cm5hbC8xL291dA==",
-            .command = "cat ~[@1]/out",
+            .encoded = "MTsxNzs4OzE7MTA7YWxpYXNfc2hvdyBAMS9vdXQvdG1wL2EgYmNhdCBAMS9vdXQ=",
+            .command = "alias_show @1/out",
             .cwd = "/tmp/a b",
-            .expanded = "cat /tmp/journal/1/out",
+            .expanded = "cat @1/out",
         },
     };
 

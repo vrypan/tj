@@ -243,9 +243,8 @@ there.
   most expensive mistake available here.
 - **Do not fetch everything.** Fetching every entry's output costs
   hundreds of times what the index costs and is almost never worth it.
-- **Quote references** when passing them to `tj` from inside a journal writer:
-  `tj cat '@1'`. The shell integration canonicalizes unquoted shorthand as
-  `~[@1]`, then zsh expands that dynamic named directory before `tj` runs.
+- **Pass references directly to TJ commands:** `tj cat @1`. For an ordinary
+  program that needs an entry path, use `"$(tj @1/out)"`.
 - The journal records **what happened, not what the user was trying to do**.
   It has no intent, no reasoning, and no record of what was already ruled
   out. If the goal matters and the prompt does not say it, ask.

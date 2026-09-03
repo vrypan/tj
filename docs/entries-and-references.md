@@ -59,28 +59,32 @@ qualified references use the complete journal name.
 Unresolved names remain literal. This avoids conflicts with programs that use
 arguments such as `@username`.
 
-## zsh references
+## Shell references
 
-The canonical zsh form is a dynamic named directory:
-
-```sh
-~[@42]/out
-~[@build-failure]/out
-~[@release-build.42]/out
-```
-
-At an interactive prompt, unquoted references at the start of shell words may
-use the shorter form:
+References are arguments to TJ commands:
 
 ```sh
-jq .items @42/out
-diff @42/out @45/out
+tj cat @42/out
+tj cat @42/cmd @42/rc
 ```
 
-The plugin changes the shorthand to `~[@REF]` before zsh parses the command.
-Quoted references and text such as `user@host` are not changed.
+For an ordinary command, use `"$(tj @REF)"` to obtain a filesystem path:
 
-Use `tj resolve @42/out` when a program needs the stored filesystem path.
+```zsh
+jq .items "$(tj @42/out)"
+diff "$(tj @42/out)" "$(tj @45/out)"
+```
+
+Use `tj @42/out` (short for `tj resolve @42/out`) when a program needs the
+stored filesystem path. This is also the portable command-substitution form:
+
+```fish
+cat (tj @42/out)
+```
+
+```zsh
+cat "$(tj @42/out)"
+```
 
 ## Entry resources
 

@@ -37,7 +37,3 @@ What is wanted instead is deliberate: something like `tjctl prune --older-than
   canonical names, and qualified references resolve exact names or
   unique suffixes, but global cross-journal shorthand remains a possible
   future enhancement.
-- `tj resolve @1` inside a journal writer needs quoting (`tj resolve '@1'`).
-  The accept-line widget canonicalizes the shorthand as `~[@1]`, then zsh's
-  dynamic named-directory expansion supplies a path before tj sees it.
-  `tj cat` sidesteps this by accepting either references or paths.

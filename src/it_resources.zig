@@ -699,101 +699,17 @@ test "zsh completion keeps special resource names as one inert argument" {
     );
     try std.testing.expect(try child.readUntilFrom(gpa, &out, from, support.test_prompt, support.timeout_ms));
 
-    // An unambiguous name gets its closing bracket and then behaves as a path.
-    from = out.items.len;
-    try child.write("cat ~[@1");
-    try child.write("\t");
-    if (!try child.readUntilFrom(gpa, &out, from, "~[@1]", support.timeout_ms)) {
-        std.debug.print("numeric dynamic-directory completion failed; transcript follows:\n{s}\n", .{out.items[from..]});
-        return error.NumericDirectoryCompletionMismatch;
-    }
-    try child.write("/out\n");
-    try std.testing.expect(try child.readUntilFrom(gpa, &out, from, "special-resource-content", support.timeout_ms));
-    // Output can arrive before precmd has redrawn the prompt. Do not start the
-    // next ZLE interaction until the shell is actually ready for input again.
-    try std.testing.expect(try child.readUntilFrom(gpa, &out, from, support.test_prompt, support.timeout_ms));
-
-    // Dynamic-directory name completion is offered inside ~[...].
-    from = out.items.len;
-    try child.write("cat ~[@");
-    try child.write("\t");
-    try std.testing.expect(try child.readUntilFrom(gpa, &out, from, "@1", support.timeout_ms));
-    try support.cancelZleLine(gpa, child, &out);
-
-    // Assigned names participate in dynamic-directory name completion. First
-    // inspect the completed path exactly as a user can with the probe widget.
-    from = out.items.len;
-    try child.write("cat ~[@build");
-    try child.write("\t");
-    try std.testing.expect(try child.readUntilFrom(gpa, &out, from, "build-failure]", support.timeout_ms));
-    try child.write("/out");
-    try child.write("\x18\x14");
-    if (!try child.readUntilFrom(
-        gpa,
-        &out,
-        from,
-        "TJ_BUFFER=\"cat ~[@build-failure]/out\" CURSOR=25",
-        support.timeout_ms,
-    )) {
-        std.debug.print("named completion produced the wrong ZLE buffer; transcript follows:\n{s}\n", .{out.items[from..]});
-        return error.NamedCompletionBufferMismatch;
-    }
-    try support.cancelZleLine(gpa, child, &out);
-
-    // Repeat without the probe between completion and accept-line, then check
-    // both what preexec received and what the resulting command produced.
-    from = out.items.len;
-    try child.write("cat ~[@build");
-    try child.write("\t");
-    try std.testing.expect(try child.readUntilFrom(gpa, &out, from, "build-failure]", support.timeout_ms));
-    try child.write("/out\n");
-    if (!try child.readUntilFrom(
-        gpa,
-        &out,
-        from,
-        "TJ_PREEXEC=\"cat ~[@build-failure]/out\"",
-        support.timeout_ms,
-    )) {
-        std.debug.print("named completion did not reach preexec intact; transcript follows:\n{s}\n", .{out.items[from..]});
-        return error.NamedCompletionPreexecMismatch;
-    }
-    if (!try child.readUntilFrom(gpa, &out, from, "special-resource-content", support.timeout_ms)) {
-        std.debug.print("named completion command produced no resource content; transcript follows:\n{s}\n", .{out.items[from..]});
-        return error.NamedCompletionCommandFailed;
-    }
-    try std.testing.expect(try child.readUntilFrom(gpa, &out, from, support.test_prompt, support.timeout_ms));
-
-    // Once the bracket is closed, ordinary filesystem completion lists the
-    // interaction directory rather than going through the shorthand completer.
-    from = out.items.len;
-    try child.write("cat ~[@1]/");
-    try child.write("\t");
-    try std.testing.expect(try child.readUntilFrom(gpa, &out, from, "files/", support.timeout_ms));
-    try support.cancelZleLine(gpa, child, &out);
-
-    from = out.items.len;
-    try child.write("cat ~[@1]/files/note");
-    try child.write("\t");
-    try std.testing.expect(try child.readUntilFrom(gpa, &out, from, "file.txt", support.timeout_ms));
-    try child.write("\n");
-    try std.testing.expect(try child.readUntilFrom(gpa, &out, from, "special-resource-content", support.timeout_ms));
-    try std.testing.expect(try child.readUntilFrom(gpa, &out, from, support.test_prompt, support.timeout_ms));
-
-    // Shorthand resource completion works beneath a named interaction too.
+    // The global shorthand completer works beneath a named interaction in an
+    // arbitrary command. It does not change what will be executed.
     from = out.items.len;
     try child.write("cat @build-failure/files/note");
     try child.write("\t");
     try std.testing.expect(try child.readUntilFrom(gpa, &out, from, "file.txt", support.timeout_ms));
-    try child.write("\n");
-    try std.testing.expect(try child.readUntilFrom(gpa, &out, from, "special-resource-content", support.timeout_ms));
-    try std.testing.expect(try child.readUntilFrom(gpa, &out, from, support.test_prompt, support.timeout_ms));
+    try support.cancelZleLine(gpa, child, &out);
 
     from = out.items.len;
-    try child.write("cat ~[@1]/top");
-    try child.write("\t");
-    try std.testing.expect(try child.readUntilFrom(gpa, &out, from, "note.txt", support.timeout_ms));
-    try child.write("\n");
-    try std.testing.expect(try child.readUntilFrom(gpa, &out, from, "top-resource-content", support.timeout_ms));
+    try child.write("cat \"$(tj '@build-failure/files/note *$ file.txt')\"\n");
+    try std.testing.expect(try child.readUntilFrom(gpa, &out, from, "special-resource-content", support.timeout_ms));
     try std.testing.expect(try child.readUntilFrom(gpa, &out, from, support.test_prompt, support.timeout_ms));
 
     // The original shorthand completion remains available.
@@ -801,14 +717,15 @@ test "zsh completion keeps special resource names as one inert argument" {
     try child.write("cat @1/files/note");
     try child.write("\t");
     try std.testing.expect(try child.readUntilFrom(gpa, &out, from, "file.txt", support.timeout_ms));
-    try child.write("\n");
+    try support.cancelZleLine(gpa, child, &out);
+
+    from = out.items.len;
+    try child.write("cat \"$(tj '@1/files/note *$ file.txt')\"\n");
     try std.testing.expect(try child.readUntilFrom(gpa, &out, from, "special-resource-content", support.timeout_ms));
     try std.testing.expect(try child.readUntilFrom(gpa, &out, from, support.test_prompt, support.timeout_ms));
 
     // Zecli's positional completion delegates back to `support.tj complete`, so TJ
     // commands get the same entry-resource candidates as arbitrary commands.
-    // Keep this after the numeric dynamic-directory checks: cancelling a ZLE
-    // line records a probe command and can create an otherwise-ambiguous @10.
     from = out.items.len;
     try child.write("tj cat @1/cw");
     try child.write("\t");

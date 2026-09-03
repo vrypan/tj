@@ -13,7 +13,7 @@ again.
 
 ```sh
 curl -s https://example.com/data.json   # recorded as entry 1
-jq .items @1/out
+jq .items "$(tj @1/out)"
 tj hist
 tj cat @1
 tj grep error
@@ -136,10 +136,10 @@ Every entry has core resources:
 - `rc` — the exit status, when the command finished
 - `meta.json` — timing, recording, and optional expanded-command metadata
 
-In interactive zsh commands, `@12/out` is shorthand for the canonical dynamic
-directory `~[@12]/out`. Qualified references select another journal:
-`@work.12/out`. Commands that change entries only operate on the current
-journal.
+Use `"$(tj @12/out)"` when an ordinary zsh command needs an entry's filesystem
+path without exposing TJ's storage location.
+Qualified references select another journal: `@work.12/out`. Commands that
+change entries only operate on the current journal.
 
 See [Entries and references](docs/entries-and-references.md) for ranges, names,
 tags, pins, removal, completion, and the TUI.

@@ -127,7 +127,7 @@ test "tj cat defaults to the output and reads other resources by name" {
     try std.testing.expectEqual(@as(u8, 1), missing.code);
 }
 
-test "tj cat takes the path a named directory expanded to, as well as the reference" {
+test "tj cat takes a resolved path as well as the reference" {
     if (!support.haveZsh()) return error.SkipZigTest;
     const gpa = std.testing.allocator;
 
@@ -139,9 +139,8 @@ test "tj cat takes the path a named directory expanded to, as well as the refere
     const home = try journal.homeArg(gpa);
     defer gpa.free(home);
 
-    // Inside the zsh integration, shorthand becomes `~[@1]` and zsh expands
-    // that dynamic named directory before support.tj executes. This is the resulting
-    // form support.tj actually receives there.
+    // The zsh integration resolves shorthand through `tj @1`; this is the
+    // resulting path support.tj receives.
     var resolved = try support.run(gpa, &.{ "--home", home, "resolve", "@1" }, 24, 80);
     defer resolved.out.deinit(gpa);
     const path = std.mem.trim(u8, resolved.out.items, " \r\n");

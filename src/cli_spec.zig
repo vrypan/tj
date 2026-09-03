@@ -193,7 +193,7 @@ pub const application = application: {
         .name = "tj",
         .prefix = "TJ",
         .description = "tj - Terminal Journal",
-        .usage = "tj [options] <command>",
+        .usage = "tj [options] <command|@REF>",
         .flags = &root_flags,
         .commands = &commands,
         .extra_help =
@@ -203,7 +203,7 @@ pub const application = application: {
         \\  @release-build.42/out        entry 42 of another journal
         \\  @build-failure/out  a named entry in this journal
         \\  @release-build.build-failure/out  a named entry in another journal
-        \\  ~[@42]/out          canonical zsh form; unquoted @42/out is shorthand
+        \\  tj @42/out           print a reference's filesystem path (tj resolve shorthand)
         \\
         \\Recording and reference expansion need the shell integration:
         \\  source /path/to/tj.plugin.zsh   # in ~/.zshrc

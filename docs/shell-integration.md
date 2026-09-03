@@ -119,8 +119,7 @@ For Homebrew:
 source "$(brew --prefix)/share/tj/tj.plugin.zsh"
 ```
 
-The plugin preserves existing `accept-line`, completion, and dynamic named
-directory handlers.
+The plugin preserves existing completion handlers.
 
 ## TUI key binding
 
@@ -145,18 +144,8 @@ The widget is named `_tj_tui_widget`, so it can also be bound explicitly with
 
 ## Reference expansion
 
-zsh dynamic named directories make `~[@42]` resolve to an entry directory.
-The plugin also converts interactive shorthand at the start of unquoted words:
-
-```text
-@42/out                    -> ~[@42]/out
-@-/out                     -> ~[@-]/out
-@release-build.42/out      -> ~[@release-build.42]/out
-```
-
-zsh performs the filesystem expansion. The terminal and shell history show the
-canonical `~[...]` form, while programs receive the full path. TJ preserves the
-original shorthand in the entry's `cmd` resource.
+The plugin does not rewrite references. Use `"$(tj @42/out)"` when an
+ordinary command needs a filesystem path.
 
 ## Completion
 
@@ -171,8 +160,6 @@ tjctl replay --<Tab>
 The plugin separately completes references:
 
 ```text
-~[@<Tab>
-~[@42]/<Tab>
 @42/<Tab>
 ```
 
@@ -198,7 +185,7 @@ They are unset outside a journal.
 Plain zsh example:
 
 ```zsh
-PROMPT='${TJ_NEXT:+~[@$TJ_NEXT] }%~ %# '
+PROMPT='${TJ_NEXT:+[$TJ_NEXT] }%~ %# '
 ```
 
 Starship example:

@@ -79,10 +79,10 @@ after changing the file.
 ```sh
 tj --version
 tjctl --version
-whence -v _tj_directory_name _tj_completer
+whence -v _tj_completer
 ```
 
-The last command should report two shell functions from `tj.plugin.zsh`.
+The last command should report a shell function from `tj.plugin.zsh`.
 
 ## Ghostty and remote SSH hosts
 

@@ -4,17 +4,15 @@
 #
 #     source /path/to/tj.plugin.zsh
 #
-# Recording and reference expansion are inert outside a tj journal writer.
+# Recording and reference completion are inert outside a tj journal writer.
 # `tjcd` remains available so qualified references can be used from an
 # ordinary shell.
 #
-# Three jobs:
+# Two jobs:
 #
 #   1. Mark command boundaries, because the proxy sees one undifferentiated
 #      byte stream and cannot tell where one command ends and the next begins.
-#   2. Give journal references a zsh dynamic named-directory namespace, so
-#      ordinary programs receive paths without exposing them in command lines.
-#   3. Open the journal browser from ZLE and insert a chosen detail value into
+#   2. Open the journal browser from ZLE and insert a chosen detail value into
 #      the command line.
 
 _tj_bin() { print -r -- "${TJ:-tj}" }
@@ -53,9 +51,8 @@ tjcd() {
   fi
 
   local entry destination=''
-  # A compound command is canonicalized word-by-word before zsh parses it, so
-  # `tjcd @1 && ...` reaches this function with the dynamic named directory
-  # already expanded. Simple `tjcd @1` lines still arrive as literal refs.
+  # `tjcd` keeps its reference literal even in a compound command. It consumes
+  # the reference as data rather than passing a filesystem path to a program.
   if [[ -d $1 ]]; then
     entry=$1
   else
@@ -104,10 +101,8 @@ _tj_encode_context() {
 }
 
 _tj_preexec() {
-  # The journal records what was typed. $1 is the canonical line after the
-  # accept-line widget rewrote shorthand, so the widget stashes the original.
-  local typed=${_TJ_TYPED:-$1}
-  _TJ_TYPED=
+  # The journal records the line zsh accepted without rewriting references.
+  local typed=$1
 
   # Match the terminal convention: the configured format describes the idle
   # prompt, while a running command gets a short, immediately useful title.
@@ -115,11 +110,10 @@ _tj_preexec() {
   _tj_update_running_title "$typed"
 
   local expanded='' expanded_flag=0
-  # preexec runs before filename expansion. $3 is the full executable form
-  # (including aliases), but still contains dynamic named directories, so
-  # resolve only those known tokens for diagnostic metadata.
-  if _tj_expand_canonical_for_metadata "$3"; then
-    expanded=$_tj_expanded
+  # $3 includes alias expansion. Command substitutions deliberately remain
+  # visible here: their result is an implementation detail, not command text.
+  if [[ $3 != "$typed" ]]; then
+    expanded=$3
     expanded_flag=1
   fi
   _tj_emit "3110;CONTEXT;$(_tj_encode_context "$typed" "$PWD" "$expanded_flag" "$expanded")"
@@ -238,198 +232,6 @@ _tj_register_tui_widget() {
 
 _tj_register_tui_widget
 
-# --- the journal namespace --------------------------------------------------
-
-# Whether $1 is exactly a syntactically valid entry-reference head. The
-# resource suffix is deliberately not part of this check: ~[@10] names the
-# entry directory and zsh owns whatever filesystem path follows it.
-_tj_valid_reference_head() {
-  emulate -L zsh
-  setopt extendedglob
-
-  local head=$1 body qualifier target significant
-  [[ $head == @- ]] && return 0
-  [[ $head == @?* ]] || return 1
-  body=${head#@}
-
-  if [[ $body == *.* ]]; then
-    qualifier=${body%.*}
-    target=${body##*.}
-    (( ${#qualifier} >= 1 && ${#qualifier} <= 63 )) || return 1
-    [[ $qualifier == [a-z0-9] || $qualifier == [a-z0-9][a-z0-9-]#[a-z0-9] ]] || return 1
-  else
-    target=$body
-  fi
-
-  if [[ $target == [0-9]## ]]; then
-    significant=${target##0#}
-    [[ -n $significant ]] || return 1
-    (( ${#significant} < 10 )) && return 0
-    (( ${#significant} == 10 )) || return 1
-    [[ $significant == 4294967295 || $significant < 4294967295 ]]
-    return
-  fi
-
-  # Entry names are deliberately conservative and disjoint from
-  # numbers. Zig remains authoritative; this mirror only decides whether a
-  # shell word is worth asking `tj resolve` about.
-  (( ${#target} >= 1 && ${#target} <= 63 )) || return 1
-  [[ $target == [a-z]* && $target == [a-z0-9-]## && $target != *- ]]
-}
-
-_tj_reference_head_is_name() {
-  local body=${1#@} target
-  target=${body##*.}
-  [[ $target != [0-9]## && $target != - ]]
-}
-
-# `tjcd` consumes an entry reference as data rather than as a filesystem
-# argument. Keep its one literal target out of the dynamic-directory rewrite
-# so the terminal and zsh history retain `tjcd @42`.
-_tj_is_literal_tjcd() {
-  emulate -L zsh
-  setopt extendedglob
-
-  local line=${1##[[:space:]]#} target
-  line=${line%%[[:space:]]#}
-  [[ $line == tjcd[[:space:]]##* ]] || return 1
-  target=${line#tjcd}
-  target=${target##[[:space:]]#}
-  [[ -n $target && $target != *[[:space:]]* ]] || return 1
-  _tj_valid_reference_head "$target"
-}
-
-# Scans shell words once, preserving quotes and escapes verbatim. The named
-# transformer may replace only the current unquoted word through the
-# dynamically scoped `_tj_scan_word`. Returns 0 only when a word changed.
-_tj_transform_command_line() {
-  emulate -L zsh
-
-  local transformer=$1 buf=$2 out='' word='' ch _tj_scan_word
-  local -i i=1 n=${#buf} at_word_start=1 changed=0
-
-  while (( i <= n )); do
-    ch=${buf[i]}
-    case $ch in
-      "'")
-        out+=$ch; (( i++ ))
-        while (( i <= n )) && [[ ${buf[i]} != "'" ]]; do out+=${buf[i]}; (( i++ )); done
-        (( i <= n )) && { out+=${buf[i]}; (( i++ )) }
-        at_word_start=0
-        ;;
-      '"')
-        out+=$ch; (( i++ ))
-        while (( i <= n )) && [[ ${buf[i]} != '"' ]]; do
-          if [[ ${buf[i]} == '\' ]] && (( i < n )); then out+=${buf[i]}; (( i++ )); fi
-          out+=${buf[i]}; (( i++ ))
-        done
-        (( i <= n )) && { out+=${buf[i]}; (( i++ )) }
-        at_word_start=0
-        ;;
-      ' '|$'\t'|$'\n'|'|'|'&'|';'|'('|')'|'<'|'>')
-        out+=$ch; (( i++ )); at_word_start=1
-        ;;
-      *)
-        word=''
-        while (( i <= n )); do
-          if [[ ${buf[i]} == '\' ]] && (( i < n )); then
-            word+=${buf[i]}; (( i++ ))
-            word+=${buf[i]}; (( i++ ))
-            continue
-          fi
-          case ${buf[i]} in
-            (' '|$'\t'|$'\n'|'|'|'&'|';'|'('|')'|'<'|'>'|"'"|'"') break ;;
-          esac
-          word+=${buf[i]}; (( i++ ))
-        done
-        _tj_scan_word=$word
-        "$transformer" "$word" "$at_word_start"
-        [[ $_tj_scan_word != $word ]] && changed=1
-        out+=$_tj_scan_word
-        at_word_start=0
-        ;;
-    esac
-  done
-
-  _tj_expanded=$out
-  return $(( ! changed ))
-}
-
-# A reference is canonicalized only when it starts a shell word, so user@host
-# is untouched. Unassigned names remain literal for commands that use
-# @handles; numbers and already assigned names enter zsh's dynamic-directory
-# namespace.
-_tj_transform_shorthand_word() {
-  local word=$1 at_word_start=$2 head suffix
-  (( at_word_start )) || return 0
-  head=${word%%/*}
-  suffix=${word#$head}
-  [[ $head == @* ]] && _tj_valid_reference_head "$head" || return 0
-  if ! _tj_reference_head_is_name "$head" ||
-     command "$(_tj_bin)" resolve "$head" >/dev/null 2>&1; then
-    _tj_scan_word="~[$head]$suffix"
-  fi
-}
-
-# Resolves one canonical TJ named-directory token for metadata only. The
-# resource suffix remains shell text; only TJ's known directory component is
-# replaced by a quoted path.
-_tj_transform_canonical_word() {
-  local word=$1 at_word_start=$2 head suffix resolved
-  local -i close=0 j
-  (( at_word_start )) && [[ ${word[1,2]} == '~[' ]] || return 0
-
-  j=3
-  while (( j <= ${#word} )); do
-    if [[ ${word[j]} == ']' ]]; then close=$j; break; fi
-    (( j++ ))
-  done
-  (( close > 3 )) || return 0
-
-  head=${word[3,close-1]}
-  suffix=${word[close+1,-1]}
-  if _tj_valid_reference_head "$head" &&
-     resolved=$(command "$(_tj_bin)" resolve "$head" 2>/dev/null); then
-    _tj_scan_word=${(q)resolved}$suffix
-  fi
-}
-
-# Rewrites valid unquoted shorthand in $1 into canonical ~[...] notation,
-# leaving $_tj_expanded.
-_tj_canonicalize_shorthand() {
-  _tj_transform_command_line _tj_transform_shorthand_word "$1"
-}
-
-# Resolves canonical TJ named-directory tokens in $1 for metadata only. This
-# does not mutate BUFFER and never evaluates the command line.
-_tj_expand_canonical_for_metadata() {
-  _tj_transform_command_line _tj_transform_canonical_word "$1"
-}
-
-_tj_accept_line() {
-  if ! _tj_is_literal_tjcd "$BUFFER" &&
-     [[ $BUFFER == *@* ]] && _tj_canonicalize_shorthand "$BUFFER"; then
-    _TJ_TYPED=$BUFFER
-    BUFFER=$_tj_expanded
-    zle redisplay
-  fi
-  zle _tj_accept_line_next -- "$@"
-}
-
-_tj_register_accept_line() {
-  # Preserve the widget that was active when TJ was first sourced. The global
-  # guard matters when a plugin manager reloads this file: replacing the saved
-  # alias with TJ's own wrapper would make accept-line recurse forever.
-  (( ${+_TJ_ACCEPT_LINE_REGISTERED} )) && return 0
-  zle -A accept-line _tj_accept_line_next || return 1
-  zle -N accept-line _tj_accept_line || return 1
-  typeset -g _TJ_ACCEPT_LINE_REGISTERED=1
-}
-
-_tj_register_accept_line
-
-# --- dynamic named directories ---------------------------------------------
-
 typeset -ga _tj_completion_candidates
 
 _tj_load_completion_candidates() {
@@ -437,40 +239,6 @@ _tj_load_completion_candidates() {
   _tj_completion_candidates=(${(f)"$(command "$(_tj_bin)" complete "$1" 2>/dev/null)"})
   (( ${#_tj_completion_candidates} ))
 }
-
-_tj_directory_name() {
-  emulate -L zsh
-
-  case $1 in
-    n)
-      [[ $2 == @* ]] || return 1
-      local resolved
-      resolved=$(command "$(_tj_bin)" resolve "$2" 2>/dev/null) || return 1
-      typeset -ga reply
-      reply=("$resolved")
-      ;;
-    c)
-      [[ $PREFIX == @* ]] || return 1
-      _tj_load_completion_candidates "$PREFIX" || return 1
-      _wanted dynamic-dirs expl 'tj journal reference' compadd -U -S\] -a _tj_completion_candidates
-      ;;
-    *)
-      return 1
-      ;;
-  esac
-  return 0
-}
-
-_tj_register_directory_name() {
-  typeset -ga zsh_directory_name_functions
-  local handler
-  for handler in "${zsh_directory_name_functions[@]}"; do
-    [[ $handler == _tj_directory_name ]] && return 0
-  done
-  zsh_directory_name_functions+=(_tj_directory_name)
-}
-
-_tj_register_directory_name
 
 # --- completion -------------------------------------------------------------
 
@@ -497,9 +265,8 @@ _tj_register_completion() {
     [[ $completer == _tj_completer ]] && return 0
   done
 
-  # Let zsh's native completion handle ~[...] and ordinary paths first. TJ's
-  # shorthand is a fallback immediately after _complete, before _ignored or
-  # any later policy the user configured.
+  # TJ's shorthand is a fallback immediately after _complete, before _ignored
+  # or any later policy the user configured.
   for completer in "${existing[@]}"; do
     updated+=("$completer")
     if (( ! inserted )) && [[ $completer == _complete ]]; then

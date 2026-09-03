@@ -340,13 +340,6 @@ test "entries record cwd and tjcd changes zsh without expanding its reference" {
     try std.testing.expect(try child.readUntilFrom(gpa, &transcript, from, compound_expected, support.timeout_ms));
     try std.testing.expect(try child.readUntilFrom(gpa, &transcript, from, support.test_prompt, support.timeout_ms));
 
-    from = transcript.items.len;
-    try child.write("cd /; tjcd ~[@2]; print -r -- \"TJCD_CANONICAL=$PWD\"\n");
-    const canonical_expected = try std.fmt.allocPrint(gpa, "TJCD_CANONICAL={s}", .{target});
-    defer gpa.free(canonical_expected);
-    try std.testing.expect(try child.readUntilFrom(gpa, &transcript, from, canonical_expected, support.timeout_ms));
-    try std.testing.expect(try child.readUntilFrom(gpa, &transcript, from, support.test_prompt, support.timeout_ms));
-
     try child.write("exit 0\n");
     try std.testing.expectEqual(@as(u8, 0), try child.finish(gpa, &transcript, support.timeout_ms));
 

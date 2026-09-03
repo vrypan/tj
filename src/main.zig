@@ -31,7 +31,8 @@ pub fn main(init: std.process.Init) !u8 {
     const stdout = &stdout_file.interface;
     const stderr = &stderr_file.interface;
 
-    var invocation = zecli.Invocation.init(arena, stderr, cli_spec.application, args[1..], init.environ_map) catch |err| {
+    const command_args = try cli.routeBareReference(arena, args[1..]);
+    var invocation = zecli.Invocation.init(arena, stderr, cli_spec.application, command_args, init.environ_map) catch |err| {
         if (err == error.ReportedCliError) {
             try stderr.flush();
             return 2;
@@ -64,7 +65,7 @@ pub fn main(init: std.process.Init) !u8 {
     const which = try command.as(cli.CommandName);
     const spec = command.spec;
 
-    cli.validateRemoveOrdering(which, args[1..]) catch {
+    cli.validateRemoveOrdering(which, command_args) catch {
         try stderr.writeAll("tj: invalid arguments for this subcommand\n\n");
         try zecli.printCommandHelp(arena, stderr, spec);
         try stderr.flush();

@@ -42,7 +42,7 @@ test "application and every command expose generated help" {
         defer gpa.free(result.stderr);
         try std.testing.expectEqual(@as(u8, 0), result.term.exited);
         try std.testing.expectEqualStrings("", result.stderr);
-        try std.testing.expect(std.mem.indexOf(u8, result.stdout, "Usage: tj [options] <command>") != null);
+        try std.testing.expect(std.mem.indexOf(u8, result.stdout, "Usage: tj [options] <command|@REF>") != null);
         try std.testing.expect(std.mem.indexOf(u8, result.stdout, "Commands:") != null);
         try std.testing.expect(std.mem.indexOf(u8, result.stdout, "hist, history") != null);
         try std.testing.expect(std.mem.indexOf(u8, result.stdout, "--home <DIR>") != null);
