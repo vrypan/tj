@@ -88,7 +88,8 @@ cat "$(tj @42/out)"
 
 In interactive zsh, the plugin rewrites a valid bare reference when Enter
 accepts the line, so `cat @42/out` is a convenience spelling for the canonical
-form. Use the canonical form in scripts and in shells without the zsh plugin.
+form. Fish uses `(tj @42/out)`. Use the canonical form in scripts and in shells
+without the zsh plugin.
 
 ## Entry resources
 

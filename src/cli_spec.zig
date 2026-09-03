@@ -205,8 +205,9 @@ pub const application = application: {
         \\  @release-build.build-failure/out  a named entry in another journal
         \\  tj @42/out           print a reference's filesystem path (tj resolve shorthand)
         \\
-        \\Recording and reference expansion need the shell integration:
-        \\  source /path/to/tj.plugin.zsh   # in ~/.zshrc
+        \\Recording needs a shell plugin; zsh also expands bare references:
+        \\  source /path/to/tj.plugin.zsh   # ~/.zshrc
+        \\  source /path/to/tj.plugin.fish  # ~/.config/fish/config.fish
         ++ "\n",
     });
 };

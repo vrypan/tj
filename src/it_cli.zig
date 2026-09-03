@@ -48,6 +48,7 @@ test "application and every command expose generated help" {
         try std.testing.expect(std.mem.indexOf(u8, result.stdout, "--home <DIR>") != null);
         try std.testing.expect(std.mem.indexOf(u8, result.stdout, "@release-build.42/out") != null);
         try std.testing.expect(std.mem.indexOf(u8, result.stdout, "source /path/to/tj.plugin.zsh") != null);
+        try std.testing.expect(std.mem.indexOf(u8, result.stdout, "source /path/to/tj.plugin.fish") != null);
     }
 
     const command_names = [_][]const u8{ "tui", "noout", "hist", "last", "cat", "resolve", "complete", "name", "tag", "pin", "rm", "grep" };

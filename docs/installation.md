@@ -6,7 +6,7 @@
 brew install vrypan/tap/tj
 ```
 
-The formula builds TJ from source and installs both binaries, the zsh plugin,
+The formula builds TJ from source and installs both binaries, the zsh and Fish plugins,
 shell completions, and helper programs.
 
 ## Release archive
@@ -47,6 +47,7 @@ The install contains:
 - `bin/tj-grep`
 - `bin/tj-tape`
 - `share/tj/tj.plugin.zsh`
+- `share/tj/tj.plugin.fish`
 - zsh, bash, and fish command completions
 
 Remove files installed by `make install` with the same prefix:
@@ -74,6 +75,23 @@ source "$(brew --prefix)/share/tj/tj.plugin.zsh"
 For a custom prefix, use its `share/tj/tj.plugin.zsh` path. Start a new shell
 after changing the file.
 
+## Configure Fish
+
+Load the plugin from `~/.config/fish/config.fish`:
+
+```fish
+source ~/.local/share/tj/tj.plugin.fish
+```
+
+For Homebrew:
+
+```fish
+source "(brew --prefix)/share/tj/tj.plugin.fish"
+```
+
+For a custom prefix, use its `share/tj/tj.plugin.fish` path. Start a new shell
+after changing the file.
+
 ## Verify the installation
 
 ```sh
@@ -82,7 +100,8 @@ tjctl --version
 whence -v _tj_completer
 ```
 
-The last command should report a shell function from `tj.plugin.zsh`.
+In zsh, the last command should report a shell function from `tj.plugin.zsh`.
+In Fish, use `functions -q _tj_preexec` instead.
 
 ## Ghostty and remote SSH hosts
 

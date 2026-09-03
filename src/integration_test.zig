@@ -10,4 +10,5 @@ test {
     _ = @import("it_resources.zig");
     _ = @import("it_replay.zig");
     _ = @import("it_tui.zig");
+    _ = @import("it_fish.zig");
 }

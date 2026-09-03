@@ -485,6 +485,45 @@ pub fn haveZsh() bool {
     return true;
 }
 
+pub fn fishExecutable() ?[]const u8 {
+    const io = std.testing.io;
+    for ([_][]const u8{ "/usr/bin/fish", "/usr/local/bin/fish", "/opt/homebrew/bin/fish" }) |path| {
+        const file = Dir.cwd().openFile(io, path, .{}) catch continue;
+        file.close(io);
+        return path;
+    }
+    return null;
+}
+
+pub fn spawnJournalFish(gpa: std.mem.Allocator, journal: *const Journal) !harness.PtyChild {
+    const fish = fishExecutable() orelse return error.FishNotFound;
+    leaveJournal();
+    const home = try journal.homeArg(gpa);
+    defer gpa.free(home);
+    return spawnTjctl(gpa, &.{ tjctl, "--home", home, "new", "--", "/usr/bin/env", "TERM=dumb", fish, "--no-config", "--interactive" }, 24, 80);
+}
+
+pub fn appendFishQuoted(gpa: std.mem.Allocator, out: *std.ArrayList(u8), text: []const u8) !void {
+    try out.append(gpa, '\'');
+    for (text) |byte| {
+        if (byte == '\'') try out.appendSlice(gpa, "\\'") else try out.append(gpa, byte);
+    }
+    try out.append(gpa, '\'');
+}
+
+pub fn setupJournalFish(gpa: std.mem.Allocator, child: harness.PtyChild, out: *std.ArrayList(u8)) !void {
+    var command: std.ArrayList(u8) = .empty;
+    defer command.deinit(gpa);
+    try command.appendSlice(gpa, "source ");
+    try appendFishQuoted(gpa, &command, options.fish_plugin);
+    try command.appendSlice(gpa, "; function fish_prompt; printf 'TJ_TEST_'PROMPT'> '; end\n");
+    try child.write(command.items);
+    if (!try child.readUntil(gpa, out, test_prompt, timeout_ms)) {
+        std.debug.print("Fish setup did not reach a prompt; transcript follows:\n{s}\n", .{out.items});
+        return error.ShellNotReady;
+    }
+}
+
 /// Runs `script` line by line in an interactive zsh under tj, then exits.
 pub fn recordJournal(gpa: std.mem.Allocator, journal: *Journal, script: []const []const u8) !void {
     const child = try spawnJournalZsh(gpa, journal);

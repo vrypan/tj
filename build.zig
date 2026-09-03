@@ -26,6 +26,7 @@ pub fn build(b: *std.Build) void {
     // Runtime files belong to the Zig install graph so local installation,
     // cross-build prefixes, and release archives all contain the same tools.
     b.installFile("tj.plugin.zsh", "share/tj/tj.plugin.zsh");
+    b.installFile("tj.plugin.fish", "share/tj/tj.plugin.fish");
     b.installBinFile("contrib/tj-fence", "tj-fence");
     b.installBinFile("contrib/tj-grep", "tj-grep");
     b.installBinFile("contrib/tj-tape", "tj-tape");
@@ -104,6 +105,7 @@ pub fn build(b: *std.Build) void {
     integration_options.addOption([]const u8, "version", manifest.version);
     integration_options.addOptionPath("selftest_exe", selftest.getEmittedBin());
     integration_options.addOptionPath("plugin", b.path("tj.plugin.zsh"));
+    integration_options.addOptionPath("fish_plugin", b.path("tj.plugin.fish"));
     integration_options.addOptionPath("bash_completion", completion_outputs[0]);
     integration_options.addOptionPath("zsh_completion", completion_outputs[1]);
     integration_options.addOptionPath("fish_completion", completion_outputs[2]);

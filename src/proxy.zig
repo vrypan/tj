@@ -4,7 +4,7 @@
 //!         |
 //!        tj      <- allocates the pty, forwards both directions
 //!         |
-//!        zsh
+//!        interactive shell
 //!
 //! Input is forwarded byte for byte and never inspected. Output passes through
 //! the scanner, which strips tj's own control sequences, reports command
@@ -28,7 +28,7 @@ const max_protocol_error_log_bytes = 384;
 
 /// How often a running command's buffered output reaches the disk.
 const flush_interval_ms = 200;
-const nothing_recorded_message = "tjctl: nothing was recorded - is tj.plugin.zsh sourced in your ~/.zshrc?";
+const nothing_recorded_message = "tjctl: nothing was recorded - is a TJ shell plugin loaded?";
 
 const stdin_fd: sys.Fd = 0;
 const stdout_fd: sys.Fd = 1;

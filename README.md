@@ -1,8 +1,5 @@
 # tj — Terminal Journal
 
-> [!WARNING]
-> TJ is pre-alpha software. Its interfaces and storage format may change.
-
 TJ records terminal work in persistent journals. Each shell command becomes a
 numbered entry containing the command, working directory, terminal output,
 prompt, exit status, and timing metadata.
@@ -44,9 +41,9 @@ make install
 Release archives and custom install prefixes are described in
 [Installation](docs/installation.md).
 
-## Configure zsh
+## Configure a shell
 
-Add the plugin to `~/.zshrc`:
+For zsh, add the plugin to `~/.zshrc`:
 
 ```zsh
 source ~/.local/share/tj/tj.plugin.zsh
@@ -58,6 +55,18 @@ Homebrew installs the plugin under its own prefix:
 source "$(brew --prefix)/share/tj/tj.plugin.zsh"
 ```
 
+For Fish, add this to `~/.config/fish/config.fish`:
+
+```fish
+source ~/.local/share/tj/tj.plugin.fish
+```
+
+With Homebrew:
+
+```fish
+source "(brew --prefix)/share/tj/tj.plugin.fish"
+```
+
 Start a new shell, then check the setup:
 
 ```sh
@@ -65,9 +74,10 @@ tj --version
 tjctl --version
 ```
 
-The plugin records command boundaries and enables reference expansion and
-completion. Inside a journal, Ctrl-X Ctrl-T opens the entry browser. TJ can
-start without the plugin, but shell commands will not be recorded.
+The shell plugin records command boundaries and enables journal-aware
+completion. Zsh also expands bare references such as `@12/out` when you press
+Enter. Inside a journal, Ctrl-X Ctrl-T opens the entry browser. TJ can start
+without a plugin, but shell commands will not be recorded.
 
 ## Start a journal
 
@@ -95,7 +105,7 @@ By default, `use` quickly replays the recorded terminal output before opening
 a new shell. Use `--no-replay` to skip it. Continuing a journal does not restore
 old processes, environment variables, or shell state.
 
-Use `tj-new` and `tj-use` from an interactive zsh. Outside TJ they behave like
+Use `tj-new` and `tj-use` from an interactive zsh or Fish shell. Outside TJ they behave like
 `tjctl new/use`; inside TJ they keep the current shell and move recording to
 the selected journal.
 
@@ -136,9 +146,10 @@ Every entry has core resources:
 - `rc` — the exit status, when the command finished
 - `meta.json` — timing, recording, and optional expanded-command metadata
 
-`"$(tj @REF)"` is TJ's canonical shell form for an entry filesystem path. In
-interactive zsh, the plugin rewrites a valid bare `@REF` on Enter as a
-convenience, so `cat @12/out` runs as `cat "$(tj @12/out)"`.
+`"$(tj @REF)"` is TJ's canonical POSIX-shell form for an entry filesystem path.
+Fish uses its equivalent `(tj @REF)`. In interactive zsh, the plugin rewrites a
+valid bare `@REF` on Enter as a convenience, so `cat @12/out` runs as
+`cat "$(tj @12/out)"`.
 Qualified references select another journal: `@work.12/out`. Commands that
 change entries only operate on the current journal.
 
@@ -167,7 +178,7 @@ specific feature, open an issue and document it clearly. See
 
 ## Current limits
 
-- Shell recording currently requires zsh.
+- Shell recording currently supports zsh and Fish.
 - Only one TJ process can write to a journal at a time.
 - Automatic retention and pruning are not implemented.
 - Journals may contain commands, output, paths, and other sensitive data. Their

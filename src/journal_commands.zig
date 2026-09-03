@@ -163,18 +163,22 @@ fn emitHandoff(
     const handoff_fd_text = sys.env("TJ_HANDOFF_FD") orelse return error.NotInJournal;
     const handoff_fd: sys.Fd = std.fmt.parseInt(sys.Fd, handoff_fd_text, 10) catch return error.NotInJournal;
     if (try sys.read(handoff_fd, &reply) != 1 or reply[0] != 0) return error.JournalLocked;
-    try writeShellExport(out, "TJ_JOURNAL", selected);
+    const fish_syntax = if (sys.env("TJ_SHELL_HANDOFF")) |shell|
+        std.mem.eql(u8, shell, "fish")
+    else
+        false;
+    try writeShellExport(out, "TJ_JOURNAL", selected, fish_syntax);
     var next: [16]u8 = undefined;
     const next_text = try std.fmt.bufPrint(&next, "{d}", .{selected_next});
-    try writeShellExport(out, "TJ_NEXT", next_text);
-    try writeShellExport(out, "TJ_TITLE", title);
+    try writeShellExport(out, "TJ_NEXT", next_text, fish_syntax);
+    try writeShellExport(out, "TJ_TITLE", title, fish_syntax);
     var blink: [16]u8 = undefined;
     const blink_text = try std.fmt.bufPrint(&blink, "{d}", .{title_blink_ms});
-    try writeShellExport(out, "TJ_TITLE_BLINK", blink_text);
+    try writeShellExport(out, "TJ_TITLE_BLINK", blink_text, fish_syntax);
     if (opts.temporary) {
-        try writeShellExport(out, "TJ_TEMPORARY", "1");
+        try writeShellExport(out, "TJ_TEMPORARY", "1", fish_syntax);
     } else {
-        try out.writeAll("unset TJ_TEMPORARY\n");
+        try out.writeAll(if (fish_syntax) "set -e TJ_TEMPORARY\n" else "unset TJ_TEMPORARY\n");
     }
     return 0;
 }
@@ -192,7 +196,14 @@ fn saveTemporary() !u8 {
     return 0;
 }
 
-fn writeShellExport(out: *Io.Writer, name: []const u8, value: []const u8) !void {
+fn writeShellExport(out: *Io.Writer, name: []const u8, value: []const u8, fish_syntax: bool) !void {
+    if (fish_syntax) {
+        try out.print("set -gx {s} '", .{name});
+        for (value) |byte| {
+            if (byte == '\'') try out.writeAll("\\'") else try out.writeByte(byte);
+        }
+        return out.writeAll("'\n");
+    }
     try out.print("export {s}=", .{name});
     try out.writeByte('\'');
     for (value) |byte| {

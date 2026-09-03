@@ -29,7 +29,7 @@ build:
 # manifest prevents local installs from quietly containing more than archives.
 install:
 	$(ZIG) build --prefix $(PREFIX)
-	@echo "installed tj, tjctl, zsh integration, companion tools, and shell completions under $(PREFIX)"
+	@echo "installed tj, tjctl, shell integrations, companion tools, and shell completions under $(PREFIX)"
 
 # Remove only files owned by TJ. Directory cleanup is best-effort and succeeds
 # only when a directory is empty, so other software under PREFIX is untouched.
@@ -41,6 +41,7 @@ uninstall:
 		"$(PREFIX)/bin/tj-grep" \
 		"$(PREFIX)/bin/tj-tape" \
 		"$(PREFIX)/share/tj/tj.plugin.zsh" \
+		"$(PREFIX)/share/tj/tj.plugin.fish" \
 		"$(PREFIX)/share/bash-completion/completions/tj" \
 		"$(PREFIX)/share/bash-completion/completions/tjctl" \
 		"$(PREFIX)/share/zsh/site-functions/_tj" \
@@ -93,6 +94,7 @@ package: all
 		test -x "$$dir/bin/tj-grep" || exit 1; \
 		test -x "$$dir/bin/tj-tape" || exit 1; \
 		test -r "$$dir/share/tj/tj.plugin.zsh" || exit 1; \
+		test -r "$$dir/share/tj/tj.plugin.fish" || exit 1; \
 		test -r "$$dir/share/bash-completion/completions/tj" || exit 1; \
 		test -r "$$dir/share/bash-completion/completions/tjctl" || exit 1; \
 		test -r "$$dir/share/zsh/site-functions/_tj" || exit 1; \

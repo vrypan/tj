@@ -26,9 +26,9 @@ jobs:
       - uses: mlugg/setup-zig@v2
         with:
           version: 0.16.0
-      - name: Install zsh
+      - name: Install interactive shells
         if: runner.os == 'Linux'
-        run: sudo apt-get update && sudo apt-get install --yes zsh
+        run: sudo apt-get update && sudo apt-get install --yes fish zsh
       - run: zig version
       - run: make fmt-check
       - run: make test

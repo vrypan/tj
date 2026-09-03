@@ -46,7 +46,7 @@ highest number already present. Existing unfinished entries are preserved.
 
 Only one TJ process may write to a journal at a time.
 
-Use `tj-new` or `tj-use` from an interactive zsh. Outside a journal they
+Use `tj-new` or `tj-use` from an interactive zsh or Fish shell. Outside a journal they
 delegate to `tjctl new/use`. Inside one, they keep the current shell while the
 proxy moves recording to the selected journal. The shell's cwd, environment,
 jobs, functions, and editor state remain intact. `tjctl new/use` intentionally
@@ -56,15 +56,15 @@ Handoff is unavailable from tmux and GNU Screen in this version.
 ## Choose a child shell
 
 Normally, `new` and `use` start `$SHELL` with no arguments. To select a
-different interactive zsh invocation, put it after `--`:
+different interactive shell invocation, put it after `--`:
 
 ```sh
 tjctl new project-work -- zsh -l
 ```
 
-The command after `--` must launch an interactive zsh that loads
-`tj.plugin.zsh` for recording to work. Direct commands, `zsh -c`, and `zsh -f`
-do not produce shell command boundaries and therefore do not create entries.
+The command after `--` must launch interactive zsh or Fish that loads its TJ
+plugin for recording to work. Direct commands and noninteractive shells do not
+produce shell command boundaries and therefore do not create entries.
 
 ## Splash and terminal title
 

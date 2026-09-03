@@ -6,8 +6,8 @@
   journals
 - [Entries and references](entries-and-references.md) — resources, ranges,
   annotations, removal, and the TUI
-- [Shell integration](shell-integration.md) — zsh setup, expansion, completion,
-  prompts, and terminal titles
+- [Shell integration](shell-integration.md) — zsh and Fish setup, references,
+  completion, prompts, and terminal titles
 - [Search and output](search-and-output.md) — grep, rendering, fullscreen output,
   and output omission
 - [Agents and published resources](agents-and-resources.md) — agent access,

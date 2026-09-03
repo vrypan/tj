@@ -144,6 +144,12 @@ jobs:
             source ~/.local/share/tj/tj.plugin.zsh
             ```
 
+            For Fish recording, add this to `~/.config/fish/config.fish`:
+
+            ```fish
+            source ~/.local/share/tj/tj.plugin.fish
+            ```
+
             See the [README](https://github.com/vrypan/tj#install) for completion setup and source installation.
         shell: bash
         run: |

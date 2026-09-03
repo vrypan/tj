@@ -26,9 +26,13 @@ class Tj < Formula
 
   def caveats
     <<~EOS
-      Add the TJ zsh integration to ~/.zshrc:
+      Add the TJ zsh or Fish integration to your shell configuration:
 
+        # zsh
         source #{opt_pkgshare}/tj.plugin.zsh
+
+        # Fish
+        source #{opt_pkgshare}/tj.plugin.fish
     EOS
   end
 
@@ -38,6 +42,7 @@ class Tj < Formula
     end
 
     assert_path_exists pkgshare/"tj.plugin.zsh"
+    assert_path_exists pkgshare/"tj.plugin.fish"
     assert_path_exists bash_completion/"tj"
     assert_path_exists bash_completion/"tjctl"
     assert_path_exists zsh_completion/"_tj"

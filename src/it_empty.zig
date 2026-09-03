@@ -151,7 +151,7 @@ test "a new journal that recorded nothing leaves nothing behind" {
     var r = try support.runTjctl(gpa, &.{ "--home", scratch.path(), "new", "--", "/bin/sh", "-c", "true" }, 24, 80);
     defer r.out.deinit(gpa);
     try std.testing.expectEqual(@as(u8, 0), r.code);
-    const warning = "tjctl: nothing was recorded - is tj.plugin.zsh sourced in your ~/.zshrc?";
+    const warning = "tjctl: nothing was recorded - is a TJ shell plugin loaded?";
     try std.testing.expectEqual(@as(usize, 1), std.mem.count(u8, r.out.items, warning));
 
     try std.testing.expectEqual(@as(usize, 0), try scratch.journals());
@@ -187,7 +187,7 @@ test "the nothing-recorded warning uses stderr when it is redirected" {
     try std.testing.expectEqual(@as(u8, 0), result.term.exited);
     try std.testing.expectEqualStrings("", result.stdout);
     try std.testing.expectEqualStrings(
-        "tjctl: nothing was recorded - is tj.plugin.zsh sourced in your ~/.zshrc?\n",
+        "tjctl: nothing was recorded - is a TJ shell plugin loaded?\n",
         result.stderr,
     );
     try std.testing.expectEqual(@as(usize, 0), try scratch.journals());
@@ -329,7 +329,7 @@ test "new and use leave child help flags after the argv boundary" {
     try std.testing.expect(std.mem.indexOf(u8, continued.out.items, "CONTINUE-CHILD:--help") != null);
     try std.testing.expectEqual(
         @as(usize, 1),
-        std.mem.count(u8, continued.out.items, "tjctl: nothing was recorded - is tj.plugin.zsh sourced in your ~/.zshrc?"),
+        std.mem.count(u8, continued.out.items, "tjctl: nothing was recorded - is a TJ shell plugin loaded?"),
     );
 }
 

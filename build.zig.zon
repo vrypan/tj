@@ -18,6 +18,7 @@
         "build.zig.zon",
         "src",
         "vendor",
+        "tj.plugin.fish",
         "tj.plugin.zsh",
         "skill",
         "contrib",

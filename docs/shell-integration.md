@@ -2,10 +2,10 @@
 
 `tjctl new/use` launches a PTY proxy. In an active direct TJ shell, use the
 plugin's `tj-new/tj-use` helpers instead: they move the active proxy to another
-journal without launching a nested proxy. The zsh plugin tells it when a command starts and ends and
-provides the command, expanded command, prompt, and working directory. Without
-the plugin, terminal bytes still pass through but shell entries are not
-recorded.
+journal without launching a nested proxy. The zsh and Fish plugins tell it when
+a command starts and ends and provide the command and working directory.
+Zsh additionally records the rendered prompt and expanded command. Without a
+plugin, terminal bytes still pass through but shell entries are not recorded.
 
 ## How recording works
 
@@ -32,7 +32,8 @@ flowchart TB
 ```
 
 TJ inserts the proxy into the existing terminal byte path. The plugin runs
-inside zsh and adds metadata; the command still uses the terminal normally.
+inside the shell and adds metadata; the command still uses the terminal
+normally.
 Blue nodes are TJ components.
 
 The command lifecycle shows when those extra messages appear:
@@ -107,6 +108,8 @@ so it can preserve the application's title while adding the recording marker.
 
 ## Load the plugin
 
+### zsh
+
 Add one line to `~/.zshrc`:
 
 ```zsh
@@ -121,6 +124,24 @@ source "$(brew --prefix)/share/tj/tj.plugin.zsh"
 
 The plugin preserves existing completion handlers.
 
+### Fish
+
+Add one line to `~/.config/fish/config.fish`:
+
+```fish
+source ~/.local/share/tj/tj.plugin.fish
+```
+
+For Homebrew:
+
+```fish
+source "(brew --prefix)/share/tj/tj.plugin.fish"
+```
+
+Fish records the command, cwd, output, and exit status through its
+`fish_preexec` and `fish_postexec` events. It does not currently record the
+rendered prompt or zsh's expanded-command metadata.
+
 ## TUI key binding
 
 While a journal shell is at its prompt, Ctrl-X Ctrl-T opens `tj tui`. Closing
@@ -131,7 +152,7 @@ In an entry's detail view, Enter returns the focused line or selected lines.
 When the browser was opened through the widget, that value is inserted at the
 cursor in the current command line.
 
-Set `TJ_TUI_KEY` before sourcing the plugin to choose another ZLE key sequence,
+In zsh, set `TJ_TUI_KEY` before sourcing the plugin to choose another ZLE key sequence,
 or set it to `none` to install the widget without binding a key:
 
 ```zsh
@@ -139,13 +160,15 @@ export TJ_TUI_KEY='^X^J'
 source ~/.local/share/tj/tj.plugin.zsh
 ```
 
-The widget is named `_tj_tui_widget`, so it can also be bound explicitly with
-`bindkey`.
+The zsh widget is named `_tj_tui_widget`, so it can also be bound explicitly
+with `bindkey`. Fish binds the same Ctrl-X Ctrl-T sequence and uses Fish's
+ordinary key-binding mechanism to customize it.
 
 ## Reference expansion
 
-`"$(tj @REF)"` is the canonical shell form for an entry filesystem path. The
-plugin provides a zsh-only convenience: it rewrites a valid unquoted reference
+`"$(tj @REF)"` is the canonical POSIX-shell form for an entry filesystem path.
+Fish uses its native equivalent, `(tj @REF)`. The zsh plugin provides a
+convenience: it rewrites a valid unquoted reference
 at the start of a shell word when you press Enter:
 
 ```text
@@ -155,6 +178,12 @@ cat @42/out  ->  cat "$(tj @42/out)"
 Tab retains ordinary reference and resource completion, so `@42/<Tab>` offers
 the entry's resources. Quoted words, unresolved names, and words such as
 `user@host` remain unchanged.
+
+Fish does not rewrite bare references. Use the explicit Fish form instead:
+
+```fish
+cat (tj @42/out)
+```
 
 ## Completion
 
@@ -166,14 +195,19 @@ tj hist --<Tab>
 tjctl replay --<Tab>
 ```
 
-The plugin separately completes references:
+The shell plugin separately completes references. In zsh:
 
 ```text
 @42/<Tab>
 ```
 
 Resource completion includes core entry files, `files/`, and published
-resources.
+resources. In Fish, completion also works inside the command substitution:
+
+```text
+tj cat @42/<Tab>
+tj @42/<Tab>
+```
 
 ## Prompt variables
 
@@ -209,7 +243,7 @@ style = 'dimmed white'
 
 ## Terminal titles
 
-At a prompt, the plugin evaluates `TJ_TITLE` using zsh prompt expansion. This
+At a zsh prompt, the plugin evaluates `TJ_TITLE` using zsh prompt expansion. This
 allows forms such as `%3~` for the last three components of the working
 directory and variables such as `$TJ_REF`.
 
