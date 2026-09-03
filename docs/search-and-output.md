@@ -72,13 +72,24 @@ messages and terminal control sequences.
 ## Omit command output explicitly
 
 ```sh
-tj noout -- command args...
+tj filter --noout -- command args...
 ```
 
 The command's output remains visible in the terminal. Its `out` resource
 contains one fixed placeholder:
 
 ```text
+<tj:noout>
+```
+
+Example:
+
+```bash
+$ cat /etc/passwd | tj filter --noout
+# you see the contents on your screen
+
+# But, if you check what was recorded by tj
+$ cat $(tj @-/out)
 <tj:noout>
 ```
 

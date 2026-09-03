@@ -51,7 +51,7 @@ test "application and every command expose generated help" {
         try std.testing.expect(std.mem.indexOf(u8, result.stdout, "source /path/to/tj.plugin.fish") != null);
     }
 
-    const command_names = [_][]const u8{ "tui", "noout", "hist", "last", "cat", "resolve", "complete", "name", "tag", "pin", "rm", "grep" };
+    const command_names = [_][]const u8{ "tui", "filter", "hist", "last", "cat", "resolve", "complete", "name", "tag", "pin", "rm", "grep" };
     for (command_names) |name| {
         const result = try support.runNonTty(gpa, &.{ name, "--help" });
         defer gpa.free(result.stdout);

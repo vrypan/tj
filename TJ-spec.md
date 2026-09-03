@@ -404,7 +404,7 @@ The two flat command surfaces are explicit:
 
 ``` text
 tj tui
-tj hist|cat|grep|name|tag|pin|rm|last|resolve|complete|noout ...
+tj hist|cat|grep|name|tag|pin|rm|last|resolve|complete|filter ...
 
 tjctl new [options] [NAME] [-- COMMAND...]
 tjctl use [options] JOURNAL [-- COMMAND...]
@@ -428,8 +428,9 @@ requires a value. A required-value option without one is invalid; there is no
 implicit value for options such as `grep --color`. `--` ends TJ option parsing
 where a command accepts dash-prefixed operands. For `tjctl new` and `use`, it
 is the only way to begin child argv. Thus `tjctl new make` creates the journal
-named `make`; it does not execute `make`. For `noout`, the separator is also
-mandatory. Neither binary parses options in child argv after that boundary.
+named `make`; it does not execute `make`. For `filter`, `--` starts an optional
+child command; without it, the filter reads standard input. Neither binary
+parses options in child argv after that boundary.
 
 Every command enforces the arity in its published usage. Unknown commands,
 unknown options, missing option values, and missing or extra operands are
@@ -1053,9 +1054,9 @@ The four message forms have distinct producers and roles:
 
 -   `CONTEXT` is a self-contained message normally emitted once per command by
     the zsh `preexec` plugin; it does not open a region.
--   `RESOURCE` is normally emitted by a cooperating program or an output
-    wrapper such as `tj-fence`; it opens a published-resource region.
--   `NOOUT` is emitted by `tj noout`, by TJ's terminal reports (`hist`, `grep`,
+-   `RESOURCE` is normally emitted by a cooperating program or `tj filter
+    --fence`; it opens a published-resource region.
+-   `NOOUT` is emitted by `tj filter --noout`, by TJ's terminal reports (`hist`, `grep`,
     `du`, and `tui`), or by a cooperating program; it opens an omitted-output
     region.
 -   `END` is emitted by the program or wrapper that opened a `RESOURCE` or
@@ -1147,14 +1148,14 @@ want to interpret them.
 Programs that do not emit OSC ELLO still work normally and expose the core
 resources produced by their shell integration.
 
-`tj noout -- command args...` is the user-facing wrapper for a whole command.
-It requires an active journal and a controlling terminal, writes the region
-markers to that terminal, executes the supplied argv directly without a shell,
-and otherwise inherits the caller's cwd, environment, standard streams,
-terminal, and process group. Its result is the child's exit status, or
-`128 + signal` when the child dies from a signal. The wrapper makes a best
-effort to emit `END` after it has emitted `NOOUT`; entry-boundary reset
-handles cases where the wrapper itself dies before it can do so.
+`tj filter --noout -- command args...` is the user-facing wrapper for a whole
+command. It requires an active journal and a controlling terminal, writes the
+region markers to that terminal, executes the supplied argv directly without a
+shell, and otherwise inherits the caller's cwd, environment, standard streams,
+terminal, and process group. Its result is the child's exit status, or `128 +
+signal` when the child dies from a signal. The wrapper makes a best effort to
+emit `END` after it has emitted `NOOUT`; entry-boundary reset handles cases
+where the wrapper itself dies before it can do so.
 
 Noout is explicit and is not inferred from the PTY ECHO flag. Input typed with
 echo disabled is already absent from `out`, and disabling echo is not in

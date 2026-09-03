@@ -77,6 +77,11 @@ const grep_flags = [_]zecli.FlagSpec{
     },
 };
 
+const filter_flags = [_]zecli.FlagSpec{
+    .{ .name = "noout", .description = "Keep visible bytes out of recorded output" },
+    .{ .name = "fence", .description = "Publish triple-backtick blocks as resources" },
+};
+
 const commands = [_]zecli.CommandSpec{
     .{
         .name = "tui",
@@ -84,10 +89,14 @@ const commands = [_]zecli.CommandSpec{
         .usage = "tj tui",
     },
     .{
-        .name = "noout",
-        .description = "Run a command whose visible output is omitted from out",
-        .usage = "tj noout -- COMMAND...",
-        .extra_help = "The `--` separator and at least one command word are required.\n",
+        .name = "filter",
+        .description = "Filter input or a command's output for a journal",
+        .usage = "tj filter (--noout | --fence) [-- COMMAND...]",
+        .flags = &filter_flags,
+        .extra_help =
+        \\Without `-- COMMAND`, filter standard input and write it to standard output.
+        \\`--noout` and `--fence` are mutually exclusive.
+        ++ "\n",
     },
     .{
         .name = "hist",

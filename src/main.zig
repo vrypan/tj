@@ -73,25 +73,14 @@ pub fn main(init: std.process.Init) !u8 {
     };
 
     var child: []const [:0]const u8 = &.{};
-    if (which == .noout) {
+    if (which == .filter) {
         if (command.positionals().len != 0) {
-            try stderr.writeAll(rootErrorMessage(error.MissingNooutSeparator));
+            try stderr.writeAll("tj: filter commands must follow `--`\n\n");
             try zecli.printCommandHelp(arena, stderr, spec);
             try stderr.flush();
             return 2;
         }
-        child = command.passthrough() orelse {
-            try stderr.writeAll(rootErrorMessage(error.MissingNooutSeparator));
-            try zecli.printCommandHelp(arena, stderr, spec);
-            try stderr.flush();
-            return 2;
-        };
-        if (child.len == 0) {
-            try stderr.writeAll(rootErrorMessage(error.MissingNooutCommand));
-            try zecli.printCommandHelp(arena, stderr, spec);
-            try stderr.flush();
-            return 2;
-        }
+        child = command.passthrough() orelse &.{};
     } else if (which != .grep and command.passthrough() != null) {
         try stderr.writeAll("tj: invalid arguments for this subcommand\n\n");
         try zecli.printCommandHelp(arena, stderr, spec);
@@ -122,14 +111,6 @@ pub fn main(init: std.process.Init) !u8 {
     return frontend.flushStdout(&stdout_file, status);
 }
 
-fn rootErrorMessage(err: anyerror) []const u8 {
-    return switch (err) {
-        error.MissingNooutSeparator => "tj: noout requires `--` before the command\n\n",
-        error.MissingNooutCommand => "tj: noout needs a command after `--`\n\n",
-        else => "tj: invalid command line\n\n",
-    };
-}
-
 fn isUsageError(err: anyerror) bool {
     return switch (err) {
         error.MissingArgument,
@@ -150,11 +131,11 @@ fn commandErrorMessage(which: cli.CommandName, err: anyerror) []const u8 {
         error.TerminalSetupFailed, error.ReadFailed, error.PollFailed => "tj: tui terminal session failed\n",
         else => "tj: cannot open the journal browser\n",
     };
-    if (which == .noout) return switch (err) {
-        error.NotInJournal => "tj: noout must run inside a tj journal writer\n",
-        error.NoControllingTerminal => "tj: noout needs a controlling terminal\n",
+    if (which == .filter) return switch (err) {
+        error.NotInJournal => "tj: filter --noout must run inside a tj journal writer\n",
+        error.NoControllingTerminal => "tj: filter --noout needs a controlling terminal\n",
         error.ForkFailed => "tj: cannot fork\n",
-        else => "tj: cannot start noout command\n",
+        else => "tj: cannot run filter\n",
     };
     if (which == .grep) switch (err) {
         error.NoControllingTerminal, error.NotATerminal => return "tj: grep --tui needs an interactive terminal\n",

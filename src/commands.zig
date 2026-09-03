@@ -8,7 +8,7 @@ const Io = std.Io;
 const zecli = @import("zecli");
 
 const cli = @import("cli.zig");
-const noout = @import("noout.zig");
+const cmd_filter = @import("cmd_filter.zig");
 const context = @import("context.zig");
 const cmd_grep = @import("cmd_grep.zig");
 const cmd_history = @import("cmd_history.zig");
@@ -31,10 +31,7 @@ pub fn run(
 ) !u8 {
     switch (which) {
         .tui => try cmd_tui.run(gpa, io, home),
-        .noout => {
-            const result = try noout.run(gpa, child);
-            return result.exit_code;
-        },
+        .filter => return cmd_filter.run(gpa, io, parsed, child, out),
         .hist => try cmd_history.listInteractions(gpa, io, home, parsed, out),
         .last => try cmd_history.printLast(gpa, io, home, out),
         .resolve => try cmd_reference.resolveReference(gpa, io, home, parsed, out),

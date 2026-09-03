@@ -58,6 +58,58 @@ test "a noout OSC region stays visible but is replaced in out" {
     try std.testing.expect(std.mem.indexOf(u8, meta, "VISIBLE-BUT-OMITTED") == null);
 }
 
+test "tj filter --fence preserves markdown while publishing fenced resources" {
+    if (!support.haveZsh()) return error.SkipZigTest;
+    const gpa = std.testing.allocator;
+
+    var journal = try support.Journal.open(gpa);
+    defer journal.close();
+    const input = try journal.fixture(gpa, "fenced-response.md", "before\n```csv\none,two\n```\nafter\n");
+    defer gpa.free(input);
+    const producer = try journal.fixture(gpa, "fenced-command.sh", "printf 'child-before\\n```json\\n{\"ok\":true}\\n```\\nchild-after\\n'\n");
+    defer gpa.free(producer);
+
+    const child = try support.spawnJournalZsh(gpa, &journal);
+    var transcript: std.ArrayList(u8) = .empty;
+    defer transcript.deinit(gpa);
+    try support.setupJournalZsh(gpa, child, &transcript);
+
+    var command: std.ArrayList(u8) = .empty;
+    defer command.deinit(gpa);
+    try command.appendSlice(gpa, "cat -- ");
+    try support.appendShellQuoted(gpa, &command, input);
+    try command.appendSlice(gpa, " | command \"$TJ\" filter --fence");
+    try command.append(gpa, '\n');
+
+    var from = transcript.items.len;
+    try child.write(command.items);
+    try std.testing.expect(try child.readUntilFrom(gpa, &transcript, from, support.test_prompt, support.timeout_ms));
+    from = transcript.items.len;
+    command.clearRetainingCapacity();
+    try command.appendSlice(gpa, "command \"$TJ\" filter --fence -- /bin/sh ");
+    try support.appendShellQuoted(gpa, &command, producer);
+    try command.append(gpa, '\n');
+    try child.write(command.items);
+    try std.testing.expect(try child.readUntilFrom(gpa, &transcript, from, support.test_prompt, support.timeout_ms));
+    try child.write("exit 0\n");
+    try std.testing.expectEqual(@as(u8, 0), try child.finish(gpa, &transcript, support.timeout_ms));
+
+    const out = try journal.read(gpa, "1/out");
+    defer gpa.free(out);
+    try std.testing.expect(std.mem.indexOf(u8, out, "before") != null);
+    try std.testing.expect(std.mem.indexOf(u8, out, "```csv") != null);
+    try std.testing.expect(std.mem.indexOf(u8, out, "one,two") != null);
+    try std.testing.expect(std.mem.indexOf(u8, out, "after") != null);
+    try std.testing.expect(std.mem.indexOf(u8, out, "3110;") == null);
+
+    const csv = try journal.read(gpa, "1/files/1.csv");
+    defer gpa.free(csv);
+    try std.testing.expectEqualStrings("one,two\n", csv);
+    const json = try journal.read(gpa, "2/files/1.json");
+    defer gpa.free(json);
+    try std.testing.expectEqualStrings("{\"ok\":true}\n", json);
+}
+
 test "an unfinished noout OSC region cannot suppress the next entry" {
     if (!support.haveZsh()) return error.SkipZigTest;
     const gpa = std.testing.allocator;
@@ -84,7 +136,7 @@ test "an unfinished noout OSC region cannot suppress the next entry" {
     try std.testing.expect(std.mem.indexOf(u8, second_out, "NEXT-INTERACTION-RECORDED") != null);
 }
 
-test "tj noout preserves output argv and child statuses while omitting bytes" {
+test "tj filter --noout preserves output argv and child statuses while omitting bytes" {
     if (!support.haveZsh()) return error.SkipZigTest;
     const gpa = std.testing.allocator;
 
@@ -106,7 +158,7 @@ test "tj noout preserves output argv and child statuses while omitting bytes" {
     try support.setupJournalZsh(gpa, child, &transcript);
     const command = try std.fmt.allocPrint(
         gpa,
-        "cd /; NOOUT_TEST_ENV=preserved command \"$TJ\" noout -- /bin/sh '{s}' 'two words' '*' --flag --help",
+        "cd /; NOOUT_TEST_ENV=preserved command \"$TJ\" filter --noout -- /bin/sh '{s}' 'two words' '*' --flag --help",
         .{producer},
     );
     defer gpa.free(command);
@@ -116,13 +168,16 @@ test "tj noout preserves output argv and child statuses while omitting bytes" {
     try child.write("\n");
     try std.testing.expect(try child.readUntilFrom(gpa, &transcript, from, support.test_prompt, support.timeout_ms));
     from = transcript.items.len;
-    try child.write("command \"$TJ\" noout -- /bin/sh -c 'exit 7'\n");
+    try child.write("command \"$TJ\" filter --noout -- /bin/sh -c 'exit 7'\n");
     try std.testing.expect(try child.readUntilFrom(gpa, &transcript, from, support.test_prompt, support.timeout_ms));
     from = transcript.items.len;
-    try child.write("command \"$TJ\" noout -- /bin/sh -c 'kill -TERM $$'\n");
+    try child.write("command \"$TJ\" filter --noout -- /bin/sh -c 'kill -TERM $$'\n");
     try std.testing.expect(try child.readUntilFrom(gpa, &transcript, from, support.test_prompt, support.timeout_ms));
     from = transcript.items.len;
-    try child.write("command \"$TJ\" noout -- /definitely/not/a/tj-command\n");
+    try child.write("command \"$TJ\" filter --noout -- /definitely/not-a-tj-command\n");
+    try std.testing.expect(try child.readUntilFrom(gpa, &transcript, from, support.test_prompt, support.timeout_ms));
+    from = transcript.items.len;
+    try child.write("printf 'STDIN-NOOUT\\n' | command \"$TJ\" filter --noout\n");
     try std.testing.expect(try child.readUntilFrom(gpa, &transcript, from, support.test_prompt, support.timeout_ms));
     try child.write("exit 0\n");
     try std.testing.expectEqual(@as(u8, 0), try child.finish(gpa, &transcript, support.timeout_ms));
@@ -134,6 +189,7 @@ test "tj noout preserves output argv and child statuses while omitting bytes" {
     try std.testing.expect(std.mem.indexOf(u8, visible, "WRAPPER-STDOUT:two words|*|--flag|--help") != null);
     try std.testing.expect(std.mem.indexOf(u8, visible, "WRAPPER-STDERR") != null);
     try std.testing.expect(std.mem.indexOf(u8, visible, "WRAPPER-CONTEXT:/|preserved|tty") != null);
+    try std.testing.expect(std.mem.indexOf(u8, visible, "STDIN-NOOUT") != null);
     try std.testing.expect(std.mem.indexOf(u8, visible, "3110;") == null);
 
     const first_out = try journal.read(gpa, "1/out");
@@ -141,6 +197,10 @@ test "tj noout preserves output argv and child statuses while omitting bytes" {
     try std.testing.expect(std.mem.indexOf(u8, first_out, "<tj:noout>") != null);
     try std.testing.expect(std.mem.indexOf(u8, first_out, "WRAPPER-STDOUT") == null);
     try std.testing.expect(std.mem.indexOf(u8, first_out, "WRAPPER-STDERR") == null);
+    const stdin_out = try journal.read(gpa, "5/out");
+    defer gpa.free(stdin_out);
+    try std.testing.expect(std.mem.indexOf(u8, stdin_out, "<tj:noout>") != null);
+    try std.testing.expect(std.mem.indexOf(u8, stdin_out, "STDIN-NOOUT") == null);
     for ([_]struct { path: []const u8, want: []const u8 }{
         .{ .path = "1/rc", .want = "0\n" },
         .{ .path = "2/rc", .want = "7\n" },
@@ -153,25 +213,32 @@ test "tj noout preserves output argv and child statuses while omitting bytes" {
     }
 }
 
-test "tj noout syntax and journal preconditions fail without emitting OSC" {
+test "tj filter validates its mode and noout journal preconditions" {
     const gpa = std.testing.allocator;
     support.leaveJournal();
 
-    const missing_separator = try support.runNonTty(gpa, &.{"noout"});
-    defer gpa.free(missing_separator.stdout);
-    defer gpa.free(missing_separator.stderr);
-    try std.testing.expectEqual(@as(u8, 2), missing_separator.term.exited);
-    try std.testing.expect(std.mem.indexOf(u8, missing_separator.stdout, "3110;") == null);
-    try std.testing.expect(std.mem.indexOf(u8, missing_separator.stderr, "requires `--`") != null);
+    const missing_mode = try support.runNonTty(gpa, &.{"filter"});
+    defer gpa.free(missing_mode.stdout);
+    defer gpa.free(missing_mode.stderr);
+    try std.testing.expectEqual(@as(u8, 2), missing_mode.term.exited);
+    try std.testing.expect(std.mem.indexOf(u8, missing_mode.stdout, "3110;") == null);
+    try std.testing.expect(std.mem.indexOf(u8, missing_mode.stderr, "Usage: tj filter") != null);
 
-    const misplaced_command = try support.runNonTty(gpa, &.{ "noout", "/bin/true" });
+    const conflicting_modes = try support.runNonTty(gpa, &.{ "filter", "--noout", "--fence" });
+    defer gpa.free(conflicting_modes.stdout);
+    defer gpa.free(conflicting_modes.stderr);
+    try std.testing.expectEqual(@as(u8, 2), conflicting_modes.term.exited);
+    try std.testing.expect(std.mem.indexOf(u8, conflicting_modes.stdout, "3110;") == null);
+    try std.testing.expect(std.mem.indexOf(u8, conflicting_modes.stderr, "Usage: tj filter") != null);
+
+    const misplaced_command = try support.runNonTty(gpa, &.{ "filter", "--noout", "/bin/true" });
     defer gpa.free(misplaced_command.stdout);
     defer gpa.free(misplaced_command.stderr);
     try std.testing.expectEqual(@as(u8, 2), misplaced_command.term.exited);
     try std.testing.expect(std.mem.indexOf(u8, misplaced_command.stdout, "3110;") == null);
-    try std.testing.expect(std.mem.indexOf(u8, misplaced_command.stderr, "too many arguments") != null);
+    try std.testing.expect(std.mem.indexOf(u8, misplaced_command.stderr, "Usage: tj filter") != null);
 
-    const outside = try support.runNonTty(gpa, &.{ "noout", "--", "/bin/true" });
+    const outside = try support.runNonTty(gpa, &.{ "filter", "--noout", "--", "/bin/true" });
     defer gpa.free(outside.stdout);
     defer gpa.free(outside.stderr);
     try std.testing.expectEqual(@as(u8, 1), outside.term.exited);

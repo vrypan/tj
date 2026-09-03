@@ -32,11 +32,11 @@ journal to supply commands and results that already exist.
 
 ## Publish fenced agent output
 
-`tj-fence` passes an agent response through unchanged and publishes fenced code
+`tj filter --fence` passes an agent response through unchanged and publishes fenced code
 blocks as resources:
 
 ```sh
-agent-command "create a CSV and a script" | tj-fence
+agent-command "create a CSV and a script" | tj filter --fence
 tj cat @-/files/1.csv
 tj cat @-/files/2.sh
 ```
