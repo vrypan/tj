@@ -8,7 +8,7 @@ const report = @import("../report.zig");
 const annotations = @import("../annotations.zig");
 const page_module = @import("page.zig");
 
-const header_style: zooi.Style = .{ .reverse = true, .bold = true };
+const header_style: zooi.Style = .{ .bold = true };
 const cursor_style: zooi.Style = .{ .reverse = true };
 const selected_style: zooi.Style = .{ .fg = .{ .ansi = 6 } };
 const focused_selected_style: zooi.Style = .{ .reverse = true, .fg = .{ .ansi = 6 } };
@@ -19,7 +19,7 @@ const footer_style: zooi.Style = .{ .dim = true };
 
 pub fn draw(journal: []const u8, model: anytype, page: *const page_module.Page, screen: *zooi.Screen) !void {
     screen.begin();
-    if (model.size.rows < 3 or model.size.cols < 24) {
+    if (model.size.rows < 4 or model.size.cols < 24) {
         screen.move(0, 0);
         screen.write("terminal too small");
         return screen.present();
@@ -38,7 +38,7 @@ pub fn draw(journal: []const u8, model: anytype, page: *const page_module.Page, 
 
     for (page.rows) |*row| {
         if (row.index < page.range.start or row.index >= page.range.end) continue;
-        const screen_row = row.index - page.range.start + 1;
+        const screen_row = row.index - page.range.start + 2;
         if (screen_row > model.listRows()) continue;
         const focused = row.index == model.viewport.cursor;
         const picked = model.isSelected(row.index);
@@ -119,7 +119,7 @@ fn drawDetail(model: anytype, screen: *zooi.Screen) !void {
     const rows = model.listRows();
 
     var header_buf: [96]u8 = undefined;
-    const header = std.fmt.bufPrint(&header_buf, " entry @{d}  details ", .{detail.number}) catch " entry details ";
+    const header = std.fmt.bufPrint(&header_buf, "entry @{d}  details ", .{detail.number}) catch "entry details ";
     screen.move(0, 0);
     screen.writeStyled(header, header_style);
     screen.fillToEndOfLine(header_style);
@@ -142,9 +142,9 @@ fn drawDetail(model: anytype, screen: *zooi.Screen) !void {
             .{ .bold = true, .fg = .{ .ansi = 3 } }
         else
             .{};
-        screen.move(@intCast(row + 1), 0);
+        screen.move(@intCast(row + 2), 0);
         if (focused) screen.fillToEndOfLine(style);
-        screen.move(@intCast(row + 1), 0);
+        screen.move(@intCast(row + 2), 0);
         if (output_separator) {
             const label = " out ";
             const columns: usize = model.size.cols;
@@ -183,9 +183,9 @@ fn drawHeader(journal: []const u8, model: anytype, screen: *zooi.Screen) void {
     var buffer: [160]u8 = undefined;
     const noun = if (model.allowed_numbers != null) "matches" else "entries";
     const text = if (model.selectedCount() == 0)
-        std.fmt.bufPrint(&buffer, " tj  {s}  {d} {s} ", .{ journal, model.count, noun }) catch " tj "
+        std.fmt.bufPrint(&buffer, "tj  {s}  {d} {s} ", .{ journal, model.count, noun }) catch "tj "
     else
-        std.fmt.bufPrint(&buffer, " tj  {s}  {d} {s}  {d} selected ", .{ journal, model.count, noun, model.selectedCount() }) catch " tj ";
+        std.fmt.bufPrint(&buffer, "tj  {s}  {d} {s}  {d} selected ", .{ journal, model.count, noun, model.selectedCount() }) catch "tj ";
     screen.move(0, 0);
     screen.writeStyled(text, header_style);
     screen.fillToEndOfLine(header_style);
@@ -246,7 +246,7 @@ const TestModel = struct {
     detail_selected: std.DynamicBitSetUnmanaged = .{},
 
     pub fn listRows(self: *const TestModel) usize {
-        return if (self.size.rows < 3) 0 else self.size.rows - 2;
+        return if (self.size.rows < 4) 0 else self.size.rows - 3;
     }
 
     pub fn isSelected(self: *const TestModel, index: usize) bool {
@@ -280,14 +280,14 @@ fn testScreen(rows: u16, cols: u16) !struct { zooi.Screen, std.posix.fd_t } {
     return .{ zooi.Screen.init(std.testing.allocator, fd, .{ .rows = rows, .cols = cols }), fd };
 }
 
-test "entry render fills header and focused row through the final cell" {
+test "entry render leaves a blank row after the bold header" {
     const gpa = std.testing.allocator;
     var selected = try std.DynamicBitSetUnmanaged.initEmpty(gpa, 2);
     defer selected.deinit(gpa);
     var model: TestModel = .{
         .numbers = &.{ 7, 12 },
         .count = 2,
-        .size = .{ .rows = 4, .cols = 40 },
+        .size = .{ .rows = 5, .cols = 40 },
         .selected = selected,
     };
     const failed_annotation: annotations.Entry = .{ .number = 12 };
@@ -307,19 +307,20 @@ test "entry render fills header and focused row through the final cell" {
     };
     const page: page_module.Page = .{ .range = .{ .start = 0, .end = 2 }, .rows = &rows, .valid = true };
 
-    var screen_and_fd = try testScreen(4, 40);
+    var screen_and_fd = try testScreen(5, 40);
     defer _ = std.posix.system.close(screen_and_fd[1]);
     defer screen_and_fd[0].deinit();
     try draw("work", &model, &page, &screen_and_fd[0]);
 
-    try std.testing.expectEqual(zooi.Size{ .rows = 4, .cols = 40 }, zooi.testing.presentedSize(&screen_and_fd[0]).?);
-    try std.testing.expect(zooi.testing.inspectCell(&screen_and_fd[0], 0, 39).?.style.reverse);
-    try std.testing.expect(zooi.testing.inspectCell(&screen_and_fd[0], 0, 39).?.style.bold);
-    try std.testing.expect(zooi.testing.inspectCell(&screen_and_fd[0], 1, 39).?.style.reverse);
-    try std.testing.expectEqual(@as(?u8, 1), zooi.testing.inspectCell(&screen_and_fd[0], 2, 3).?.style.fg.?.ansi);
+    try std.testing.expectEqual(zooi.Size{ .rows = 5, .cols = 40 }, zooi.testing.presentedSize(&screen_and_fd[0]).?);
+    try std.testing.expect(zooi.testing.inspectCell(&screen_and_fd[0], 0, 0).?.style.bold);
+    try std.testing.expect(!zooi.testing.inspectCell(&screen_and_fd[0], 0, 39).?.style.reverse);
+    try std.testing.expectEqualStrings(" ", zooi.testing.inspectCell(&screen_and_fd[0], 1, 0).?.text);
+    try std.testing.expect(zooi.testing.inspectCell(&screen_and_fd[0], 2, 39).?.style.reverse);
+    try std.testing.expectEqual(@as(?u8, 1), zooi.testing.inspectCell(&screen_and_fd[0], 3, 3).?.style.fg.?.ansi);
 }
 
-test "detail render fills the focused logical line" {
+test "detail render leaves a blank row after the bold header" {
     const gpa = std.testing.allocator;
     var selected = try std.DynamicBitSetUnmanaged.initEmpty(gpa, 2);
     defer selected.deinit(gpa);
@@ -332,7 +333,7 @@ test "detail render fills the focused logical line" {
     var model: TestModel = .{
         .numbers = &.{1},
         .count = 1,
-        .size = .{ .rows = 4, .cols = 32 },
+        .size = .{ .rows = 5, .cols = 32 },
         .mode = .detail,
         .selected = selected,
         .detail = .{ .number = 1, .document = "cmd\n=== out ===", .items = &items },
@@ -341,12 +342,14 @@ test "detail render fills the focused logical line" {
     };
     const page: page_module.Page = .{};
 
-    var screen_and_fd = try testScreen(4, 32);
+    var screen_and_fd = try testScreen(5, 32);
     defer _ = std.posix.system.close(screen_and_fd[1]);
     defer screen_and_fd[0].deinit();
     try draw("work", &model, &page, &screen_and_fd[0]);
 
-    try std.testing.expect(zooi.testing.inspectCell(&screen_and_fd[0], 0, 31).?.style.reverse);
-    try std.testing.expect(zooi.testing.inspectCell(&screen_and_fd[0], 2, 31).?.style.reverse);
-    try std.testing.expectEqualStrings("o", zooi.testing.inspectCell(&screen_and_fd[0], 2, 0).?.text);
+    try std.testing.expect(zooi.testing.inspectCell(&screen_and_fd[0], 0, 0).?.style.bold);
+    try std.testing.expect(!zooi.testing.inspectCell(&screen_and_fd[0], 0, 31).?.style.reverse);
+    try std.testing.expectEqualStrings(" ", zooi.testing.inspectCell(&screen_and_fd[0], 1, 0).?.text);
+    try std.testing.expect(zooi.testing.inspectCell(&screen_and_fd[0], 3, 31).?.style.reverse);
+    try std.testing.expectEqualStrings("o", zooi.testing.inspectCell(&screen_and_fd[0], 3, 0).?.text);
 }

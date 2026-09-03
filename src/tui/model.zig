@@ -136,8 +136,8 @@ pub const Model = struct {
     }
 
     pub fn listRows(self: *const Model) usize {
-        if (self.size.rows < 3) return 0;
-        return self.size.rows - 2;
+        if (self.size.rows < 4) return 0;
+        return self.size.rows - 3;
     }
 
     pub fn setStatus(self: *Model, comptime fmt: []const u8, args: anytype) void {
