@@ -29,6 +29,17 @@ pub fn isolateJournal() void {
     journal_isolated = true;
 
     sys.setEnv("TJ_HOME", ".zig-cache/tj-test-home");
+    // Fixtures invoke tjctl by its absolute installed path. A normal install
+    // places tj alongside it on PATH, so make child shells see that same
+    // layout. This is required for canonical `$(tj @REF)` and Fish `(tj @REF)`
+    // forms, not just the zsh convenience rewrite.
+    if (std.fs.path.dirname(tj)) |bin_dir| {
+        const inherited_path = sys.env("PATH") orelse "";
+        const path = std.heap.page_allocator.allocSentinel(u8, inherited_path.len + 1 + bin_dir.len, 0) catch unreachable;
+        defer std.heap.page_allocator.free(path);
+        _ = std.fmt.bufPrint(path, "{s}:{s}", .{ inherited_path, bin_dir }) catch unreachable;
+        sys.setEnv("PATH", path);
+    }
     // Inherited from the developer's environment otherwise, which would make
     // `@N` resolve against whatever journal they happen to be writing.
     sys.setEnv("TJ_JOURNAL", "");
