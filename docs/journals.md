@@ -111,8 +111,8 @@ tjctl replay project-work --from 20 --to 30
 tjctl replay project-work --duration
 ```
 
-Replay suppresses terminal bells. `tj-tape` converts replay output for tools
-that consume terminal recordings.
+Replay suppresses terminal bells. The optional `contrib/tj-tape` script
+generates input for tools that consume terminal recordings.
 
 ## List and identify journals
 

@@ -37,7 +37,7 @@ class Tj < Formula
   end
 
   test do
-    %w[tj tjctl tj-fence tj-grep tj-tape].each do |tool|
+    %w[tj tjctl].each do |tool|
       assert_path_exists bin/tool
     end
 

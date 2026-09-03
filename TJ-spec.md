@@ -1031,9 +1031,9 @@ The result is status 0 when any line matched, 1 for no matches, and 2 for grep
 argument errors or current-journal mode without a current journal. Storage and
 I/O errors use TJ's ordinary status-1 diagnostic path.
 
-The optional `tj-grep` companion remains the ripgrep-powered interface for
-regular expressions, context, line numbers, and arbitrary `rg` options; it is
-not part of the native fixed-string contract.
+The optional `contrib/tj-grep` script provides ripgrep regular expressions,
+context, line numbers, and arbitrary `rg` options; it is not part of the
+native fixed-string contract.
 
 ## Semantic output regions
 

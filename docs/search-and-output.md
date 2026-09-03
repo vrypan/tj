@@ -40,8 +40,9 @@ tj grep --color=never error
 ```
 
 `auto` uses color only on a terminal, `always` emits color for pipes too, and
-`never` disables it. The default is `never`. The installed `tj-grep` helper is
-kept for compatibility; new scripts should use `tj grep`.
+`never` disables it. The default is `never`. The optional
+`contrib/tj-grep` script adds ripgrep regular expressions, context, line
+numbers, and arbitrary `rg` options; new scripts should use `tj grep`.
 
 When shown directly in a journal terminal, grep and history enclose their own
 display in a noout region so search results do not become input to the next

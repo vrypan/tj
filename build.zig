@@ -24,12 +24,9 @@ pub fn build(b: *std.Build) void {
     b.installArtifact(tjctl_exe);
 
     // Runtime files belong to the Zig install graph so local installation,
-    // cross-build prefixes, and release archives all contain the same tools.
+    // cross-build prefixes, and release archives all contain the same files.
     b.installFile("shell/zsh/tj.plugin.zsh", "share/tj/tj.plugin.zsh");
     b.installFile("shell/fish/tj.plugin.fish", "share/tj/tj.plugin.fish");
-    b.installBinFile("contrib/tj-fence", "tj-fence");
-    b.installBinFile("contrib/tj-grep", "tj-grep");
-    b.installBinFile("contrib/tj-tape", "tj-tape");
 
     // Generate command, option, and runtime-reference completion scripts with
     // a host executable even when `tj` itself is being cross-compiled; the
