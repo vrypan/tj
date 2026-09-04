@@ -1,4 +1,4 @@
-#include "sqlite_shim.h"
+#include "shim.h"
 
 int tj_sqlite_bind_text(sqlite3_stmt *statement, int index,
                         const char *value, int length) {

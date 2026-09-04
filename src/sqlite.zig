@@ -4,7 +4,7 @@ const std = @import("std");
 
 pub const c = @cImport({
     @cInclude("sqlite3.h");
-    @cInclude("sqlite_shim.h");
+    @cInclude("shim.h");
 });
 
 pub const Error = error{

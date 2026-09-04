@@ -194,11 +194,11 @@ fn applicationModule(
     });
     module.addImport("zecli", zecli.module("cli"));
     module.addIncludePath(b.path("vendor/sqlite"));
-    module.addIncludePath(b.path("src"));
+    module.addIncludePath(b.path("src/sqlite"));
     module.addCSourceFile(.{
         .file = b.path("vendor/sqlite/sqlite3.c"),
         .flags = &.{ "-std=c99", "-DSQLITE_THREADSAFE=1", "-DSQLITE_OMIT_LOAD_EXTENSION", "-DSQLITE_DQS=0" },
     });
-    module.addCSourceFile(.{ .file = b.path("src/sqlite_shim.c"), .flags = &.{"-std=c99"} });
+    module.addCSourceFile(.{ .file = b.path("src/sqlite/shim.c"), .flags = &.{"-std=c99"} });
     return module;
 }
