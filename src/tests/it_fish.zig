@@ -10,27 +10,28 @@ test "fish records UTF-8 commands and resolves canonical path substitutions" {
     var journal = try support.Journal.open(gpa);
     defer journal.close();
     const child = try support.spawnJournalFish(gpa, &journal);
-    var out: std.ArrayList(u8) = .empty;
-    defer out.deinit(gpa);
-    try support.setupJournalFish(gpa, child, &out);
+    var terminal = support.TerminalSession.init(gpa, child);
+    defer terminal.deinit();
+    const out = &terminal.transcript;
+    try terminal.setupFish();
 
     var from = out.items.len;
-    try child.write("printf 'fish-π\\n'\n");
-    try std.testing.expect(try child.readUntilFrom(gpa, &out, from, "fish-π", support.timeout_ms));
-    try std.testing.expect(try child.readUntilFrom(gpa, &out, from, support.test_prompt, support.timeout_ms));
+    try terminal.write("printf 'fish-π\\n'\n");
+    try terminal.expectFrom(from, "fish-π");
+    try terminal.expectPromptFrom(from);
 
     from = out.items.len;
-    try child.write("cat (tj @1/out)\n");
-    try std.testing.expect(try child.readUntilFrom(gpa, &out, from, "fish-π", support.timeout_ms));
-    try std.testing.expect(try child.readUntilFrom(gpa, &out, from, support.test_prompt, support.timeout_ms));
+    try terminal.write("cat (tj @1/out)\n");
+    try terminal.expectFrom(from, "fish-π");
+    try terminal.expectPromptFrom(from);
 
     from = out.items.len;
-    try child.write("complete -C 'cat (tj @1/'\n");
-    try std.testing.expect(try child.readUntilFrom(gpa, &out, from, "@1/out", support.timeout_ms));
-    try std.testing.expect(try child.readUntilFrom(gpa, &out, from, support.test_prompt, support.timeout_ms));
+    try terminal.write("complete -C 'cat (tj @1/'\n");
+    try terminal.expectFrom(from, "@1/out");
+    try terminal.expectPromptFrom(from);
 
-    try child.write("exit 0\n");
-    _ = try child.finish(gpa, &out, support.timeout_ms);
+    try terminal.write("exit 0\n");
+    _ = try terminal.finish();
 
     const first = try journal.read(gpa, "1/cmd");
     defer gpa.free(first);
@@ -53,25 +54,26 @@ test "fish key binding keeps the tui attached to its terminal" {
     var journal = try support.Journal.open(gpa);
     defer journal.close();
     const child = try support.spawnJournalFish(gpa, &journal);
-    var out: std.ArrayList(u8) = .empty;
-    defer out.deinit(gpa);
-    try support.setupJournalFish(gpa, child, &out);
+    var terminal = support.TerminalSession.init(gpa, child);
+    defer terminal.deinit();
+    const out = &terminal.transcript;
+    try terminal.setupFish();
 
     var from = out.items.len;
-    try child.write("echo FISH_TUI_FIXTURE\n");
-    try std.testing.expect(try child.readUntilFrom(gpa, &out, from, support.test_prompt, support.timeout_ms));
+    try terminal.write("echo FISH_TUI_FIXTURE\n");
+    try terminal.expectPromptFrom(from);
 
     from = out.items.len;
-    try child.write("\x18\x14");
-    try std.testing.expect(try child.readUntilFrom(gpa, &out, from, " entries", support.timeout_ms));
+    try terminal.write("\x18\x14");
+    try terminal.expectFrom(from, " entries");
     const drawn = out.items.len;
-    try std.testing.expect(!try child.readUntilFrom(gpa, &out, drawn, "\x00", 300));
+    try std.testing.expect(!try terminal.waitFrom(drawn, "\x00", 300));
     try std.testing.expect(std.mem.indexOf(u8, out.items[from..], "\x1b[?1049l") == null);
 
     from = out.items.len;
-    try child.write("q");
-    try std.testing.expect(try child.readUntilFrom(gpa, &out, from, support.test_prompt, support.timeout_ms));
+    try terminal.write("q");
+    try terminal.expectPromptFrom(from);
 
-    try child.write("exit 0\n");
-    _ = try child.finish(gpa, &out, support.timeout_ms);
+    try terminal.write("exit 0\n");
+    _ = try terminal.finish();
 }

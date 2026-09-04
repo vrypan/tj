@@ -16,15 +16,16 @@ test "full-screen output reaches the terminal but not the journal" {
     defer journal.close();
 
     const child = try support.spawnJournalZsh(gpa, &journal);
-    var out: std.ArrayList(u8) = .empty;
-    defer out.deinit(gpa);
+    var terminal = support.TerminalSession.init(gpa, child);
+    defer terminal.deinit();
+    const out = &terminal.transcript;
 
-    try support.setupJournalZsh(gpa, child, &out);
+    try terminal.setupZsh("");
     const from = out.items.len;
-    try child.write("printf 'BEFORE\\n\\033[?1049hHIDDEN-PAINTING\\033[?1049lAFTER\\n'\n");
-    try std.testing.expect(try child.readUntilFrom(gpa, &out, from, support.test_prompt, support.timeout_ms));
-    try child.write("exit\n");
-    try std.testing.expectEqual(@as(u8, 0), try child.finish(gpa, &out, support.timeout_ms));
+    try terminal.write("printf 'BEFORE\\n\\033[?1049hHIDDEN-PAINTING\\033[?1049lAFTER\\n'\n");
+    try terminal.expectPromptFrom(from);
+    try terminal.write("exit\n");
+    try std.testing.expectEqual(@as(u8, 0), try terminal.finish());
 
     // Filtering applies to the journal only: the program must render exactly
     // as it would without support.tj.

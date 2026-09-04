@@ -146,25 +146,26 @@ test "terminal history omits its listing while piped history remains recordable"
     defer journal.close();
 
     const child = try support.spawnJournalZsh(gpa, &journal);
-    var transcript: std.ArrayList(u8) = .empty;
-    defer transcript.deinit(gpa);
-    try support.setupJournalZsh(gpa, child, &transcript);
+    var terminal = support.TerminalSession.init(gpa, child);
+    defer terminal.deinit();
+    const transcript = &terminal.transcript;
+    try terminal.setupZsh("");
 
     var from = transcript.items.len;
-    try child.write("printf 'HIST_NOOUT_PAYLOAD_012\\n'\n");
-    try std.testing.expect(try child.readUntilFrom(gpa, &transcript, from, support.test_prompt, support.timeout_ms));
+    try terminal.write("printf 'HIST_NOOUT_PAYLOAD_012\\n'\n");
+    try terminal.expectPromptFrom(from);
 
     from = transcript.items.len;
-    try child.write("command \"$TJ\" hist\n");
-    try std.testing.expect(try child.readUntilFrom(gpa, &transcript, from, "HIST_NOOUT_PAYLOAD_012", support.timeout_ms));
-    try std.testing.expect(try child.readUntilFrom(gpa, &transcript, from, support.test_prompt, support.timeout_ms));
+    try terminal.write("command \"$TJ\" hist\n");
+    try terminal.expectFrom(from, "HIST_NOOUT_PAYLOAD_012");
+    try terminal.expectPromptFrom(from);
 
     from = transcript.items.len;
-    try child.write("command \"$TJ\" hist | cat\n");
-    try std.testing.expect(try child.readUntilFrom(gpa, &transcript, from, "HIST_NOOUT_PAYLOAD_012", support.timeout_ms));
-    try std.testing.expect(try child.readUntilFrom(gpa, &transcript, from, support.test_prompt, support.timeout_ms));
-    try child.write("exit 0\n");
-    try std.testing.expectEqual(@as(u8, 0), try child.finish(gpa, &transcript, support.timeout_ms));
+    try terminal.write("command \"$TJ\" hist | cat\n");
+    try terminal.expectFrom(from, "HIST_NOOUT_PAYLOAD_012");
+    try terminal.expectPromptFrom(from);
+    try terminal.write("exit 0\n");
+    try std.testing.expectEqual(@as(u8, 0), try terminal.finish());
 
     const direct_out = try journal.read(gpa, "2/out");
     defer gpa.free(direct_out);
@@ -232,6 +233,8 @@ test "history shows positional annotation flags size UTC date and wrapped comman
     try std.testing.expect(std.mem.indexOf(u8, plain_result.stdout, noout.begin_marker) == null);
     try std.testing.expect(std.mem.indexOfScalar(u8, plain_result.stdout, 0x1b) == null);
 
+    // Keep this child raw: the PTY-rendered byte stream itself is the subject,
+    // not an interactive journal shell that needs setup or prompt handling.
     const terminal_child = try support.spawnTj(gpa, &.{
         "/usr/bin/env", "-u", "NO_COLOR", "TERM=xterm-256color", support.tj, "--home", home, "hist",
     }, 24, 48);
@@ -449,14 +452,15 @@ test "tag accepts leading target lists before multiple tags" {
     // the range remains @ syntax. Both forms must stay in the leading target
     // sequence, with BUG and parser recognized as tags.
     const child = try support.spawnContinuedJournalZsh(gpa, &journal, id);
-    var transcript: std.ArrayList(u8) = .empty;
-    defer transcript.deinit(gpa);
-    try support.setupJournalZsh(gpa, child, &transcript);
+    var terminal = support.TerminalSession.init(gpa, child);
+    defer terminal.deinit();
+    const transcript = &terminal.transcript;
+    try terminal.setupZsh("");
     const from = transcript.items.len;
-    try child.write("command \"$TJ\" tag @1 @2 @3..@4 BUG parser\n");
-    try std.testing.expect(try child.readUntilFrom(gpa, &transcript, from, support.test_prompt, support.timeout_ms));
-    try child.write("exit 0\n");
-    try std.testing.expectEqual(@as(u8, 0), try child.finish(gpa, &transcript, support.timeout_ms));
+    try terminal.write("command \"$TJ\" tag @1 @2 @3..@4 BUG parser\n");
+    try terminal.expectPromptFrom(from);
+    try terminal.write("exit 0\n");
+    try std.testing.expectEqual(@as(u8, 0), try terminal.finish());
 
     var queried = try support.run(gpa, &.{ "--home", home, "tag", "@1", "@2", "@3..@4" }, 24, 120);
     defer queried.out.deinit(gpa);

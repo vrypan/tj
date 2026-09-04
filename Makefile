@@ -16,7 +16,7 @@ TARGETS := \
 	x86_64-linux-musl
 
 .DEFAULT_GOAL := build
-.PHONY: build install uninstall test fmt fmt-check check all package clean list $(TARGETS)
+.PHONY: build install uninstall test test-unit test-integration fmt fmt-check check all package clean list $(TARGETS)
 
 PREFIX ?= $(HOME)/.local
 
@@ -64,6 +64,12 @@ uninstall:
 
 test:
 	$(ZIG) build test
+
+test-unit:
+	$(ZIG) build test-unit
+
+test-integration:
+	$(ZIG) build test-integration
 
 fmt:
 	$(ZIG) fmt .

@@ -521,17 +521,79 @@ pub const TerminalSession = struct {
         try self.child.write(bytes);
     }
 
+    pub fn writeLine(self: *TerminalSession, line: []const u8) !void {
+        try self.write(line);
+        try self.write("\n");
+    }
+
+    pub fn waitFrom(
+        self: *TerminalSession,
+        from: usize,
+        marker: []const u8,
+        wait_ms: i32,
+    ) !bool {
+        return self.child.readUntilFrom(
+            self.gpa,
+            &self.transcript,
+            from,
+            marker,
+            wait_ms,
+        );
+    }
+
     pub fn expectFrom(self: *TerminalSession, from: usize, marker: []const u8) !void {
-        if (try self.child.readUntilFrom(self.gpa, &self.transcript, from, marker, timeout_ms)) return;
+        if (try self.waitFrom(from, marker, timeout_ms)) return;
         std.debug.print("terminal did not produce {s}; transcript follows:\n{s}\n", .{ marker, self.transcript.items[from..] });
         return error.TerminalMarkerMissing;
     }
 
+    pub fn expectPromptFrom(self: *TerminalSession, from: usize) !void {
+        try self.expectFrom(from, test_prompt);
+    }
+
     pub fn command(self: *TerminalSession, line: []const u8) !void {
         const from = self.mark();
-        try self.write(line);
-        try self.write("\n");
-        try self.expectFrom(from, test_prompt);
+        try self.writeLine(line);
+        try self.expectPromptFrom(from);
+    }
+
+    pub fn setupZsh(self: *TerminalSession, prefix: []const u8) !void {
+        var command_line: std.ArrayList(u8) = .empty;
+        defer command_line.deinit(self.gpa);
+        // `source -- file` is not portable across the zsh versions used by the
+        // native CI runners. The POSIX dot builtin accepts the quoted path.
+        if (prefix.len > 0) {
+            try command_line.appendSlice(self.gpa, prefix);
+            try command_line.appendSlice(self.gpa, "; ");
+        }
+        try command_line.appendSlice(self.gpa, ". ");
+        try appendShellQuoted(self.gpa, &command_line, options.plugin);
+        // Split the marker in the echoed setup command, so only the rendered
+        // prompt can satisfy the wait.
+        try command_line.appendSlice(self.gpa, " || exit; PS1='TJ_TEST_'PROMPT'> '\n");
+        try self.write(command_line.items);
+        if (!try self.waitFrom(0, test_prompt, timeout_ms)) return error.ShellNotReady;
+    }
+
+    pub fn setupFish(self: *TerminalSession) !void {
+        if (try self.waitFrom(0, test_prompt, timeout_ms)) return;
+        std.debug.print("Fish setup did not reach a prompt; transcript follows:\n{s}\n", .{self.transcript.items});
+        return error.ShellNotReady;
+    }
+
+    /// Cancel an editable ZLE line and prove the next command was accepted.
+    pub fn cancelZleLine(self: *TerminalSession) !void {
+        const from = self.mark();
+        try self.write("\x15");
+        try self.writeLine("print -r -- TJ_ZLE_CANCEL_\"\"READY");
+        if (!try self.waitFrom(from, "TJ_ZLE_CANCEL_READY", timeout_ms)) {
+            std.debug.print("ZLE cancellation did not execute its readiness command; transcript follows:\n{s}\n", .{self.transcript.items[from..]});
+            return error.ZleCancellationDidNotFinish;
+        }
+        if (!try self.waitFrom(from, test_prompt, timeout_ms)) {
+            std.debug.print("ZLE cancellation did not return a prompt; transcript follows:\n{s}\n", .{self.transcript.items[from..]});
+            return error.ZleCancellationPromptMissing;
+        }
     }
 
     pub fn finish(self: *TerminalSession) !u8 {
@@ -544,56 +606,6 @@ pub const TerminalSession = struct {
         return code;
     }
 };
-
-pub fn setupJournalZshWithPrefix(
-    gpa: std.mem.Allocator,
-    child: harness.PtyChild,
-    out: *std.ArrayList(u8),
-    prefix: []const u8,
-) !void {
-    var command: std.ArrayList(u8) = .empty;
-    defer command.deinit(gpa);
-    // `source -- file` is not portable across the zsh versions used by the
-    // native CI runners. The POSIX dot builtin accepts the quoted pathname.
-    if (prefix.len > 0) {
-        try command.appendSlice(gpa, prefix);
-        try command.appendSlice(gpa, "; ");
-    }
-    try command.appendSlice(gpa, ". ");
-    try appendShellQuoted(gpa, &command, options.plugin);
-    // Keep the literal marker out of the echoed setup command, so waiting for
-    // it can only match the real prompt after the plugin finished loading.
-    try command.appendSlice(gpa, " || exit; PS1='TJ_TEST_'PROMPT'> '\n");
-    try child.write(command.items);
-    if (!try child.readUntil(gpa, out, test_prompt, timeout_ms)) return error.ShellNotReady;
-}
-
-pub fn setupJournalZsh(gpa: std.mem.Allocator, child: harness.PtyChild, out: *std.ArrayList(u8)) !void {
-    return setupJournalZshWithPrefix(gpa, child, out, "");
-}
-
-/// Cancels an editable ZLE line and proves that the shell accepted a new
-/// command afterward. Waiting for the ordinary prompt is insufficient here:
-/// completion redraws that same prompt before the cancellation is processed.
-pub fn cancelZleLine(gpa: std.mem.Allocator, child: harness.PtyChild, out: *std.ArrayList(u8)) !void {
-    const from = out.items.len;
-    // Clear the line with a plain ZLE binding rather than Ctrl-C. While the
-    // completion system is running the shell's terminal still raises SIGINT,
-    // and the interrupt discards bytes zsh has already read - including the
-    // first character of the command typed right behind it.
-    try child.write("\x15");
-    // Split the marker in the typed command so terminal echo cannot satisfy
-    // the wait; only the executed print produces the contiguous text.
-    try child.write("print -r -- TJ_ZLE_CANCEL_\"\"READY\n");
-    if (!try child.readUntilFrom(gpa, out, from, "TJ_ZLE_CANCEL_READY", timeout_ms)) {
-        std.debug.print("ZLE cancellation did not execute its readiness command; transcript follows:\n{s}\n", .{out.items[from..]});
-        return error.ZleCancellationDidNotFinish;
-    }
-    if (!try child.readUntilFrom(gpa, out, from, test_prompt, timeout_ms)) {
-        std.debug.print("ZLE cancellation did not return a prompt; transcript follows:\n{s}\n", .{out.items[from..]});
-        return error.ZleCancellationPromptMissing;
-    }
-}
 
 pub fn haveZsh() bool {
     const io = std.testing.io;
@@ -654,20 +666,13 @@ pub fn appendFishQuoted(gpa: std.mem.Allocator, out: *std.ArrayList(u8), text: [
     try out.append(gpa, '\'');
 }
 
-pub fn setupJournalFish(gpa: std.mem.Allocator, child: harness.PtyChild, out: *std.ArrayList(u8)) !void {
-    if (!try child.readUntil(gpa, out, test_prompt, timeout_ms)) {
-        std.debug.print("Fish setup did not reach a prompt; transcript follows:\n{s}\n", .{out.items});
-        return error.ShellNotReady;
-    }
-}
-
 /// Runs `script` line by line in an interactive zsh under tj, then exits.
 pub fn recordJournal(gpa: std.mem.Allocator, journal: *Journal, script: []const []const u8) !void {
     const child = try spawnJournalZsh(gpa, journal);
     var terminal = TerminalSession.init(gpa, child);
     defer terminal.deinit();
 
-    try setupJournalZsh(gpa, child, &terminal.transcript);
+    try terminal.setupZsh("");
     for (script) |line| try terminal.command(line);
     try terminal.write("exit 0\n");
     try std.testing.expectEqual(@as(u8, 0), try terminal.finish());

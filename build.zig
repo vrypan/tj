@@ -164,9 +164,15 @@ pub fn build(b: *std.Build) void {
     // children even though each suite uses independent descriptors.
     run_splash_integration_tests.step.dependOn(&run_integration_tests.step);
 
+    const run_unit_tests = b.addRunArtifact(unit_tests);
+    const unit_test_step = b.step("test-unit", "Run unit tests");
+    unit_test_step.dependOn(&run_unit_tests.step);
+
+    const integration_test_step = b.step("test-integration", "Run PTY integration tests");
+    integration_test_step.dependOn(&run_splash_integration_tests.step);
+
     const test_step = b.step("test", "Run tests");
-    test_step.dependOn(&b.addRunArtifact(unit_tests).step);
-    test_step.dependOn(&run_integration_tests.step);
+    test_step.dependOn(&run_unit_tests.step);
     test_step.dependOn(&run_splash_integration_tests.step);
     for (completion_runs) |generate| test_step.dependOn(&generate.step);
 }

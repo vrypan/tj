@@ -16,8 +16,9 @@ test "the tj zle hooks preserve prompt and tui widgets when sourced again" {
     defer journal.close();
 
     const child = try support.spawnJournalZsh(gpa, &journal);
-    var out: std.ArrayList(u8) = .empty;
-    defer out.deinit(gpa);
+    var terminal = support.TerminalSession.init(gpa, child);
+    defer terminal.deinit();
+    const out = &terminal.transcript;
     const prefix =
         "typeset -gi TJ_PRIOR_ACCEPT_COUNT=0; " ++
         "typeset -gi TJ_PRIOR_LINE_INIT_COUNT=0; " ++
@@ -25,7 +26,7 @@ test "the tj zle hooks preserve prompt and tui widgets when sourced again" {
         "_tj_prior_line_init() { (( TJ_PRIOR_LINE_INIT_COUNT++ )); }; " ++
         "zle -N accept-line _tj_prior_accept_line; " ++
         "zle -N zle-line-init _tj_prior_line_init";
-    try support.setupJournalZshWithPrefix(gpa, child, &out, prefix);
+    try terminal.setupZsh(prefix);
 
     // Sourcing TJ again must not duplicate either hook.
     var source: std.ArrayList(u8) = .empty;
@@ -34,23 +35,23 @@ test "the tj zle hooks preserve prompt and tui widgets when sourced again" {
     try support.appendShellQuoted(gpa, &source, options.plugin);
     try source.append(gpa, '\n');
     var from = out.items.len;
-    try child.write(source.items);
-    try std.testing.expect(try child.readUntilFrom(gpa, &out, from, support.test_prompt, support.timeout_ms));
+    try terminal.write(source.items);
+    try terminal.expectPromptFrom(from);
 
     from = out.items.len;
-    try child.write("print -r -- TJ_PRIOR_ACCEPT_COUNT=$TJ_PRIOR_ACCEPT_COUNT TJ_PRIOR_LINE_INIT_COUNT=$TJ_PRIOR_LINE_INIT_COUNT\n");
-    try std.testing.expect(try child.readUntilFrom(gpa, &out, from, "TJ_PRIOR_ACCEPT_COUNT=2", support.timeout_ms));
-    try std.testing.expect(try child.readUntilFrom(gpa, &out, from, "TJ_PRIOR_LINE_INIT_COUNT=2", support.timeout_ms));
-    try std.testing.expect(try child.readUntilFrom(gpa, &out, from, support.test_prompt, support.timeout_ms));
+    try terminal.write("print -r -- TJ_PRIOR_ACCEPT_COUNT=$TJ_PRIOR_ACCEPT_COUNT TJ_PRIOR_LINE_INIT_COUNT=$TJ_PRIOR_LINE_INIT_COUNT\n");
+    try terminal.expectFrom(from, "TJ_PRIOR_ACCEPT_COUNT=2");
+    try terminal.expectFrom(from, "TJ_PRIOR_LINE_INIT_COUNT=2");
+    try terminal.expectPromptFrom(from);
 
     from = out.items.len;
-    try child.write("print -r -- \"TJ_TUI_WIDGET=${widgets[_tj_tui_widget]}\"; bindkey -L '^X^T'\n");
-    try std.testing.expect(try child.readUntilFrom(gpa, &out, from, "TJ_TUI_WIDGET=user:_tj_tui_widget", support.timeout_ms));
-    try std.testing.expect(try child.readUntilFrom(gpa, &out, from, "bindkey \"^X^T\" _tj_tui_widget", support.timeout_ms));
-    try std.testing.expect(try child.readUntilFrom(gpa, &out, from, support.test_prompt, support.timeout_ms));
+    try terminal.write("print -r -- \"TJ_TUI_WIDGET=${widgets[_tj_tui_widget]}\"; bindkey -L '^X^T'\n");
+    try terminal.expectFrom(from, "TJ_TUI_WIDGET=user:_tj_tui_widget");
+    try terminal.expectFrom(from, "bindkey \"^X^T\" _tj_tui_widget");
+    try terminal.expectPromptFrom(from);
 
-    try child.write("exit 0\n");
-    const status = try child.finish(gpa, &out, support.timeout_ms);
+    try terminal.write("exit 0\n");
+    const status = try terminal.finish();
     if (status != 0) std.debug.print("zle registration shell failed ({d}): {s}\n", .{ status, out.items });
     try std.testing.expectEqual(@as(u8, 0), status);
 }
@@ -90,15 +91,16 @@ test "a direct tj reference remains literal in an interactive zsh" {
     const name = try journal.journalName(gpa);
     defer gpa.free(name);
     const child = try support.spawnContinuedJournalZsh(gpa, &journal, name);
-    var out: std.ArrayList(u8) = .empty;
-    defer out.deinit(gpa);
-    try support.setupJournalZsh(gpa, child, &out);
+    var terminal = support.TerminalSession.init(gpa, child);
+    defer terminal.deinit();
+    const out = &terminal.transcript;
+    try terminal.setupZsh("");
 
     const from = out.items.len;
-    try child.write("tj @1/out\n");
-    try std.testing.expect(try child.readUntilFrom(gpa, &out, from, "/1/out", support.timeout_ms));
-    try child.write("exit 0\n");
-    try std.testing.expectEqual(@as(u8, 0), try child.finish(gpa, &out, support.timeout_ms));
+    try terminal.write("tj @1/out\n");
+    try terminal.expectFrom(from, "/1/out");
+    try terminal.write("exit 0\n");
+    try std.testing.expectEqual(@as(u8, 0), try terminal.finish());
 }
 
 test "accepting a bare reference expands it in zsh" {
@@ -108,21 +110,22 @@ test "accepting a bare reference expands it in zsh" {
     var journal = try support.Journal.open(gpa);
     defer journal.close();
     const child = try support.spawnJournalZsh(gpa, &journal);
-    var out: std.ArrayList(u8) = .empty;
-    defer out.deinit(gpa);
-    try support.setupJournalZsh(gpa, child, &out);
+    var terminal = support.TerminalSession.init(gpa, child);
+    defer terminal.deinit();
+    const out = &terminal.transcript;
+    try terminal.setupZsh("");
 
     var from = out.items.len;
-    try child.write("printf 'accept-marker\\n'\n");
-    try std.testing.expect(try child.readUntilFrom(gpa, &out, from, support.test_prompt, support.timeout_ms));
+    try terminal.write("printf 'accept-marker\\n'\n");
+    try terminal.expectPromptFrom(from);
 
     from = out.items.len;
-    try child.write("cat @1/out\n");
-    try std.testing.expect(try child.readUntilFrom(gpa, &out, from, "accept-marker", support.timeout_ms));
-    try std.testing.expect(try child.readUntilFrom(gpa, &out, from, support.test_prompt, support.timeout_ms));
+    try terminal.write("cat @1/out\n");
+    try terminal.expectFrom(from, "accept-marker");
+    try terminal.expectPromptFrom(from);
 
-    try child.write("exit 0\n");
-    try std.testing.expectEqual(@as(u8, 0), try child.finish(gpa, &out, support.timeout_ms));
+    try terminal.write("exit 0\n");
+    try std.testing.expectEqual(@as(u8, 0), try terminal.finish());
 
     const command = try journal.read(gpa, "2/cmd");
     defer gpa.free(command);
@@ -162,9 +165,10 @@ test "resolved bare references expand while unknown handles stay literal" {
     defer journal.close();
 
     const child = try support.spawnJournalZsh(gpa, &journal);
-    var out: std.ArrayList(u8) = .empty;
-    defer out.deinit(gpa);
-    try support.setupJournalZsh(gpa, child, &out);
+    var terminal = support.TerminalSession.init(gpa, child);
+    defer terminal.deinit();
+    const out = &terminal.transcript;
+    try terminal.setupZsh("");
 
     for ([_][]const u8{
         "echo seed",
@@ -173,12 +177,12 @@ test "resolved bare references expand while unknown handles stay literal" {
         "printf 'HANDLE=%s\\n' @someone",
     }) |line| {
         const from = out.items.len;
-        try child.write(line);
-        try child.write("\n");
-        try std.testing.expect(try child.readUntilFrom(gpa, &out, from, support.test_prompt, support.timeout_ms));
+        try terminal.write(line);
+        try terminal.write("\n");
+        try terminal.expectPromptFrom(from);
     }
-    try child.write("exit 0\n");
-    try std.testing.expectEqual(@as(u8, 0), try child.finish(gpa, &out, support.timeout_ms));
+    try terminal.write("exit 0\n");
+    try std.testing.expectEqual(@as(u8, 0), try terminal.finish());
 
     try std.testing.expect(std.mem.indexOf(u8, out.items, "NAMED=") != null);
     try std.testing.expect(std.mem.indexOf(u8, out.items, "/1/out") != null);
@@ -317,16 +321,17 @@ test "qualified command substitution resolves through a reused journal" {
     defer gpa.free(command);
 
     const child = try support.spawnContinuedJournalZsh(gpa, &journal, "release-build");
-    var out: std.ArrayList(u8) = .empty;
-    defer out.deinit(gpa);
-    try support.setupJournalZsh(gpa, child, &out);
+    var terminal = support.TerminalSession.init(gpa, child);
+    defer terminal.deinit();
+    const out = &terminal.transcript;
+    try terminal.setupZsh("");
 
     const from = out.items.len;
-    try child.write(command);
-    try child.write("\n");
-    try std.testing.expect(try child.readUntilFrom(gpa, &out, from, "qualified-marker", support.timeout_ms));
-    try child.write("exit 0\n");
-    try std.testing.expectEqual(@as(u8, 0), try child.finish(gpa, &out, support.timeout_ms));
+    try terminal.write(command);
+    try terminal.write("\n");
+    try terminal.expectFrom(from, "qualified-marker");
+    try terminal.write("exit 0\n");
+    try std.testing.expectEqual(@as(u8, 0), try terminal.finish());
 
     // The first writer's unfinished `exit` consumed 2, so continuation starts
     // at 3 rather than reusing it.
@@ -345,17 +350,18 @@ test "history contains the accepted reference substitution" {
     var journal = try support.Journal.open(gpa);
     defer journal.close();
     const child = try support.spawnJournalZsh(gpa, &journal);
-    var out: std.ArrayList(u8) = .empty;
-    defer out.deinit(gpa);
-    try support.setupJournalZsh(gpa, child, &out);
+    var terminal = support.TerminalSession.init(gpa, child);
+    defer terminal.deinit();
+    const out = &terminal.transcript;
+    try terminal.setupZsh("");
 
     var from = out.items.len;
-    try child.write("echo history-marker\n");
-    try std.testing.expect(try child.readUntilFrom(gpa, &out, from, support.test_prompt, support.timeout_ms));
+    try terminal.write("echo history-marker\n");
+    try terminal.expectPromptFrom(from);
 
     from = out.items.len;
-    try child.write("cat @1/out >/dev/null\n");
-    try std.testing.expect(try child.readUntilFrom(gpa, &out, from, support.test_prompt, support.timeout_ms));
+    try terminal.write("cat @1/out >/dev/null\n");
+    try terminal.expectPromptFrom(from);
     const accepted = out.items[from..];
     var rendered: std.ArrayList(u8) = .empty;
     defer rendered.deinit(gpa);
@@ -367,10 +373,10 @@ test "history contains the accepted reference substitution" {
     try std.testing.expect(std.mem.indexOf(u8, accepted, home) == null);
 
     from = out.items.len;
-    try child.write("fc -ln -1\n");
-    try std.testing.expect(try child.readUntilFrom(gpa, &out, from, "cat \"$(tj @1/out)\" >/dev/null", support.timeout_ms));
-    try child.write("exit 0\n");
-    try std.testing.expectEqual(@as(u8, 0), try child.finish(gpa, &out, support.timeout_ms));
+    try terminal.write("fc -ln -1\n");
+    try terminal.expectFrom(from, "cat \"$(tj @1/out)\" >/dev/null");
+    try terminal.write("exit 0\n");
+    try std.testing.expectEqual(@as(u8, 0), try terminal.finish());
 
     const command = try journal.read(gpa, "2/cmd");
     defer gpa.free(command);

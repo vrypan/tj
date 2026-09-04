@@ -11,45 +11,46 @@ test "zsh widget keeps tui open and inserts its stdout" {
     var journal = try support.Journal.open(gpa);
     defer journal.close();
     const child = try support.spawnJournalZsh(gpa, &journal);
-    var transcript: std.ArrayList(u8) = .empty;
-    defer transcript.deinit(gpa);
+    var terminal = support.TerminalSession.init(gpa, child);
+    defer terminal.deinit();
+    const transcript = &terminal.transcript;
     const prefix =
         "_tj_probe_buffer() { zle -I; print -r -- \"TJ_WIDGET_BUFFER=<$BUFFER>\"; BUFFER=; zle reset-prompt; }; " ++
         "zle -N _tj_probe_buffer; bindkey '^X^B' _tj_probe_buffer";
-    try support.setupJournalZshWithPrefix(gpa, child, &transcript, prefix);
+    try terminal.setupZsh(prefix);
 
     var from = transcript.items.len;
-    try child.write("echo WIDGET_FIXTURE\n");
-    try std.testing.expect(try child.readUntilFrom(gpa, &transcript, from, support.test_prompt, support.timeout_ms));
+    try terminal.write("echo WIDGET_FIXTURE\n");
+    try terminal.expectPromptFrom(from);
 
     // The browser must remain active without input. This catches attempts to
     // poll a freshly opened /dev/tty descriptor on macOS, which looks like an
     // immediate end-of-input from a ZLE-launched child.
     from = transcript.items.len;
-    try child.write("\x18\x14");
-    try std.testing.expect(try child.readUntilFrom(gpa, &transcript, from, " entries", support.timeout_ms));
+    try terminal.write("\x18\x14");
+    try terminal.expectFrom(from, " entries");
     const drawn = transcript.items.len;
-    try std.testing.expect(!try child.readUntilFrom(gpa, &transcript, drawn, "\x00", 300));
+    try std.testing.expect(!try terminal.waitFrom(drawn, "\x00", 300));
     try std.testing.expect(std.mem.indexOf(u8, transcript.items[from..], "\x1b[?1049l") == null);
 
     from = transcript.items.len;
-    try child.write("q");
-    try std.testing.expect(try child.readUntilFrom(gpa, &transcript, from, support.test_prompt, support.timeout_ms));
+    try terminal.write("q");
+    try terminal.expectPromptFrom(from);
 
     // The direct TUI test below covers Enter choosing detail values. Isolate
     // the ZLE half here by substituting a deterministic command whose stdout
     // is what the real TUI would return.
     from = transcript.items.len;
-    try child.write("TJ=/bin/echo\n");
-    try std.testing.expect(try child.readUntilFrom(gpa, &transcript, from, support.test_prompt, support.timeout_ms));
+    try terminal.write("TJ=/bin/echo\n");
+    try terminal.expectPromptFrom(from);
 
     from = transcript.items.len;
-    try child.write("\x18\x14\x18\x02");
-    try std.testing.expect(try child.readUntilFrom(gpa, &transcript, from, "TJ_WIDGET_BUFFER=<tui>", support.timeout_ms));
-    try std.testing.expect(try child.readUntilFrom(gpa, &transcript, from, support.test_prompt, support.timeout_ms));
+    try terminal.write("\x18\x14\x18\x02");
+    try terminal.expectFrom(from, "TJ_WIDGET_BUFFER=<tui>");
+    try terminal.expectPromptFrom(from);
 
-    try child.write("exit 0\n");
-    const status = try child.finish(gpa, &transcript, support.timeout_ms);
+    try terminal.write("exit 0\n");
+    const status = try terminal.finish();
     if (status != 0) std.debug.print("tui widget shell failed ({d}): {s}\n", .{ status, transcript.items });
     try std.testing.expectEqual(@as(u8, 0), status);
 }
@@ -61,35 +62,36 @@ test "tui exports an explicit selection as space-separated entry numbers" {
     var journal = try support.Journal.open(gpa);
     defer journal.close();
     const child = try support.spawnJournalZsh(gpa, &journal);
-    var transcript: std.ArrayList(u8) = .empty;
-    defer transcript.deinit(gpa);
-    try support.setupJournalZsh(gpa, child, &transcript);
+    var terminal = support.TerminalSession.init(gpa, child);
+    defer terminal.deinit();
+    const transcript = &terminal.transcript;
+    try terminal.setupZsh("");
 
     var from = transcript.items.len;
-    try child.write("echo EXPORT_ONE\n");
-    try std.testing.expect(try child.readUntilFrom(gpa, &transcript, from, support.test_prompt, support.timeout_ms));
+    try terminal.write("echo EXPORT_ONE\n");
+    try terminal.expectPromptFrom(from);
     from = transcript.items.len;
-    try child.write("echo EXPORT_TWO\n");
-    try std.testing.expect(try child.readUntilFrom(gpa, &transcript, from, support.test_prompt, support.timeout_ms));
+    try terminal.write("echo EXPORT_TWO\n");
+    try terminal.expectPromptFrom(from);
     from = transcript.items.len;
-    try child.write("echo EXPORT_THREE\n");
-    try std.testing.expect(try child.readUntilFrom(gpa, &transcript, from, support.test_prompt, support.timeout_ms));
+    try terminal.write("echo EXPORT_THREE\n");
+    try terminal.expectPromptFrom(from);
 
     from = transcript.items.len;
-    try child.write("command \"$TJ\" tui | /bin/sh -c 'IFS= read -r entries; printf \"TUI_EXPORT=<%s>\\n\" \"$entries\"'\n");
-    try std.testing.expect(try child.readUntilFrom(gpa, &transcript, from, "3 entries", support.timeout_ms));
+    try terminal.write("command \"$TJ\" tui | /bin/sh -c 'IFS= read -r entries; printf \"TUI_EXPORT=<%s>\\n\" \"$entries\"'\n");
+    try terminal.expectFrom(from, "3 entries");
 
     from = transcript.items.len;
-    try child.write(" \x1b[1;2Ae");
-    try std.testing.expect(try child.readUntilFrom(gpa, &transcript, from, "TUI_EXPORT=<2 3>", support.timeout_ms));
-    try std.testing.expect(try child.readUntilFrom(gpa, &transcript, from, support.test_prompt, support.timeout_ms));
+    try terminal.write(" \x1b[1;2Ae");
+    try terminal.expectFrom(from, "TUI_EXPORT=<2 3>");
+    try terminal.expectPromptFrom(from);
     const finished = transcript.items[from..];
     const restored_at = std.mem.lastIndexOf(u8, finished, "\x1b[?1049l") orelse return error.TestUnexpectedResult;
     const exported_at = std.mem.lastIndexOf(u8, finished, "TUI_EXPORT=<2 3>") orelse return error.TestUnexpectedResult;
     try std.testing.expect(restored_at < exported_at);
 
-    try child.write("exit 0\n");
-    try std.testing.expectEqual(@as(u8, 0), try child.finish(gpa, &transcript, support.timeout_ms));
+    try terminal.write("exit 0\n");
+    try std.testing.expectEqual(@as(u8, 0), try terminal.finish());
 }
 
 test "tui shows details, confirms deletion, and shares annotation semantics" {
@@ -99,78 +101,79 @@ test "tui shows details, confirms deletion, and shares annotation semantics" {
     var journal = try support.Journal.open(gpa);
     defer journal.close();
     const child = try support.spawnJournalZsh(gpa, &journal);
-    var transcript: std.ArrayList(u8) = .empty;
-    defer transcript.deinit(gpa);
-    try support.setupJournalZsh(gpa, child, &transcript);
+    var terminal = support.TerminalSession.init(gpa, child);
+    defer terminal.deinit();
+    const transcript = &terminal.transcript;
+    try terminal.setupZsh("");
 
     var from = transcript.items.len;
-    try child.write("printf '%s\\n' DETAIL_STDOUT DETAIL_SECOND\n");
-    try std.testing.expect(try child.readUntilFrom(gpa, &transcript, from, support.test_prompt, support.timeout_ms));
+    try terminal.write("printf '%s\\n' DETAIL_STDOUT DETAIL_SECOND\n");
+    try terminal.expectPromptFrom(from);
 
     from = transcript.items.len;
-    try child.write("echo DELETE_UNPINNED\n");
-    try std.testing.expect(try child.readUntilFrom(gpa, &transcript, from, support.test_prompt, support.timeout_ms));
+    try terminal.write("echo DELETE_UNPINNED\n");
+    try terminal.expectPromptFrom(from);
 
     from = transcript.items.len;
-    try child.write("echo DELETE_THREE\n");
-    try std.testing.expect(try child.readUntilFrom(gpa, &transcript, from, support.test_prompt, support.timeout_ms));
+    try terminal.write("echo DELETE_THREE\n");
+    try terminal.expectPromptFrom(from);
 
     from = transcript.items.len;
-    try child.write("echo DELETE_FOUR\n");
-    try std.testing.expect(try child.readUntilFrom(gpa, &transcript, from, support.test_prompt, support.timeout_ms));
+    try terminal.write("echo DELETE_FOUR\n");
+    try terminal.expectPromptFrom(from);
 
     from = transcript.items.len;
-    try child.write("command \"$TJ\" tui\n");
-    try std.testing.expect(try child.readUntilFrom(gpa, &transcript, from, "4 entries", support.timeout_ms));
+    try terminal.write("command \"$TJ\" tui\n");
+    try terminal.expectFrom(from, "4 entries");
 
     // The browser starts on the newest completed entry, excluding its own
     // running command. Select entries 3..4, then apply pin and tag once to
     // the complete selection before accepting one collective pin override.
     from = transcript.items.len;
-    try child.write(" ");
-    try std.testing.expect(try child.readUntilFrom(gpa, &transcript, from, "1 selected", support.timeout_ms));
+    try terminal.write(" ");
+    try terminal.expectFrom(from, "1 selected");
     from = transcript.items.len;
-    try child.write("\x1b[1;2Ap");
-    try std.testing.expect(try child.readUntilFrom(gpa, &transcript, from, "entries pinned", support.timeout_ms));
+    try terminal.write("\x1b[1;2Ap");
+    try terminal.expectFrom(from, "entries pinned");
     from = transcript.items.len;
-    try child.write("tParser\n");
-    try std.testing.expect(try child.readUntilFrom(gpa, &transcript, from, "tagged #Parser", support.timeout_ms));
+    try terminal.write("tParser\n");
+    try terminal.expectFrom(from, "tagged #Parser");
     from = transcript.items.len;
-    try child.write("d");
-    try std.testing.expect(try child.readUntilFrom(gpa, &transcript, from, "pinned entries too?", support.timeout_ms));
+    try terminal.write("d");
+    try terminal.expectFrom(from, "pinned entries too?");
     from = transcript.items.len;
-    try child.write("y");
-    try std.testing.expect(try child.readUntilFrom(gpa, &transcript, from, "deleted 2 entries", support.timeout_ms));
+    try terminal.write("y");
+    try terminal.expectFrom(from, "deleted 2 entries");
 
     // The cursor lands on unpinned entry 2. It deletes immediately, without
     // entering the pinned confirmation mode; the following p therefore
     // reaches and pins entry 1.
     from = transcript.items.len;
-    try child.write("dp");
-    try std.testing.expect(try child.readUntilFrom(gpa, &transcript, from, "pinned", support.timeout_ms));
+    try terminal.write("dp");
+    try terminal.expectFrom(from, "pinned");
 
     // Exercise every annotation mutation, including an untag, and open the
     // selected entry's full detail view. Focus its first output line and
     // extend the selection through the second; Enter restores the terminal,
     // prints both selected lines, and exits the browser.
     from = transcript.items.len;
-    try child.write("tBug\nTbug\ntParser\nntui-target\n");
-    try std.testing.expect(try child.readUntilFrom(gpa, &transcript, from, "named entry 1 @tui-target", support.timeout_ms));
+    try terminal.write("tBug\nTbug\ntParser\nntui-target\n");
+    try terminal.expectFrom(from, "named entry 1 @tui-target");
     from = transcript.items.len;
-    try child.write("\r");
-    try std.testing.expect(try child.readUntilFrom(gpa, &transcript, from, "DETAIL_SECOND", support.timeout_ms));
+    try terminal.write("\r");
+    try terminal.expectFrom(from, "DETAIL_SECOND");
     try std.testing.expect(std.mem.indexOf(u8, transcript.items[from..], "cwd") != null);
     from = transcript.items.len;
-    try child.write("jjjjjjjjjjjjjjj\x1b[1;2B\r");
-    try std.testing.expect(try child.readUntilFrom(gpa, &transcript, from, support.test_prompt, support.timeout_ms));
+    try terminal.write("jjjjjjjjjjjjjjj\x1b[1;2B\r");
+    try terminal.expectPromptFrom(from);
     const printed = transcript.items[from..];
     const restored_at = std.mem.lastIndexOf(u8, printed, "\x1b[?1049l") orelse return error.TestUnexpectedResult;
     const stdout_at = std.mem.lastIndexOf(u8, printed, "DETAIL_STDOUT") orelse return error.TestUnexpectedResult;
     const second_at = std.mem.lastIndexOf(u8, printed, "DETAIL_SECOND") orelse return error.TestUnexpectedResult;
     try std.testing.expect(restored_at < stdout_at and stdout_at < second_at);
 
-    try child.write("exit 0\r");
-    try std.testing.expectEqual(@as(u8, 0), try child.finish(gpa, &transcript, support.timeout_ms));
+    try terminal.write("exit 0\r");
+    try std.testing.expectEqual(@as(u8, 0), try terminal.finish());
     try std.testing.expect(std.mem.indexOf(u8, transcript.items, "3110;") == null);
 
     const home = try journal.homeArg(gpa);
@@ -210,30 +213,31 @@ test "grep tui deduplicates matching entries" {
     var journal = try support.Journal.open(gpa);
     defer journal.close();
     const child = try support.spawnJournalZsh(gpa, &journal);
-    var transcript: std.ArrayList(u8) = .empty;
-    defer transcript.deinit(gpa);
-    try support.setupJournalZsh(gpa, child, &transcript);
+    var terminal = support.TerminalSession.init(gpa, child);
+    defer terminal.deinit();
+    const transcript = &terminal.transcript;
+    try terminal.setupZsh("");
 
     var from = transcript.items.len;
-    try child.write("printf '%s\\n' DEDUP_TUI_HIT DEDUP_TUI_HIT\n");
-    try std.testing.expect(try child.readUntilFrom(gpa, &transcript, from, support.test_prompt, support.timeout_ms));
+    try terminal.write("printf '%s\\n' DEDUP_TUI_HIT DEDUP_TUI_HIT\n");
+    try terminal.expectPromptFrom(from);
     from = transcript.items.len;
-    try child.write("echo DEDUP_TUI_HIT\n");
-    try std.testing.expect(try child.readUntilFrom(gpa, &transcript, from, support.test_prompt, support.timeout_ms));
+    try terminal.write("echo DEDUP_TUI_HIT\n");
+    try terminal.expectPromptFrom(from);
     from = transcript.items.len;
-    try child.write("echo UNRELATED_TUI_ENTRY\n");
-    try std.testing.expect(try child.readUntilFrom(gpa, &transcript, from, support.test_prompt, support.timeout_ms));
+    try terminal.write("echo UNRELATED_TUI_ENTRY\n");
+    try terminal.expectPromptFrom(from);
 
     from = transcript.items.len;
-    try child.write("command \"$TJ\" grep --tui DEDUP_TUI_HIT\n");
-    try std.testing.expect(try child.readUntilFrom(gpa, &transcript, from, "2 matches", support.timeout_ms));
+    try terminal.write("command \"$TJ\" grep --tui DEDUP_TUI_HIT\n");
+    try terminal.expectFrom(from, "2 matches");
     const browser = transcript.items[from..];
     try std.testing.expect(std.mem.indexOf(u8, browser, "UNRELATED_TUI_ENTRY") == null);
-    try child.write("q");
-    try std.testing.expect(try child.readUntilFrom(gpa, &transcript, from, support.test_prompt, support.timeout_ms));
+    try terminal.write("q");
+    try terminal.expectPromptFrom(from);
 
-    try child.write("exit 0\r");
-    try std.testing.expectEqual(@as(u8, 0), try child.finish(gpa, &transcript, support.timeout_ms));
+    try terminal.write("exit 0\r");
+    try std.testing.expectEqual(@as(u8, 0), try terminal.finish());
 
     const grep_out = try journal.read(gpa, "4/out");
     defer gpa.free(grep_out);

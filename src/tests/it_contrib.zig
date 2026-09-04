@@ -13,16 +13,17 @@ test "tj-md renders selected entries as a plain fenced transcript" {
     var journal = try support.Journal.open(gpa);
     defer journal.close();
     const child = try support.spawnJournalZsh(gpa, &journal);
-    var transcript: std.ArrayList(u8) = .empty;
-    defer transcript.deinit(gpa);
-    try support.setupJournalZsh(gpa, child, &transcript);
+    var terminal = support.TerminalSession.init(gpa, child);
+    defer terminal.deinit();
+    const transcript = &terminal.transcript;
+    try terminal.setupZsh("");
 
     var from = transcript.items.len;
-    try child.write("printf 'MD_ONE\\n```\\n'\n");
-    try std.testing.expect(try child.readUntilFrom(gpa, &transcript, from, support.test_prompt, support.timeout_ms));
+    try terminal.write("printf 'MD_ONE\\n```\\n'\n");
+    try terminal.expectPromptFrom(from);
     from = transcript.items.len;
-    try child.write("printf '\\033[31mMD_RED\\033[0m\\n'\n");
-    try std.testing.expect(try child.readUntilFrom(gpa, &transcript, from, support.test_prompt, support.timeout_ms));
+    try terminal.write("printf '\\033[31mMD_RED\\033[0m\\n'\n");
+    try terminal.expectPromptFrom(from);
 
     var selected: [2]u32 = undefined;
     var selected_len: usize = 0;
@@ -45,11 +46,11 @@ test "tj-md renders selected entries as a plain fenced transcript" {
     try support.appendShellQuoted(gpa, &command, script);
     try command.append(gpa, '\n');
     from = transcript.items.len;
-    try child.write(command.items);
-    try std.testing.expect(try child.readUntilFrom(gpa, &transcript, from, support.test_prompt, support.timeout_ms));
+    try terminal.write(command.items);
+    try terminal.expectPromptFrom(from);
 
-    try child.write("exit 0\n");
-    try std.testing.expectEqual(@as(u8, 0), try child.finish(gpa, &transcript, support.timeout_ms));
+    try terminal.write("exit 0\n");
+    try std.testing.expectEqual(@as(u8, 0), try terminal.finish());
 
     var out_path: [32]u8 = undefined;
     const out = try journal.read(gpa, try std.fmt.bufPrint(&out_path, "{d}/out", .{selected[1] + 1}));

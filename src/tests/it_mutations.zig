@@ -140,14 +140,15 @@ test "output and entry removal clean data without reusing numbers" {
     const id = try journal.journalName(gpa);
     defer gpa.free(id);
     const child = try support.spawnContinuedJournalZsh(gpa, &journal, id);
-    var continued: std.ArrayList(u8) = .empty;
-    defer continued.deinit(gpa);
-    try support.setupJournalZsh(gpa, child, &continued);
+    var terminal = support.TerminalSession.init(gpa, child);
+    defer terminal.deinit();
+    const continued = &terminal.transcript;
+    try terminal.setupZsh("");
     const from = continued.items.len;
-    try child.write("echo after-hole\n");
-    try std.testing.expect(try child.readUntilFrom(gpa, &continued, from, support.test_prompt, support.timeout_ms));
-    try child.write("exit 0\n");
-    try std.testing.expectEqual(@as(u8, 0), try child.finish(gpa, &continued, support.timeout_ms));
+    try terminal.write("echo after-hole\n");
+    try terminal.expectPromptFrom(from);
+    try terminal.write("exit 0\n");
+    try std.testing.expectEqual(@as(u8, 0), try terminal.finish());
     var after = try journal.journalDir();
     defer after.close(io);
     const next_cmd = try after.readFileAlloc(io, "5/cmd", gpa, .limited(4096));
@@ -207,14 +208,15 @@ test "entry ranges remove existing entries across holes and reject the running b
     const id = try journal.journalName(gpa);
     defer gpa.free(id);
     const child = try support.spawnContinuedJournalZsh(gpa, &journal, id);
-    var transcript: std.ArrayList(u8) = .empty;
-    defer transcript.deinit(gpa);
-    try support.setupJournalZsh(gpa, child, &transcript);
+    var terminal = support.TerminalSession.init(gpa, child);
+    defer terminal.deinit();
+    const transcript = &terminal.transcript;
+    try terminal.setupZsh("");
     const from = transcript.items.len;
-    try child.write("command \"$TJ\" rm @2..@5\n");
-    try std.testing.expect(try child.readUntilFrom(gpa, &transcript, from, support.test_prompt, support.timeout_ms));
-    try child.write("exit 0\n");
-    try std.testing.expectEqual(@as(u8, 0), try child.finish(gpa, &transcript, support.timeout_ms));
+    try terminal.write("command \"$TJ\" rm @2..@5\n");
+    try terminal.expectPromptFrom(from);
+    try terminal.write("exit 0\n");
+    try std.testing.expectEqual(@as(u8, 0), try terminal.finish());
 
     var dir = try journal.journalDir();
     defer dir.close(io);
@@ -311,6 +313,8 @@ test "concurrent annotation commands preserve every update" {
     for (tags, 0..) |tag, i| {
         children[i] = try support.spawnTj(gpa, &.{ support.tj, "--home", home, "tag", "@1", tag }, 24, 80);
     }
+    // Keep these children raw: they are launched as one concurrent batch and
+    // deliberately finished only after every writer has started.
     for (children) |child| {
         var transcript: std.ArrayList(u8) = .empty;
         defer transcript.deinit(gpa);

@@ -28,17 +28,18 @@ test "a noout OSC region stays visible but is replaced in out" {
     defer gpa.free(producer);
 
     const child = try support.spawnJournalZsh(gpa, &journal);
-    var transcript: std.ArrayList(u8) = .empty;
-    defer transcript.deinit(gpa);
-    try support.setupJournalZsh(gpa, child, &transcript);
+    var terminal = support.TerminalSession.init(gpa, child);
+    defer terminal.deinit();
+    const transcript = &terminal.transcript;
+    try terminal.setupZsh("");
     const command = try std.fmt.allocPrint(gpa, "/bin/sh '{s}'", .{producer});
     defer gpa.free(command);
     const from = transcript.items.len;
-    try child.write(command);
-    try child.write("\n");
-    try std.testing.expect(try child.readUntilFrom(gpa, &transcript, from, support.test_prompt, support.timeout_ms));
-    try child.write("exit 0\n");
-    try std.testing.expectEqual(@as(u8, 0), try child.finish(gpa, &transcript, support.timeout_ms));
+    try terminal.write(command);
+    try terminal.write("\n");
+    try terminal.expectPromptFrom(from);
+    try terminal.write("exit 0\n");
+    try std.testing.expectEqual(@as(u8, 0), try terminal.finish());
 
     const visible = transcript.items[from..];
     try std.testing.expect(std.mem.indexOf(u8, visible, "VISIBLE-BUT-OMITTED") != null);
@@ -70,9 +71,10 @@ test "tj filter --fence preserves markdown while publishing fenced resources" {
     defer gpa.free(producer);
 
     const child = try support.spawnJournalZsh(gpa, &journal);
-    var transcript: std.ArrayList(u8) = .empty;
-    defer transcript.deinit(gpa);
-    try support.setupJournalZsh(gpa, child, &transcript);
+    var terminal = support.TerminalSession.init(gpa, child);
+    defer terminal.deinit();
+    const transcript = &terminal.transcript;
+    try terminal.setupZsh("");
 
     var command: std.ArrayList(u8) = .empty;
     defer command.deinit(gpa);
@@ -82,17 +84,17 @@ test "tj filter --fence preserves markdown while publishing fenced resources" {
     try command.append(gpa, '\n');
 
     var from = transcript.items.len;
-    try child.write(command.items);
-    try std.testing.expect(try child.readUntilFrom(gpa, &transcript, from, support.test_prompt, support.timeout_ms));
+    try terminal.write(command.items);
+    try terminal.expectPromptFrom(from);
     from = transcript.items.len;
     command.clearRetainingCapacity();
     try command.appendSlice(gpa, "command \"$TJ\" filter --fence -- /bin/sh ");
     try support.appendShellQuoted(gpa, &command, producer);
     try command.append(gpa, '\n');
-    try child.write(command.items);
-    try std.testing.expect(try child.readUntilFrom(gpa, &transcript, from, support.test_prompt, support.timeout_ms));
-    try child.write("exit 0\n");
-    try std.testing.expectEqual(@as(u8, 0), try child.finish(gpa, &transcript, support.timeout_ms));
+    try terminal.write(command.items);
+    try terminal.expectPromptFrom(from);
+    try terminal.write("exit 0\n");
+    try std.testing.expectEqual(@as(u8, 0), try terminal.finish());
 
     const out = try journal.read(gpa, "1/out");
     defer gpa.free(out);
@@ -153,9 +155,10 @@ test "tj filter --noout preserves output argv and child statuses while omitting 
     defer gpa.free(producer);
 
     const child = try support.spawnJournalZsh(gpa, &journal);
-    var transcript: std.ArrayList(u8) = .empty;
-    defer transcript.deinit(gpa);
-    try support.setupJournalZsh(gpa, child, &transcript);
+    var terminal = support.TerminalSession.init(gpa, child);
+    defer terminal.deinit();
+    const transcript = &terminal.transcript;
+    try terminal.setupZsh("");
     const command = try std.fmt.allocPrint(
         gpa,
         "cd /; NOOUT_TEST_ENV=preserved command \"$TJ\" filter --noout -- /bin/sh '{s}' 'two words' '*' --flag --help",
@@ -164,23 +167,23 @@ test "tj filter --noout preserves output argv and child statuses while omitting 
     defer gpa.free(command);
     const visible_from = transcript.items.len;
     var from = visible_from;
-    try child.write(command);
-    try child.write("\n");
-    try std.testing.expect(try child.readUntilFrom(gpa, &transcript, from, support.test_prompt, support.timeout_ms));
+    try terminal.write(command);
+    try terminal.write("\n");
+    try terminal.expectPromptFrom(from);
     from = transcript.items.len;
-    try child.write("command \"$TJ\" filter --noout -- /bin/sh -c 'exit 7'\n");
-    try std.testing.expect(try child.readUntilFrom(gpa, &transcript, from, support.test_prompt, support.timeout_ms));
+    try terminal.write("command \"$TJ\" filter --noout -- /bin/sh -c 'exit 7'\n");
+    try terminal.expectPromptFrom(from);
     from = transcript.items.len;
-    try child.write("command \"$TJ\" filter --noout -- /bin/sh -c 'kill -TERM $$'\n");
-    try std.testing.expect(try child.readUntilFrom(gpa, &transcript, from, support.test_prompt, support.timeout_ms));
+    try terminal.write("command \"$TJ\" filter --noout -- /bin/sh -c 'kill -TERM $$'\n");
+    try terminal.expectPromptFrom(from);
     from = transcript.items.len;
-    try child.write("command \"$TJ\" filter --noout -- /definitely/not-a-tj-command\n");
-    try std.testing.expect(try child.readUntilFrom(gpa, &transcript, from, support.test_prompt, support.timeout_ms));
+    try terminal.write("command \"$TJ\" filter --noout -- /definitely/not-a-tj-command\n");
+    try terminal.expectPromptFrom(from);
     from = transcript.items.len;
-    try child.write("printf 'STDIN-NOOUT\\n' | command \"$TJ\" filter --noout\n");
-    try std.testing.expect(try child.readUntilFrom(gpa, &transcript, from, support.test_prompt, support.timeout_ms));
-    try child.write("exit 0\n");
-    try std.testing.expectEqual(@as(u8, 0), try child.finish(gpa, &transcript, support.timeout_ms));
+    try terminal.write("printf 'STDIN-NOOUT\\n' | command \"$TJ\" filter --noout\n");
+    try terminal.expectPromptFrom(from);
+    try terminal.write("exit 0\n");
+    try std.testing.expectEqual(@as(u8, 0), try terminal.finish());
 
     const visible = transcript.items[visible_from..];
     if (std.mem.indexOf(u8, visible, "WRAPPER-STDOUT:two words|*|--flag|--help") == null) {
@@ -453,15 +456,16 @@ test "terminal native grep omits its results while redirected output stays plain
     defer gpa.free(redirected_path);
 
     const child = try support.spawnJournalZsh(gpa, &journal);
-    var transcript: std.ArrayList(u8) = .empty;
-    defer transcript.deinit(gpa);
-    try support.setupJournalZsh(gpa, child, &transcript);
+    var terminal = support.TerminalSession.init(gpa, child);
+    defer terminal.deinit();
+    const transcript = &terminal.transcript;
+    try terminal.setupZsh("");
     const command = try std.fmt.allocPrint(gpa, "/bin/sh '{s}'", .{producer});
     defer gpa.free(command);
     var from = transcript.items.len;
-    try child.write(command);
-    try child.write("\n");
-    try std.testing.expect(try child.readUntilFrom(gpa, &transcript, from, support.test_prompt, support.timeout_ms));
+    try terminal.write(command);
+    try terminal.write("\n");
+    try terminal.expectPromptFrom(from);
 
     // Grep rows share history's entry annotation and failure markers.
     var journal_dir_handle = try journal.journalDir();
@@ -482,16 +486,16 @@ test "terminal native grep omits its results while redirected output stays plain
     }
 
     from = transcript.items.len;
-    try child.write("env -u NO_COLOR TERM=xterm-256color GREP_COLORS='mt=4;32' \"$TJ\" grep --color auto --out NOOUT_GREP_PAYLOAD_012\n");
-    try std.testing.expect(try child.readUntilFrom(gpa, &transcript, from, "*@#\x1b[31m!\x1b[0m \x1b[33m1\x1b[0m \x1b[2m<\x1b[0m", support.timeout_ms));
-    try std.testing.expect(try child.readUntilFrom(gpa, &transcript, from, "\x1b[4;32mNOOUT_GREP_PAYLOAD_012\x1b[m", support.timeout_ms));
-    try std.testing.expect(try child.readUntilFrom(gpa, &transcript, from, "\x1b[32m@grep-hit #bug #parser\x1b[0m", support.timeout_ms));
-    try std.testing.expect(try child.readUntilFrom(gpa, &transcript, from, "\x1b[31m!7\x1b[0m", support.timeout_ms));
-    try std.testing.expect(try child.readUntilFrom(gpa, &transcript, from, support.test_prompt, support.timeout_ms));
+    try terminal.write("env -u NO_COLOR TERM=xterm-256color GREP_COLORS='mt=4;32' \"$TJ\" grep --color auto --out NOOUT_GREP_PAYLOAD_012\n");
+    try terminal.expectFrom(from, "*@#\x1b[31m!\x1b[0m \x1b[33m1\x1b[0m \x1b[2m<\x1b[0m");
+    try terminal.expectFrom(from, "\x1b[4;32mNOOUT_GREP_PAYLOAD_012\x1b[m");
+    try terminal.expectFrom(from, "\x1b[32m@grep-hit #bug #parser\x1b[0m");
+    try terminal.expectFrom(from, "\x1b[31m!7\x1b[0m");
+    try terminal.expectPromptFrom(from);
 
     from = transcript.items.len;
-    try child.write("command \"$TJ\" grep --out NOOUT_GREP_PAYLOAD_012\n");
-    try std.testing.expect(try child.readUntilFrom(gpa, &transcript, from, support.test_prompt, support.timeout_ms));
+    try terminal.write("command \"$TJ\" grep --out NOOUT_GREP_PAYLOAD_012\n");
+    try terminal.expectPromptFrom(from);
 
     const redirect_command = try std.fmt.allocPrint(
         gpa,
@@ -500,16 +504,16 @@ test "terminal native grep omits its results while redirected output stays plain
     );
     defer gpa.free(redirect_command);
     from = transcript.items.len;
-    try child.write(redirect_command);
-    try child.write("\n");
-    try std.testing.expect(try child.readUntilFrom(gpa, &transcript, from, support.test_prompt, support.timeout_ms));
+    try terminal.write(redirect_command);
+    try terminal.write("\n");
+    try terminal.expectPromptFrom(from);
 
     from = transcript.items.len;
-    try child.write("command \"$TJ\" grep --cmd SELF_ONLY_GREP_012; printf 'SELF-STATUS=%s\\n' $?\n");
-    try std.testing.expect(try child.readUntilFrom(gpa, &transcript, from, "SELF-STATUS=1", support.timeout_ms));
-    try std.testing.expect(try child.readUntilFrom(gpa, &transcript, from, support.test_prompt, support.timeout_ms));
-    try child.write("exit 0\n");
-    try std.testing.expectEqual(@as(u8, 0), try child.finish(gpa, &transcript, support.timeout_ms));
+    try terminal.write("command \"$TJ\" grep --cmd SELF_ONLY_GREP_012; printf 'SELF-STATUS=%s\\n' $?\n");
+    try terminal.expectFrom(from, "SELF-STATUS=1");
+    try terminal.expectPromptFrom(from);
+    try terminal.write("exit 0\n");
+    try std.testing.expectEqual(@as(u8, 0), try terminal.finish());
 
     for ([_][]const u8{ "2/out", "3/out" }) |path| {
         const recorded = try journal.read(gpa, path);
@@ -668,9 +672,10 @@ test "zsh completion keeps special resource names as one inert argument" {
     journal_root.close(io);
 
     const child = try support.spawnJournalZsh(gpa, &journal);
-    var out: std.ArrayList(u8) = .empty;
-    defer out.deinit(gpa);
-    try support.setupJournalZsh(gpa, child, &out);
+    var terminal = support.TerminalSession.init(gpa, child);
+    defer terminal.deinit();
+    const out = &terminal.transcript;
+    try terminal.setupZsh("");
 
     const publish = try support.publisher(gpa, "\\033]3110;RESOURCE;files/note *$ file.txt;text/plain\\033\\\\" ++
         "special-resource-content\\033]3110;END\\033\\\\" ++
@@ -678,9 +683,9 @@ test "zsh completion keeps special resource names as one inert argument" {
         "top-resource-content\\033]3110;END\\033\\\\");
     defer gpa.free(publish);
     var from = out.items.len;
-    try child.write(publish);
-    try child.write("\n");
-    try std.testing.expect(try child.readUntilFrom(gpa, &out, from, support.test_prompt, support.timeout_ms));
+    try terminal.write(publish);
+    try terminal.write("\n");
+    try terminal.expectPromptFrom(from);
 
     from = out.items.len;
     // `compinit` may otherwise stop for its insecure-directory question on a
@@ -704,127 +709,127 @@ test "zsh completion keeps special resource names as one inert argument" {
         gpa,
         " && _tj_register_completion && print -r -- TJ_COMPINIT_\"\"READY\n",
     );
-    try child.write(completion_setup.items);
-    if (!try child.readUntilFrom(gpa, &out, from, "TJ_COMPINIT_READY", support.timeout_ms)) {
+    try terminal.write(completion_setup.items);
+    if (!try terminal.waitFrom(from, "TJ_COMPINIT_READY", support.timeout_ms)) {
         std.debug.print("completion setup did not finish; transcript follows:\n{s}\n", .{out.items[from..]});
         return error.CompletionSetupDidNotFinish;
     }
-    if (!try child.readUntilFrom(gpa, &out, from, support.test_prompt, support.timeout_ms)) {
+    if (!try terminal.waitFrom(from, support.test_prompt, support.timeout_ms)) {
         std.debug.print("completion setup did not return a prompt; transcript follows:\n{s}\n", .{out.items[from..]});
         return error.CompletionPromptMissing;
     }
 
     // Expose the exact editable buffer after completion without accepting it.
     from = out.items.len;
-    try child.write(
+    try terminal.write(
         "_tj_test_buffer() { zle -M \"TJ_BUFFER=${(qqq)BUFFER} CURSOR=$CURSOR\"; }; " ++
             "zle -N _tj_test_buffer; " ++
             "bindkey -M emacs '^X^T' _tj_test_buffer; " ++
             "bindkey -M viins '^X^T' _tj_test_buffer\n",
     );
-    try std.testing.expect(try child.readUntilFrom(gpa, &out, from, support.test_prompt, support.timeout_ms));
+    try terminal.expectPromptFrom(from);
 
     // Zecli's generated script owns static command and option completion.
     from = out.items.len;
-    try child.write("tjctl repla");
-    try child.write("\t");
-    try std.testing.expect(try child.readUntilFrom(gpa, &out, from, "replay", support.timeout_ms));
-    try support.cancelZleLine(gpa, child, &out);
+    try terminal.write("tjctl repla");
+    try terminal.write("\t");
+    try terminal.expectFrom(from, "replay");
+    try terminal.cancelZleLine();
 
     from = out.items.len;
-    try child.write("tj hist --t");
-    try child.write("\t");
-    try std.testing.expect(try child.readUntilFrom(gpa, &out, from, "--tag", support.timeout_ms));
-    try support.cancelZleLine(gpa, child, &out);
+    try terminal.write("tj hist --t");
+    try terminal.write("\t");
+    try terminal.expectFrom(from, "--tag");
+    try terminal.cancelZleLine();
 
     // A generated command completer must report success after adding matches.
     // Otherwise zsh retries it for every matcher and prints duplicate groups.
     from = out.items.len;
-    try child.write(
+    try terminal.write(
         "zstyle ':completion:*' matcher-list '' " ++
             "'m:{a-zA-Z}={A-Za-z}' 'r:|[._-]=* r:|=*' 'l:|=* r:|=*'\n",
     );
-    try std.testing.expect(try child.readUntilFrom(gpa, &out, from, support.test_prompt, support.timeout_ms));
+    try terminal.expectPromptFrom(from);
     from = out.items.len;
-    try child.write("tj grep -\t\x18\x14");
-    try std.testing.expect(try child.readUntilFrom(gpa, &out, from, "TJ_BUFFER=", support.timeout_ms));
+    try terminal.write("tj grep -\t\x18\x14");
+    try terminal.expectFrom(from, "TJ_BUFFER=");
     try std.testing.expectEqual(
         @as(usize, 1),
         std.mem.count(u8, out.items[from..], "Search every journal"),
     );
-    try support.cancelZleLine(gpa, child, &out);
+    try terminal.cancelZleLine();
 
     from = out.items.len;
-    try child.write("command \"$TJ\" name @1 build-failure\n");
-    try std.testing.expect(try child.readUntilFrom(gpa, &out, from, support.test_prompt, support.timeout_ms));
+    try terminal.write("command \"$TJ\" name @1 build-failure\n");
+    try terminal.expectPromptFrom(from);
 
     // Tab remains resource completion until Enter accepts the completed word.
     from = out.items.len;
-    try child.write("cat @1/");
-    try child.write("\t");
-    try std.testing.expect(try child.readUntilFrom(gpa, &out, from, "files/", support.timeout_ms));
-    try support.cancelZleLine(gpa, child, &out);
+    try terminal.write("cat @1/");
+    try terminal.write("\t");
+    try terminal.expectFrom(from, "files/");
+    try terminal.cancelZleLine();
 
     // Expose preexec's exact command without changing the ZLE probe above.
     from = out.items.len;
-    try child.write(
+    try terminal.write(
         "_tj_test_preexec() { print -r -- \"TJ_PREEXEC=${(qqq)1}\" > /dev/tty; }; " ++
             "add-zsh-hook preexec _tj_test_preexec\n",
     );
-    try std.testing.expect(try child.readUntilFrom(gpa, &out, from, support.test_prompt, support.timeout_ms));
+    try terminal.expectPromptFrom(from);
 
     // The global shorthand completer works beneath a named interaction in an
     // arbitrary command. It does not change what will be executed.
     from = out.items.len;
-    try child.write("cat @build-failure/files/note");
-    try child.write("\t");
-    try std.testing.expect(try child.readUntilFrom(gpa, &out, from, "file.txt", support.timeout_ms));
-    try support.cancelZleLine(gpa, child, &out);
+    try terminal.write("cat @build-failure/files/note");
+    try terminal.write("\t");
+    try terminal.expectFrom(from, "file.txt");
+    try terminal.cancelZleLine();
 
     from = out.items.len;
-    try child.write("cat \"$(tj '@build-failure/files/note *$ file.txt')\"\n");
-    try std.testing.expect(try child.readUntilFrom(gpa, &out, from, "special-resource-content", support.timeout_ms));
-    try std.testing.expect(try child.readUntilFrom(gpa, &out, from, support.test_prompt, support.timeout_ms));
+    try terminal.write("cat \"$(tj '@build-failure/files/note *$ file.txt')\"\n");
+    try terminal.expectFrom(from, "special-resource-content");
+    try terminal.expectPromptFrom(from);
 
     // The original shorthand completion remains available.
     from = out.items.len;
-    try child.write("cat @1/files/note");
-    try child.write("\t");
-    try std.testing.expect(try child.readUntilFrom(gpa, &out, from, "file.txt", support.timeout_ms));
-    try support.cancelZleLine(gpa, child, &out);
+    try terminal.write("cat @1/files/note");
+    try terminal.write("\t");
+    try terminal.expectFrom(from, "file.txt");
+    try terminal.cancelZleLine();
 
     from = out.items.len;
-    try child.write("cat \"$(tj '@1/files/note *$ file.txt')\"\n");
-    try std.testing.expect(try child.readUntilFrom(gpa, &out, from, "special-resource-content", support.timeout_ms));
-    try std.testing.expect(try child.readUntilFrom(gpa, &out, from, support.test_prompt, support.timeout_ms));
+    try terminal.write("cat \"$(tj '@1/files/note *$ file.txt')\"\n");
+    try terminal.expectFrom(from, "special-resource-content");
+    try terminal.expectPromptFrom(from);
 
     // Zecli's positional completion delegates back to `support.tj complete`, so TJ
     // commands get the same entry-resource candidates as arbitrary commands.
     from = out.items.len;
-    try child.write("tj cat @1/cw");
-    try child.write("\t");
-    if (!try child.readUntilFrom(gpa, &out, from, "@1/cwd", support.timeout_ms)) {
+    try terminal.write("tj cat @1/cw");
+    try terminal.write("\t");
+    if (!try terminal.waitFrom(from, "@1/cwd", support.timeout_ms)) {
         std.debug.print("generated reference completion offered no cwd resource; transcript follows:\n{s}\n", .{out.items[from..]});
         return error.CommandReferenceCompletionMissing;
     }
-    try child.write("\x18\x14");
-    if (!try child.readUntilFrom(gpa, &out, from, "TJ_BUFFER=", support.timeout_ms)) {
+    try terminal.write("\x18\x14");
+    if (!try terminal.waitFrom(from, "TJ_BUFFER=", support.timeout_ms)) {
         std.debug.print("generated reference completion produced the wrong ZLE buffer; transcript follows:\n{s}\n", .{out.items[from..]});
         return error.CommandReferenceCompletionMismatch;
     }
-    try support.cancelZleLine(gpa, child, &out);
+    try terminal.cancelZleLine();
 
     // Journal operands delegate to tjctl's live canonical-name completer.
     // Keep this after @1 completion checks because cancelling ZLE lines records
     // probe entries and can make a numeric prefix ambiguous with @10.
     from = out.items.len;
-    try child.write("tjctl use rel\t\x18\x14");
-    try std.testing.expect(try child.readUntilFrom(gpa, &out, from, "TJ_BUFFER=", support.timeout_ms));
+    try terminal.write("tjctl use rel\t\x18\x14");
+    try terminal.expectFrom(from, "TJ_BUFFER=");
     try std.testing.expect(std.mem.indexOf(u8, out.items[from..], "release-build") != null);
-    try support.cancelZleLine(gpa, child, &out);
+    try terminal.cancelZleLine();
 
-    try child.write("exit 0\n");
-    try std.testing.expectEqual(@as(u8, 0), try child.finish(gpa, &out, support.timeout_ms));
+    try terminal.write("exit 0\n");
+    try std.testing.expectEqual(@as(u8, 0), try terminal.finish());
 }
 
 test "a published resource survives arbitrary bytes" {

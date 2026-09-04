@@ -52,25 +52,26 @@ test "each entry records the fully rendered zsh prompt" {
     const child = try support.spawnTjctl(gpa, &.{
         support.tjctl, "--home", home, "new", "--", "/usr/bin/env", "TERM=xterm-256color", "/bin/zsh", "-f", "-i",
     }, 24, 80);
-    var out: std.ArrayList(u8) = .empty;
-    defer out.deinit(gpa);
-    try support.setupJournalZsh(gpa, child, &out);
+    var terminal = support.TerminalSession.init(gpa, child);
+    defer terminal.deinit();
+    const out = &terminal.transcript;
+    try terminal.setupZsh("");
 
     // This stands in for prompt engines such as Starship: command and
     // parameter substitutions support.run while zsh renders a coloured, multiline
     // prompt with a right-hand side. TJ must retain those terminal bytes, not
     // the PROMPT source text and not a later re-evaluation of it.
     var from = out.items.len;
-    try child.write("setopt promptsubst; PROMPT='%F{magenta}TJ_DYNAMIC_$(print -rn -- STARSHIP_LIKE)_${TJ_NEXT}%f\nTJ_SECOND> '; RPROMPT='TJ_RIGHT'\n");
-    try std.testing.expect(try child.readUntilFrom(gpa, &out, from, "TJ_DYNAMIC_STARSHIP_LIKE_2", support.timeout_ms));
-    try std.testing.expect(try child.readUntilFrom(gpa, &out, from, "TJ_RIGHT", support.timeout_ms));
+    try terminal.write("setopt promptsubst; PROMPT='%F{magenta}TJ_DYNAMIC_$(print -rn -- STARSHIP_LIKE)_${TJ_NEXT}%f\nTJ_SECOND> '; RPROMPT='TJ_RIGHT'\n");
+    try terminal.expectFrom(from, "TJ_DYNAMIC_STARSHIP_LIKE_2");
+    try terminal.expectFrom(from, "TJ_RIGHT");
 
     from = out.items.len;
-    try child.write("echo PROMPT_CAPTURE_BODY\n");
-    try std.testing.expect(try child.readUntilFrom(gpa, &out, from, "PROMPT_CAPTURE_BODY", support.timeout_ms));
-    try std.testing.expect(try child.readUntilFrom(gpa, &out, from, "TJ_DYNAMIC_STARSHIP_LIKE_3", support.timeout_ms));
-    try child.write("exit 0\n");
-    try std.testing.expectEqual(@as(u8, 0), try child.finish(gpa, &out, support.timeout_ms));
+    try terminal.write("echo PROMPT_CAPTURE_BODY\n");
+    try terminal.expectFrom(from, "PROMPT_CAPTURE_BODY");
+    try terminal.expectFrom(from, "TJ_DYNAMIC_STARSHIP_LIKE_3");
+    try terminal.write("exit 0\n");
+    try std.testing.expectEqual(@as(u8, 0), try terminal.finish());
 
     // Interaction 1 changes the prompt; interaction 2 is the command entered
     // at the rendered dynamic prompt whose TJ_NEXT value was 2.
@@ -96,25 +97,26 @@ test "use appends to the same journal at its next unused number" {
     const name = try journal.journalName(gpa);
     defer gpa.free(name);
     const child = try support.spawnContinuedJournalZsh(gpa, &journal, name);
-    var out: std.ArrayList(u8) = .empty;
-    defer out.deinit(gpa);
-    try support.setupJournalZsh(gpa, child, &out);
+    var terminal = support.TerminalSession.init(gpa, child);
+    defer terminal.deinit();
+    const out = &terminal.transcript;
+    try terminal.setupZsh("");
 
     const from = out.items.len;
-    try child.write("echo continued-entry\n");
-    try std.testing.expect(try child.readUntilFrom(gpa, &out, from, support.test_prompt, support.timeout_ms));
+    try terminal.write("echo continued-entry\n");
+    try terminal.expectPromptFrom(from);
 
     const env_from = out.items.len;
-    try child.write("printf 'JENV=%s NEXT=%s REF=%s SHORT=%s\\n' \"$TJ_JOURNAL\" \"$TJ_NEXT\" \"$TJ_REF\" \"${TJ_JOURNAL_SHORT-unset}\"; command \"$TJCTL\" current\n");
-    try std.testing.expect(try child.readUntilFrom(gpa, &out, env_from, name, support.timeout_ms));
+    try terminal.write("printf 'JENV=%s NEXT=%s REF=%s SHORT=%s\\n' \"$TJ_JOURNAL\" \"$TJ_NEXT\" \"$TJ_REF\" \"${TJ_JOURNAL_SHORT-unset}\"; command \"$TJCTL\" current\n");
+    try terminal.expectFrom(env_from, name);
     try std.testing.expect(std.mem.indexOf(u8, out.items[env_from..], "SHORT=unset") != null);
     const expected_ref = try std.fmt.allocPrint(gpa, "REF=@{s}.", .{name});
     defer gpa.free(expected_ref);
     try std.testing.expect(std.mem.indexOf(u8, out.items[env_from..], expected_ref) != null);
-    try std.testing.expect(try child.readUntilFrom(gpa, &out, env_from, support.test_prompt, support.timeout_ms));
+    try terminal.expectPromptFrom(env_from);
 
-    try child.write("exit 0\n");
-    try std.testing.expectEqual(@as(u8, 0), try child.finish(gpa, &out, support.timeout_ms));
+    try terminal.write("exit 0\n");
+    try std.testing.expectEqual(@as(u8, 0), try terminal.finish());
 
     const first = try journal.read(gpa, "1/cmd");
     defer gpa.free(first);
@@ -169,16 +171,17 @@ test "the zsh plugin evaluates the configured title at each prompt" {
     const child = try support.spawnTjctl(gpa, &.{
         support.tjctl, "--home", home, "new", "--title", format, "--", "/bin/zsh", "-f", "-i",
     }, 24, 80);
-    var out: std.ArrayList(u8) = .empty;
-    defer out.deinit(gpa);
-    try support.setupJournalZsh(gpa, child, &out);
+    var terminal = support.TerminalSession.init(gpa, child);
+    defer terminal.deinit();
+    const out = &terminal.transcript;
+    try terminal.setupZsh("");
 
-    try std.testing.expect(try child.readUntil(gpa, &out, "FORMAT:@", support.timeout_ms));
+    try terminal.expectFrom(0, "FORMAT:@");
     try std.testing.expect(std.mem.indexOf(u8, out.items, ":42:COMMAND:") != null);
     try std.testing.expect(std.mem.indexOf(u8, out.items, "$TJ_REF") == null);
     try std.testing.expect(std.mem.indexOf(u8, out.items, "%1~") == null);
-    try child.write("exit 0\n");
-    try std.testing.expectEqual(@as(u8, 0), try child.finish(gpa, &out, support.timeout_ms));
+    try terminal.write("exit 0\n");
+    try std.testing.expectEqual(@as(u8, 0), try terminal.finish());
     try std.testing.expect(std.mem.indexOf(u8, out.items, "exit 0\x1b\\") != null);
 }
 
@@ -192,14 +195,15 @@ test "use preserves unfinished numbers and gaps" {
     const id = journal_name.legacy(20, .{8} ** 10);
     try scratch.makeJournal(id, &.{ "1", "3" });
     const child = try support.spawnTjctl(gpa, &.{ support.tjctl, "--home", scratch.path(), "use", &id, "--", "/bin/zsh", "-f", "-i" }, 24, 80);
-    var out: std.ArrayList(u8) = .empty;
-    defer out.deinit(gpa);
-    try support.setupJournalZsh(gpa, child, &out);
+    var terminal = support.TerminalSession.init(gpa, child);
+    defer terminal.deinit();
+    const out = &terminal.transcript;
+    try terminal.setupZsh("");
     const from = out.items.len;
-    try child.write("echo after-gap\n");
-    try std.testing.expect(try child.readUntilFrom(gpa, &out, from, support.test_prompt, support.timeout_ms));
-    try child.write("exit 0\n");
-    try std.testing.expectEqual(@as(u8, 0), try child.finish(gpa, &out, support.timeout_ms));
+    try terminal.write("echo after-gap\n");
+    try terminal.expectPromptFrom(from);
+    try terminal.write("exit 0\n");
+    try std.testing.expectEqual(@as(u8, 0), try terminal.finish());
 
     var dir = try scratch.tmp.dir.openDir(io, &id, .{});
     defer dir.close(io);
@@ -218,15 +222,16 @@ test "tj's own control sequences never reach the terminal" {
     defer journal.close();
 
     const child = try support.spawnJournalZsh(gpa, &journal);
-    var out: std.ArrayList(u8) = .empty;
-    defer out.deinit(gpa);
+    var terminal = support.TerminalSession.init(gpa, child);
+    defer terminal.deinit();
+    const out = &terminal.transcript;
 
-    try support.setupJournalZsh(gpa, child, &out);
+    try terminal.setupZsh("");
     const from = out.items.len;
-    try child.write("echo marker\n");
-    try std.testing.expect(try child.readUntilFrom(gpa, &out, from, support.test_prompt, support.timeout_ms));
-    try child.write("exit\n");
-    try std.testing.expectEqual(@as(u8, 0), try child.finish(gpa, &out, support.timeout_ms));
+    try terminal.write("echo marker\n");
+    try terminal.expectPromptFrom(from);
+    try terminal.write("exit\n");
+    try std.testing.expectEqual(@as(u8, 0), try terminal.finish());
 
     try std.testing.expect(std.mem.indexOf(u8, out.items, "marker") != null);
     // The command line travels inside an ELLO sequence; none of it may be shown.
@@ -260,17 +265,18 @@ test "an interrupted writer leaves the entry without an rc" {
     defer journal.close();
 
     const child = try support.spawnJournalZsh(gpa, &journal);
-    var out: std.ArrayList(u8) = .empty;
-    defer out.deinit(gpa);
+    var terminal = support.TerminalSession.init(gpa, child);
+    defer terminal.deinit();
+    const out = &terminal.transcript;
 
-    try support.setupJournalZsh(gpa, child, &out);
+    try terminal.setupZsh("");
     const from = out.items.len;
-    try child.write("sleep 30\n");
+    try terminal.write("sleep 30\n");
     // The echoed input arrives before preexec. Wait for the plugin's command
     // boundary so the proxy has opened the interaction before interrupting it.
-    try std.testing.expect(try child.readUntilFrom(gpa, &out, from, "133;C", support.timeout_ms));
-    _ = std.c.kill(child.pid, posix.SIG.TERM);
-    _ = try child.finish(gpa, &out, support.timeout_ms);
+    try terminal.expectFrom(from, "133;C");
+    _ = std.c.kill(terminal.child.pid, posix.SIG.TERM);
+    _ = try terminal.finish();
 
     const cmd = try journal.read(gpa, "1/cmd");
     defer gpa.free(cmd);
@@ -293,9 +299,10 @@ test "entries record cwd and tjcd changes zsh without expanding its reference" {
     defer gpa.free(target);
 
     const child = try support.spawnJournalZsh(gpa, &journal);
-    var transcript: std.ArrayList(u8) = .empty;
-    defer transcript.deinit(gpa);
-    try support.setupJournalZsh(gpa, child, &transcript);
+    var terminal = support.TerminalSession.init(gpa, child);
+    defer terminal.deinit();
+    const transcript = &terminal.transcript;
+    try terminal.setupZsh("");
 
     var cd_command: std.ArrayList(u8) = .empty;
     defer cd_command.deinit(gpa);
@@ -303,43 +310,43 @@ test "entries record cwd and tjcd changes zsh without expanding its reference" {
     try support.appendShellQuoted(gpa, &cd_command, target);
     try cd_command.append(gpa, '\n');
     var from = transcript.items.len;
-    try child.write(cd_command.items);
-    try std.testing.expect(try child.readUntilFrom(gpa, &transcript, from, support.test_prompt, support.timeout_ms));
+    try terminal.write(cd_command.items);
+    try terminal.expectPromptFrom(from);
 
     from = transcript.items.len;
-    try child.write("print -r -- CWD_CAPTURE_BODY\n");
-    try std.testing.expect(try child.readUntilFrom(gpa, &transcript, from, "CWD_CAPTURE_BODY", support.timeout_ms));
-    try std.testing.expect(try child.readUntilFrom(gpa, &transcript, from, support.test_prompt, support.timeout_ms));
+    try terminal.write("print -r -- CWD_CAPTURE_BODY\n");
+    try terminal.expectFrom(from, "CWD_CAPTURE_BODY");
+    try terminal.expectPromptFrom(from);
 
     from = transcript.items.len;
-    try child.write("cd /\n");
-    try std.testing.expect(try child.readUntilFrom(gpa, &transcript, from, support.test_prompt, support.timeout_ms));
+    try terminal.write("cd /\n");
+    try terminal.expectPromptFrom(from);
 
     from = transcript.items.len;
-    try child.write("tjcd @2\n");
-    try std.testing.expect(try child.readUntilFrom(gpa, &transcript, from, support.test_prompt, support.timeout_ms));
+    try terminal.write("tjcd @2\n");
+    try terminal.expectPromptFrom(from);
 
     const expected = try std.fmt.allocPrint(gpa, "TJCD_PWD={s}", .{target});
     defer gpa.free(expected);
     from = transcript.items.len;
-    try child.write("print -r -- \"TJCD_PWD=$PWD\"\n");
-    try std.testing.expect(try child.readUntilFrom(gpa, &transcript, from, expected, support.timeout_ms));
-    try std.testing.expect(try child.readUntilFrom(gpa, &transcript, from, support.test_prompt, support.timeout_ms));
+    try terminal.write("print -r -- \"TJCD_PWD=$PWD\"\n");
+    try terminal.expectFrom(from, expected);
+    try terminal.expectPromptFrom(from);
 
     from = transcript.items.len;
-    try child.write("cd /\n");
-    try std.testing.expect(try child.readUntilFrom(gpa, &transcript, from, support.test_prompt, support.timeout_ms));
+    try terminal.write("cd /\n");
+    try terminal.expectPromptFrom(from);
 
     const compound = "tjcd @2 && print -r -- \"TJCD_COMPOUND=$PWD\"";
     const compound_expected = try std.fmt.allocPrint(gpa, "TJCD_COMPOUND={s}", .{target});
     defer gpa.free(compound_expected);
     from = transcript.items.len;
-    try child.write(compound ++ "\n");
-    try std.testing.expect(try child.readUntilFrom(gpa, &transcript, from, compound_expected, support.timeout_ms));
-    try std.testing.expect(try child.readUntilFrom(gpa, &transcript, from, support.test_prompt, support.timeout_ms));
+    try terminal.write(compound ++ "\n");
+    try terminal.expectFrom(from, compound_expected);
+    try terminal.expectPromptFrom(from);
 
-    try child.write("exit 0\n");
-    try std.testing.expectEqual(@as(u8, 0), try child.finish(gpa, &transcript, support.timeout_ms));
+    try terminal.write("exit 0\n");
+    try std.testing.expectEqual(@as(u8, 0), try terminal.finish());
 
     const recorded_target = try journal.read(gpa, "2/cwd");
     defer gpa.free(recorded_target);

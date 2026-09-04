@@ -51,3 +51,25 @@ test "pty deadlines expire while output flows and reap the child" {
     try std.testing.expect(transcript.items.len > 0);
     try std.testing.expectError(error.PtyTimeout, child.finish(gpa, &transcript, 100));
 }
+
+test "terminal sessions match from offsets and finish exactly once" {
+    const gpa = std.testing.allocator;
+    var terminal = support.TerminalSession.init(gpa, try harness.spawn(
+        gpa,
+        &.{ "/bin/sh", "-c", "printf old-marker; IFS= read -r line; printf new-marker" },
+        24,
+        80,
+    ));
+    defer terminal.deinit();
+
+    try terminal.expectFrom(0, "old-marker");
+    const from = terminal.mark();
+    try std.testing.expect(!try terminal.waitFrom(from, "old-marker", 50));
+    try terminal.writeLine("continue");
+    try terminal.expectFrom(from, "new-marker");
+    try std.testing.expectEqual(@as(u8, 0), try terminal.finish());
+    // The raw PtyChild regression above covers forced cleanup after timeout.
+    // TerminalSession.deinit delegates to that same kill-and-reap path, so a
+    // second timing-sensitive process test would duplicate rather than extend
+    // the coverage.
+}
