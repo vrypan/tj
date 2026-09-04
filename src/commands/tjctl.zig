@@ -53,6 +53,7 @@ pub fn run(
                 if (!sys.envPresent("TJ_SHELL_HANDOFF")) return error.UseShellHandoff;
                 return emitHandoff(gpa, io, .{
                     .operation = .new,
+                    .selector = if (parsed.positionals.items.len == 0) null else parsed.positionals.items[0],
                     .temporary = parsed.enabled("temp"),
                 }, parsed, root_home_explicit, child, out);
             }
@@ -136,10 +137,17 @@ fn emitHandoff(
     for ([_][]const u8{ "keep-osc", "title", "title-blink", "no-splash" }) |flag| {
         if (parsed.present(flag)) return error.InsideJournalHandoffOptions;
     }
-    const requested_selector = spec.selector orelse "";
-    if (spec.operation == .use) if (sys.env("TJ_JOURNAL")) |current| {
-        if (std.mem.eql(u8, requested_selector, current) or std.mem.endsWith(u8, current, requested_selector)) return error.CurrentJournal;
-    };
+    var resolved_selector: ?[]u8 = null;
+    defer if (resolved_selector) |selected| gpa.free(selected);
+    const requested_selector = if (spec.operation == .use) blk: {
+        var root = try store.openRoot(io, null);
+        defer root.close(io);
+        resolved_selector = try store.findUniqueJournal(gpa, io, root, spec.selector.?);
+        if (sys.env("TJ_JOURNAL")) |current| {
+            if (std.mem.eql(u8, resolved_selector.?, current)) return error.CurrentJournal;
+        }
+        break :blk resolved_selector.?;
+    } else spec.selector orelse "";
 
     // A handoff refuses an explicit `--home`, so the target resolves against
     // the inherited root the live writer already uses (`TJ_HOME`, else ~/.tj).

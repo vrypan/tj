@@ -192,12 +192,54 @@ test "forged ELLO save and handoff requests are ignored" {
     // The behavioural check: a forged SAVE must not persist a temporary
     // journal, even when it guesses the token's shape.
     var temp = try support.runTjctl(gpa, &.{
-        "--home",  scratch.path(), "new", "--temp", "scratch-work", "--",
+        "--home",  scratch.path(), "new",                                                                "--temp", "scratch-work", "--",
         "/bin/sh", "-c",           "printf '\\033]3110;SAVE;0123456789abcdef0123456789abcdef\\033\\\\'",
     }, 24, 80);
     defer temp.out.deinit(gpa);
     try std.testing.expectEqual(@as(u8, 0), temp.code);
     try std.testing.expectError(error.FileNotFound, scratch.tmp.dir.statFile(io, "scratch-work", .{}));
+}
+
+test "shell handoff preserves new names and exact use selection" {
+    if (!support.haveZsh()) return error.SkipZigTest;
+    const gpa = std.testing.allocator;
+    var scratch = try support.Scratch.open();
+    defer scratch.close();
+
+    {
+        const child = try support.spawnTjctl(gpa, &.{
+            support.tjctl, "--home", scratch.path(), "new", "source", "--", "/bin/zsh", "-f", "-i",
+        }, 24, 80);
+        var terminal = support.TerminalSession.init(gpa, child);
+        defer terminal.deinit();
+        try terminal.setupZsh("");
+        try terminal.command("tj-new chosen-name");
+        const from = terminal.mark();
+        try terminal.writeLine("print -r -- HANDOFF_NEW:$TJ_JOURNAL:$TJ_NEXT");
+        try terminal.expectFrom(from, "HANDOFF_NEW:chosen-name:2");
+        try terminal.expectPromptFrom(from);
+        try terminal.writeLine("exit 0");
+        try std.testing.expectEqual(@as(u8, 0), try terminal.finish());
+        var chosen = try scratch.tmp.dir.openDir(std.testing.io, "chosen-name", .{});
+        chosen.close(std.testing.io);
+    }
+
+    try scratch.makeNamedJournal("test", &.{"1"});
+    {
+        const child = try support.spawnTjctl(gpa, &.{
+            support.tjctl, "--home", scratch.path(), "new", "work-test", "--", "/bin/zsh", "-f", "-i",
+        }, 24, 80);
+        var terminal = support.TerminalSession.init(gpa, child);
+        defer terminal.deinit();
+        try terminal.setupZsh("");
+        try terminal.command("tj-use test --no-replay");
+        const from = terminal.mark();
+        try terminal.writeLine("print -r -- HANDOFF_USE:$TJ_JOURNAL:$TJ_NEXT");
+        try terminal.expectFrom(from, "HANDOFF_USE:test:3");
+        try terminal.expectPromptFrom(from);
+        try terminal.writeLine("exit 0");
+        try std.testing.expectEqual(@as(u8, 0), try terminal.finish());
+    }
 }
 
 test "the nothing-recorded warning uses stderr when it is redirected" {
