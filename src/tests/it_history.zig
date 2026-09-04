@@ -3,6 +3,7 @@
 const std = @import("std");
 const noout = @import("../protocol/noout.zig");
 const report = @import("../presentation/report.zig");
+const sqlite = @import("../journal/sqlite.zig");
 
 const support = @import("it_support.zig");
 
@@ -89,6 +90,40 @@ test "names tags pins and tagged history use journal-local annotations" {
     var unpin = try support.run(gpa, &.{ "--home", home, "pin", "--remove", "@1" }, 24, 100);
     defer unpin.out.deinit(gpa);
     try std.testing.expectEqual(@as(u8, 0), unpin.code);
+}
+
+test "history reports invalid annotations without corrupting cleanup" {
+    if (!support.haveZsh()) return error.SkipZigTest;
+    const gpa = std.testing.allocator;
+
+    var journal = try support.Journal.open(gpa);
+    defer journal.close();
+    try support.recordJournal(gpa, &journal, &.{"echo recorded"});
+    try journal.enter(gpa);
+    const home = try journal.homeArg(gpa);
+    defer gpa.free(home);
+
+    var named = try support.run(gpa, &.{ "--home", home, "name", "@1", "valid-name" }, 24, 100);
+    defer named.out.deinit(gpa);
+    try std.testing.expectEqual(@as(u8, 0), named.code);
+
+    const journal_name = try journal.journalName(gpa);
+    defer gpa.free(journal_name);
+    const database_path = try std.fmt.allocPrintSentinel(
+        gpa,
+        "{s}/{s}/journal.sqlite3",
+        .{ home, journal_name },
+        0,
+    );
+    defer gpa.free(database_path);
+    var database = try sqlite.Database.open(database_path.ptr, sqlite.c.SQLITE_OPEN_READWRITE);
+    defer database.close();
+    try database.exec("UPDATE names SET name='1-invalid'");
+
+    var history = try support.run(gpa, &.{ "--home", home, "hist" }, 24, 100);
+    defer history.out.deinit(gpa);
+    try std.testing.expectEqual(@as(u8, 1), history.code);
+    try std.testing.expect(std.mem.indexOf(u8, history.out.items, "invalid or incompatible journal.sqlite3") != null);
 }
 
 test "history wraps to terminal width and pipes remain one entry per line" {

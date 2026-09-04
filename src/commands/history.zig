@@ -290,8 +290,9 @@ pub fn listInteractions(
             if (render_metadata) |*metadata| metadata.deinit(gpa);
             render_metadata = null;
             render_metadata = try annotations.openRead(gpa, io, root, journal.name);
+            const replacement = try annotations.loadSet(gpa, &render_metadata.?);
             render_annotations.deinit(gpa);
-            render_annotations = try annotations.loadSet(gpa, &render_metadata.?);
+            render_annotations = replacement;
             render_journal = item.journal_index;
         }
         const annotation = render_annotations.get(item.number);
