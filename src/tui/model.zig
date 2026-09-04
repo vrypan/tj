@@ -641,6 +641,7 @@ test "detail navigation selects values and inclusive ranges" {
         .detail = .{
             .number = 1,
             .document = @constCast("cwd cmd one two"),
+            .exports = @constCast("cwd cmd one two"),
             .items = &items,
         },
         .detail_selected = try std.DynamicBitSetUnmanaged.initEmpty(gpa, items.len),
@@ -672,7 +673,7 @@ test "detail navigation extends selections by pages and to boundaries" {
     var model: Model = .{
         .mode = .detail,
         .size = .{ .rows = 6, .cols = 80 },
-        .detail = .{ .number = 1, .document = @constCast(""), .items = &items },
+        .detail = .{ .number = 1, .document = @constCast(""), .exports = @constCast(""), .items = &items },
         .detail_selected = try std.DynamicBitSetUnmanaged.initEmpty(gpa, items.len),
         .detail_range_base = try std.DynamicBitSetUnmanaged.initEmpty(gpa, items.len),
     };
@@ -705,7 +706,7 @@ test "detail scrolling moves only when focus crosses a viewport edge" {
     };
     var model: Model = .{
         .size = .{ .rows = 6, .cols = 80 },
-        .detail = .{ .number = 1, .document = @constCast(""), .items = &items },
+        .detail = .{ .number = 1, .document = @constCast(""), .exports = @constCast(""), .items = &items },
     };
 
     model.detail_viewport.setCursor(2, items.len, model.listRows());

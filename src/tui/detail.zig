@@ -15,21 +15,25 @@ pub const Item = struct {
     section_end: usize,
     payload_start: usize,
     payload_end: usize,
+    export_start: usize = 0,
+    export_end: usize = 0,
 };
 
 pub const Detail = struct {
     number: u32,
     document: []u8,
+    exports: []u8,
     items: []Item,
 
     pub fn deinit(self: *Detail, gpa: std.mem.Allocator) void {
         gpa.free(self.document);
+        gpa.free(self.exports);
         gpa.free(self.items);
         self.* = undefined;
     }
 
     pub fn itemValue(self: *const Detail, item: Item) []const u8 {
-        return self.document[item.payload_start..item.payload_end];
+        return self.exports[item.export_start..item.export_end];
     }
 };
 
@@ -65,7 +69,7 @@ pub fn load(
         gpa.free(resources);
     }
     const output = try readPlainOutput(gpa, io, root, journal, number);
-    defer gpa.free(output.text);
+    defer output.deinit(gpa);
 
     const command = try report.sanitizeDisplayText(gpa, info.command);
     defer gpa.free(command);
@@ -77,6 +81,8 @@ pub fn load(
 
     var document: std.ArrayList(u8) = .empty;
     errdefer document.deinit(gpa);
+    var exports: std.ArrayList(u8) = .empty;
+    errdefer exports.deinit(gpa);
     var special_items: std.ArrayList(Item) = .empty;
     defer special_items.deinit(gpa);
     try document.print(gpa, "entry     @{d}\n", .{number});
@@ -91,11 +97,14 @@ pub fn load(
     } else {
         try document.appendSlice(gpa, cwd_value);
     }
+    const cwd_export = try appendExport(gpa, &exports, if (cwd) |value| value else "");
     try special_items.append(gpa, .{
         .section_start = item_start,
         .section_end = document.items.len,
         .payload_start = cwd_payload_start,
         .payload_end = cwd_payload_start + cwd_value.len,
+        .export_start = cwd_export.start,
+        .export_end = cwd_export.end,
     });
     try document.append(gpa, '\n');
 
@@ -103,11 +112,14 @@ pub fn load(
     try document.appendSlice(gpa, "cmd       ");
     const command_payload_start = document.items.len;
     if (command.len == 0) try document.appendSlice(gpa, "(empty)") else try document.appendSlice(gpa, command);
+    const command_export = try appendExport(gpa, &exports, info.command);
     try special_items.append(gpa, .{
         .section_start = item_start,
         .section_end = document.items.len,
         .payload_start = command_payload_start,
         .payload_end = command_payload_start + command.len,
+        .export_start = command_export.start,
+        .export_end = command_export.end,
     });
     try document.append(gpa, '\n');
 
@@ -164,6 +176,8 @@ pub fn load(
         .section_end = document.items.len,
         .payload_start = document.items.len,
         .payload_end = document.items.len,
+        .export_start = exports.items.len,
+        .export_end = exports.items.len,
     });
     try document.append(gpa, '\n');
     if (!output.present or output.text.len == 0) {
@@ -174,22 +188,30 @@ pub fn load(
             .section_end = document.items.len,
             .payload_start = item_start,
             .payload_end = item_start,
+            .export_start = exports.items.len,
+            .export_end = exports.items.len,
         });
     } else {
         var line_start: usize = 0;
+        var output_line_index: usize = 0;
         while (line_start < output.text.len) {
             const relative_end = std.mem.indexOfScalar(u8, output.text[line_start..], '\n');
             const line_end = if (relative_end) |offset| line_start + offset else output.text.len;
+            const source = output.raw_lines[output_line_index];
             item_start = document.items.len;
             try document.appendSlice(gpa, output.text[line_start..line_end]);
             const payload_end = document.items.len;
             if (line_end == line_start) try document.appendSlice(gpa, " ");
+            const raw_export = try appendExport(gpa, &exports, output.raw[source.start..source.end]);
             try special_items.append(gpa, .{
                 .section_start = item_start,
                 .section_end = document.items.len,
                 .payload_start = item_start,
                 .payload_end = payload_end,
+                .export_start = raw_export.start,
+                .export_end = raw_export.end,
             });
+            output_line_index += 1;
             if (relative_end == null) break;
             try document.append(gpa, '\n');
             line_start = line_end + 1;
@@ -212,11 +234,14 @@ pub fn load(
         } else {
             const text = document.items[line_start..line_end];
             const label_len = if (line_start < output_separator_start) fieldLabelLength(text) else null;
+            const export_range = try appendExport(gpa, &exports, text[(label_len orelse 0)..]);
             try items.append(gpa, .{
                 .section_start = line_start,
                 .section_end = line_end,
                 .payload_start = line_start + (label_len orelse 0),
                 .payload_end = line_end,
+                .export_start = export_range.start,
+                .export_end = export_range.end,
             });
         }
         if (relative_end == null) break;
@@ -225,12 +250,23 @@ pub fn load(
     }
     const owned_document = try document.toOwnedSlice(gpa);
     errdefer gpa.free(owned_document);
+    const owned_exports = try exports.toOwnedSlice(gpa);
+    errdefer gpa.free(owned_exports);
     const owned_items = try items.toOwnedSlice(gpa);
     return .{
         .number = number,
         .document = owned_document,
+        .exports = owned_exports,
         .items = owned_items,
     };
+}
+
+const ExportRange = struct { start: usize, end: usize };
+
+fn appendExport(gpa: std.mem.Allocator, exports: *std.ArrayList(u8), value: []const u8) !ExportRange {
+    const start = exports.items.len;
+    try exports.appendSlice(gpa, value);
+    return .{ .start = start, .end = exports.items.len };
 }
 
 /// Field labels are structural: they explain a value but are not included when
@@ -256,8 +292,42 @@ fn fieldLabelLength(line: []const u8) ?usize {
 
 const PlainOutput = struct {
     text: []u8,
+    raw: []u8,
+    raw_lines: []ExportRange,
     present: bool,
     truncated: bool,
+
+    fn deinit(self: PlainOutput, gpa: std.mem.Allocator) void {
+        gpa.free(self.text);
+        gpa.free(self.raw);
+        gpa.free(self.raw_lines);
+    }
+};
+
+const OutputMapper = struct {
+    gpa: std.mem.Allocator,
+    text: std.ArrayList(u8) = .empty,
+    raw_lines: std.ArrayList(ExportRange) = .empty,
+    raw_start: usize = 0,
+    raw_end: usize = 0,
+
+    fn deinit(self: *OutputMapper) void {
+        self.text.deinit(self.gpa);
+        self.raw_lines.deinit(self.gpa);
+    }
+
+    pub fn writeAll(self: *OutputMapper, bytes: []const u8) !void {
+        try self.text.appendSlice(self.gpa, bytes);
+        if (std.mem.eql(u8, bytes, "\n")) {
+            try self.raw_lines.append(self.gpa, .{ .start = self.raw_start, .end = self.raw_end });
+            self.raw_start = self.raw_end;
+        }
+    }
+
+    fn finishLine(self: *OutputMapper) !void {
+        if (self.text.items.len == 0 or self.text.items[self.text.items.len - 1] == '\n') return;
+        try self.raw_lines.append(self.gpa, .{ .start = self.raw_start, .end = self.raw_end });
+    }
 };
 
 fn readPlainOutput(
@@ -270,16 +340,28 @@ fn readPlainOutput(
     var path_buf: [128]u8 = undefined;
     const path = try std.fmt.bufPrint(&path_buf, "{s}/{d}/out", .{ journal, number });
     const file = root.openFile(io, path, .{}) catch |err| switch (err) {
-        error.FileNotFound => return .{ .text = try gpa.dupe(u8, ""), .present = false, .truncated = false },
+        error.FileNotFound => {
+            const text = try gpa.dupe(u8, "");
+            errdefer gpa.free(text);
+            const raw = try gpa.dupe(u8, "");
+            errdefer gpa.free(raw);
+            return .{
+                .text = text,
+                .raw = raw,
+                .raw_lines = try gpa.alloc(ExportRange, 0),
+                .present = false,
+                .truncated = false,
+            };
+        },
         else => return err,
     };
     defer file.close(io);
     const length = try file.length(io);
 
-    var output: std.ArrayList(u8) = .empty;
-    errdefer output.deinit(gpa);
-    var writer = Io.Writer.Allocating.fromArrayList(gpa, &output);
-    defer output = writer.toArrayList();
+    var raw: std.ArrayList(u8) = .empty;
+    errdefer raw.deinit(gpa);
+    var mapper: OutputMapper = .{ .gpa = gpa };
+    errdefer mapper.deinit();
     var renderer = plain.Renderer.init(gpa);
     defer renderer.deinit();
     var reader_buf: [64 * 1024]u8 = undefined;
@@ -289,13 +371,65 @@ fn readPlainOutput(
     while (remaining != 0) {
         const count = try reader.interface.readSliceShort(bytes[0..@min(bytes.len, remaining)]);
         if (count == 0) break;
-        try renderer.feed(bytes[0..count], &writer.writer);
+        for (bytes[0..count]) |byte| {
+            try raw.append(gpa, byte);
+            mapper.raw_end = raw.items.len;
+            try renderer.feed(&.{byte}, &mapper);
+        }
         remaining -= count;
     }
-    try renderer.finish(&writer.writer);
+    try renderer.finish(&mapper);
+    try mapper.finishLine();
+    const text = try mapper.text.toOwnedSlice(gpa);
+    errdefer gpa.free(text);
+    const raw_lines = try mapper.raw_lines.toOwnedSlice(gpa);
+    errdefer gpa.free(raw_lines);
     return .{
-        .text = try writer.toOwnedSlice(),
+        .text = text,
+        .raw = try raw.toOwnedSlice(gpa),
+        .raw_lines = raw_lines,
         .present = true,
         .truncated = length > output_limit,
     };
+}
+
+test "detail exports original command cwd and output bytes" {
+    const gpa = std.testing.allocator;
+    const io = std.testing.io;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var root_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const root_len = try tmp.dir.realPath(io, &root_buf);
+    const home = root_buf[0..root_len];
+
+    var journal = try store.Store.createJournal(gpa, io, home);
+    defer journal.close();
+    journal.begin("echo first\necho second", null, "/tmp/two  spaces");
+    journal.append("  indented\t\x1b[31mred\x1b[0m\n\x1b]0;hidden\nstill hidden\x07last line");
+    journal.finish(0);
+
+    var detail = try load(gpa, io, home, journal.journalId(), 1);
+    defer detail.deinit(gpa);
+    var command_found = false;
+    var cwd_found = false;
+    var first_output_found = false;
+    var last_output_found = false;
+    for (detail.items) |item| {
+        const shown = detail.document[item.section_start..item.section_end];
+        const value = detail.itemValue(item);
+        if (std.mem.startsWith(u8, shown, "cmd       ")) {
+            try std.testing.expectEqualStrings("echo first\necho second", value);
+            command_found = true;
+        } else if (std.mem.startsWith(u8, shown, "cwd       ")) {
+            try std.testing.expectEqualStrings("/tmp/two  spaces", value);
+            cwd_found = true;
+        } else if (std.mem.indexOf(u8, shown, "indented") != null) {
+            try std.testing.expectEqualStrings("  indented\t\x1b[31mred\x1b[0m\n", value);
+            first_output_found = true;
+        } else if (std.mem.indexOf(u8, shown, "last line") != null) {
+            try std.testing.expectEqualStrings("\x1b]0;hidden\nstill hidden\x07last line", value);
+            last_output_found = true;
+        }
+    }
+    try std.testing.expect(command_found and cwd_found and first_output_found and last_output_found);
 }
