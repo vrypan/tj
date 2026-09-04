@@ -54,13 +54,39 @@ pub fn leaveJournal() void {
     sys.setEnv("TJ_JOURNAL", "");
 }
 
-pub fn spawnTj(gpa: std.mem.Allocator, args: []const []const u8, rows: u16, cols: u16) !harness.PtyChild {
-    isolateJournal();
-    return harness.spawn(gpa, args, rows, cols);
-}
+const Program = enum {
+    tj,
+    tjctl,
 
-pub fn spawnTjctl(gpa: std.mem.Allocator, args: []const []const u8, rows: u16, cols: u16) !harness.PtyChild {
+    fn executable(self: Program) []const u8 {
+        return switch (self) {
+            .tj => tj,
+            .tjctl => tjctl,
+        };
+    }
+};
+
+const PtyRunResult = struct {
+    out: std.ArrayList(u8),
+    code: u8,
+};
+
+const ClosedStdoutResult = struct {
+    term: std.process.Child.Term,
+    stderr: []u8,
+};
+
+fn spawnProgram(
+    gpa: std.mem.Allocator,
+    program: Program,
+    args: []const []const u8,
+    rows: u16,
+    cols: u16,
+    quiet_lifecycle: bool,
+) !harness.PtyChild {
     isolateJournal();
+    if (program != .tjctl or !quiet_lifecycle) return harness.spawn(gpa, args, rows, cols);
+
     // Most integration tests exercise the writer or its child rather than the
     // deliberate startup pause. Keep those fixtures non-interactive; splash
     // tests call spawnTjctlWithSplash directly.
@@ -90,74 +116,65 @@ pub fn spawnTjctl(gpa: std.mem.Allocator, args: []const []const u8, rows: u16, c
     return harness.spawn(gpa, adjusted.items, rows, cols);
 }
 
+pub fn spawnTj(gpa: std.mem.Allocator, args: []const []const u8, rows: u16, cols: u16) !harness.PtyChild {
+    return spawnProgram(gpa, .tj, args, rows, cols, false);
+}
+
+pub fn spawnTjctl(gpa: std.mem.Allocator, args: []const []const u8, rows: u16, cols: u16) !harness.PtyChild {
+    return spawnProgram(gpa, .tjctl, args, rows, cols, true);
+}
+
 pub fn spawnTjctlWithSplash(gpa: std.mem.Allocator, args: []const []const u8, rows: u16, cols: u16) !harness.PtyChild {
-    isolateJournal();
-    return harness.spawn(gpa, args, rows, cols);
+    return spawnProgram(gpa, .tjctl, args, rows, cols, false);
 }
 
-pub fn run(gpa: std.mem.Allocator, args: []const []const u8, rows: u16, cols: u16) !struct {
-    out: std.ArrayList(u8),
-    code: u8,
-} {
+fn runPty(gpa: std.mem.Allocator, program: Program, args: []const []const u8, rows: u16, cols: u16) !PtyRunResult {
     var argv: std.ArrayList([]const u8) = .empty;
     defer argv.deinit(gpa);
-    try argv.append(gpa, tj);
+    try argv.append(gpa, program.executable());
     try argv.appendSlice(gpa, args);
 
-    const child = try spawnTj(gpa, argv.items, rows, cols);
+    const child = try spawnProgram(gpa, program, argv.items, rows, cols, true);
     var out: std.ArrayList(u8) = .empty;
     const code = try child.finish(gpa, &out, timeout_ms);
     return .{ .out = out, .code = code };
 }
 
-pub fn runTjctl(gpa: std.mem.Allocator, args: []const []const u8, rows: u16, cols: u16) !struct {
-    out: std.ArrayList(u8),
-    code: u8,
-} {
+pub fn run(gpa: std.mem.Allocator, args: []const []const u8, rows: u16, cols: u16) !PtyRunResult {
+    return runPty(gpa, .tj, args, rows, cols);
+}
+
+pub fn runTjctl(gpa: std.mem.Allocator, args: []const []const u8, rows: u16, cols: u16) !PtyRunResult {
+    return runPty(gpa, .tjctl, args, rows, cols);
+}
+
+fn runNonTtyProgram(gpa: std.mem.Allocator, program: Program, args: []const []const u8) !std.process.RunResult {
     var argv: std.ArrayList([]const u8) = .empty;
     defer argv.deinit(gpa);
-    try argv.append(gpa, tjctl);
+    try argv.append(gpa, program.executable());
     try argv.appendSlice(gpa, args);
-    const child = try spawnTjctl(gpa, argv.items, rows, cols);
-    var out: std.ArrayList(u8) = .empty;
-    const code = try child.finish(gpa, &out, timeout_ms);
-    return .{ .out = out, .code = code };
+    return std.process.run(gpa, std.testing.io, .{
+        .argv = argv.items,
+        .stdout_limit = .limited(1 << 20),
+        .stderr_limit = .limited(1 << 20),
+    });
 }
 
 pub fn runNonTty(gpa: std.mem.Allocator, args: []const []const u8) !std.process.RunResult {
-    var argv: std.ArrayList([]const u8) = .empty;
-    defer argv.deinit(gpa);
-    try argv.append(gpa, tj);
-    try argv.appendSlice(gpa, args);
-    return std.process.run(gpa, std.testing.io, .{
-        .argv = argv.items,
-        .stdout_limit = .limited(1 << 20),
-        .stderr_limit = .limited(1 << 20),
-    });
+    return runNonTtyProgram(gpa, .tj, args);
 }
 
 pub fn runTjctlNonTty(gpa: std.mem.Allocator, args: []const []const u8) !std.process.RunResult {
-    var argv: std.ArrayList([]const u8) = .empty;
-    defer argv.deinit(gpa);
-    try argv.append(gpa, tjctl);
-    try argv.appendSlice(gpa, args);
-    return std.process.run(gpa, std.testing.io, .{
-        .argv = argv.items,
-        .stdout_limit = .limited(1 << 20),
-        .stderr_limit = .limited(1 << 20),
-    });
+    return runNonTtyProgram(gpa, .tjctl, args);
 }
 
-pub fn runWithClosedStdout(gpa: std.mem.Allocator, args: []const []const u8) !struct {
-    term: std.process.Child.Term,
-    stderr: []u8,
-} {
+fn runWithClosedStdoutProgram(gpa: std.mem.Allocator, program: Program, args: []const []const u8) !ClosedStdoutResult {
     isolateJournal();
     const io = std.testing.io;
 
     var argv: std.ArrayList([]const u8) = .empty;
     defer argv.deinit(gpa);
-    try argv.append(gpa, tj);
+    try argv.append(gpa, program.executable());
     try argv.appendSlice(gpa, args);
 
     var child = try std.process.spawn(io, .{
@@ -184,31 +201,41 @@ pub fn runWithClosedStdout(gpa: std.mem.Allocator, args: []const []const u8) !st
     };
 }
 
-pub fn runTjctlWithClosedStdout(gpa: std.mem.Allocator, args: []const []const u8) !struct {
-    term: std.process.Child.Term,
-    stderr: []u8,
-} {
-    isolateJournal();
-    const io = std.testing.io;
+pub fn runWithClosedStdout(gpa: std.mem.Allocator, args: []const []const u8) !ClosedStdoutResult {
+    return runWithClosedStdoutProgram(gpa, .tj, args);
+}
+
+pub fn runTjctlWithClosedStdout(gpa: std.mem.Allocator, args: []const []const u8) !ClosedStdoutResult {
+    return runWithClosedStdoutProgram(gpa, .tjctl, args);
+}
+
+fn runNonTtyInJournalProgram(
+    gpa: std.mem.Allocator,
+    program: Program,
+    args: []const []const u8,
+    journal: []const u8,
+    next: []const u8,
+) !std.process.RunResult {
     var argv: std.ArrayList([]const u8) = .empty;
     defer argv.deinit(gpa);
-    try argv.append(gpa, tjctl);
+    try argv.append(gpa, program.executable());
     try argv.appendSlice(gpa, args);
-    var child = try std.process.spawn(io, .{
+    var environ = try std.process.Environ.createMap(std.testing.environ, gpa);
+    defer environ.deinit();
+    try environ.put("TJ_JOURNAL", journal);
+    try environ.put("TJ_NEXT", next);
+    if (program == .tj) {
+        // The native command must not depend on the optional ripgrep
+        // companion.
+        try environ.put("PATH", "");
+        try environ.put("GREP_COLORS", "mt=01;31");
+    }
+    return std.process.run(gpa, std.testing.io, .{
         .argv = argv.items,
-        .stdin = .ignore,
-        .stdout = .pipe,
-        .stderr = .pipe,
+        .environ_map = &environ,
+        .stdout_limit = .limited(1 << 20),
+        .stderr_limit = .limited(1 << 20),
     });
-    defer child.kill(io);
-    child.stdout.?.close(io);
-    child.stdout = null;
-    const stderr_file = child.stderr.?;
-    var stderr_reader: Io.File.Reader = .initStreaming(stderr_file, io, &.{});
-    const stderr = try stderr_reader.interface.allocRemaining(gpa, .limited(1 << 20));
-    stderr_file.close(io);
-    child.stderr = null;
-    return .{ .term = try child.wait(io), .stderr = stderr };
 }
 
 pub fn runNonTtyInJournal(
@@ -217,23 +244,7 @@ pub fn runNonTtyInJournal(
     journal: []const u8,
     next: []const u8,
 ) !std.process.RunResult {
-    var argv: std.ArrayList([]const u8) = .empty;
-    defer argv.deinit(gpa);
-    try argv.append(gpa, tj);
-    try argv.appendSlice(gpa, args);
-    var environ = try std.process.Environ.createMap(std.testing.environ, gpa);
-    defer environ.deinit();
-    try environ.put("TJ_JOURNAL", journal);
-    try environ.put("TJ_NEXT", next);
-    // The native command must not depend on the optional ripgrep companion.
-    try environ.put("PATH", "");
-    try environ.put("GREP_COLORS", "mt=01;31");
-    return std.process.run(gpa, std.testing.io, .{
-        .argv = argv.items,
-        .environ_map = &environ,
-        .stdout_limit = .limited(1 << 20),
-        .stderr_limit = .limited(1 << 20),
-    });
+    return runNonTtyInJournalProgram(gpa, .tj, args, journal, next);
 }
 
 pub fn runTjctlNonTtyInJournal(
@@ -242,20 +253,7 @@ pub fn runTjctlNonTtyInJournal(
     journal: []const u8,
     next: []const u8,
 ) !std.process.RunResult {
-    var argv: std.ArrayList([]const u8) = .empty;
-    defer argv.deinit(gpa);
-    try argv.append(gpa, tjctl);
-    try argv.appendSlice(gpa, args);
-    var environ = try std.process.Environ.createMap(std.testing.environ, gpa);
-    defer environ.deinit();
-    try environ.put("TJ_JOURNAL", journal);
-    try environ.put("TJ_NEXT", next);
-    return std.process.run(gpa, std.testing.io, .{
-        .argv = argv.items,
-        .environ_map = &environ,
-        .stdout_limit = .limited(1 << 20),
-        .stderr_limit = .limited(1 << 20),
-    });
+    return runNonTtyInJournalProgram(gpa, .tjctl, args, journal, next);
 }
 
 /// Drains a large PTY transcript without retaining bytes that precede its
