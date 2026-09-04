@@ -52,6 +52,29 @@ test "pty deadlines expire while output flows and reap the child" {
     try std.testing.expectError(error.PtyTimeout, child.finish(gpa, &transcript, 100));
 }
 
+test "child environment snapshots preserve empty values PATH and exit status" {
+    const gpa = std.testing.allocator;
+    const name = "TJ_TEST_CHILD_VALUE";
+    const inherited = std.testing.environ.getPosix(name);
+    var guard = try support.EnvGuard.init(gpa, &.{ name, "TJ_TEST_CHILD_EMPTY", "TJ_TEST_CHILD_MISSING", "PATH" });
+    defer guard.deinit();
+    support.sys.setEnv(name, "selected");
+    support.sys.setEnv("TJ_TEST_CHILD_EMPTY", "");
+    support.sys.unsetEnv("TJ_TEST_CHILD_MISSING");
+    support.sys.setEnv("PATH", "/nonexistent-tj-test:/bin:/usr/bin");
+    // Updating the fixture map must not change the process's inherited block.
+    try std.testing.expectEqual(inherited, std.testing.environ.getPosix(name));
+
+    var terminal = support.TerminalSession.init(gpa, try harness.spawn(gpa, &.{
+        "sh",                                                                                                                            "-c",
+        "printf '%s|%s|%s|%s' \"$TJ_TEST_CHILD_VALUE\" \"${TJ_TEST_CHILD_EMPTY+x}\" \"${TJ_TEST_CHILD_MISSING-unset}\" \"$1\"; exit 23", "sh",
+        "argument with spaces",
+    }, 24, 80));
+    defer terminal.deinit();
+    try terminal.expectFrom(0, "selected|x|unset|argument with spaces");
+    try std.testing.expectEqual(@as(u8, 23), try terminal.finish());
+}
+
 test "terminal sessions match from offsets and finish exactly once" {
     const gpa = std.testing.allocator;
     var terminal = support.TerminalSession.init(gpa, try harness.spawn(

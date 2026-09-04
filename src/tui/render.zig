@@ -276,7 +276,7 @@ test "entry render leaves a blank row after the bold header" {
     const page: page_module.Page = .{ .range = .{ .start = 0, .end = 2 }, .rows = &rows, .valid = true };
 
     var screen_and_fd = try testScreen(5, 40);
-    defer _ = std.posix.system.close(screen_and_fd[1]);
+    defer (std.Io.File{ .handle = screen_and_fd[1], .flags = .{ .nonblocking = false } }).close(std.testing.io);
     defer screen_and_fd[0].deinit();
     try draw("work", &model, &page, &screen_and_fd[0]);
 
@@ -307,7 +307,7 @@ test "entry render includes the last row at minimum terminal height" {
     const page: page_module.Page = .{ .range = .{ .start = 0, .end = 1 }, .rows = &rows, .valid = true };
 
     var screen_and_fd = try testScreen(4, 32);
-    defer _ = std.posix.system.close(screen_and_fd[1]);
+    defer (std.Io.File{ .handle = screen_and_fd[1], .flags = .{ .nonblocking = false } }).close(std.testing.io);
     defer screen_and_fd[0].deinit();
     try draw("work", &model, &page, &screen_and_fd[0]);
 
@@ -338,7 +338,7 @@ test "detail render leaves a blank row after the bold header" {
     const page: page_module.Page = .{};
 
     var screen_and_fd = try testScreen(5, 32);
-    defer _ = std.posix.system.close(screen_and_fd[1]);
+    defer (std.Io.File{ .handle = screen_and_fd[1], .flags = .{ .nonblocking = false } }).close(std.testing.io);
     defer screen_and_fd[0].deinit();
     try draw("work", &model, &page, &screen_and_fd[0]);
 

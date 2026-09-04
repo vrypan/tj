@@ -18,14 +18,14 @@ pub const pop_sequence = "\x1b[23;0t";
 /// splash signal paths restore it even though Zig will not run defers there.
 var title_pushed: std.atomic.Value(bool) = .init(false);
 
-pub fn push(fd: sys.Fd) void {
-    sys.writeAll(fd, push_sequence) catch return;
+pub fn push(io: std.Io, fd: sys.Fd) void {
+    sys.writeAll(io, fd, push_sequence) catch return;
     title_pushed.store(true, .monotonic);
 }
 
-pub fn pop(fd: sys.Fd) void {
+pub fn pop(io: std.Io, fd: sys.Fd) void {
     if (!title_pushed.swap(false, .monotonic)) return;
-    sys.writeAll(fd, pop_sequence) catch {};
+    sys.writeAll(io, fd, pop_sequence) catch {};
 }
 
 /// Uses only the async-signal-safe `write(2)` operation.
@@ -34,10 +34,10 @@ pub fn restoreFromSignal(fd: sys.Fd) void {
     _ = c.write(fd, pop_sequence.ptr, pop_sequence.len);
 }
 
-pub fn writeFallback(fd: sys.Fd, journal: []const u8) void {
+pub fn writeFallback(io: std.Io, fd: sys.Fd, journal: []const u8) void {
     var buf: [128]u8 = undefined;
     const sequence = std.fmt.bufPrint(&buf, "\x1b]0;{s}\x1b\\", .{journal}) catch return;
-    sys.writeAll(fd, sequence) catch {};
+    sys.writeAll(io, fd, sequence) catch {};
 }
 
 const State = enum { ground, escape, probe, title, pass };
@@ -292,6 +292,7 @@ pub const Decorator = struct {
 /// recording marker. The proxy owns all calls, so writes cannot interleave
 /// with bytes being forwarded from the child PTY.
 pub const Blinker = struct {
+    io: std.Io,
     fd: sys.Fd,
     interval_ms: u32,
     next_tick_ms: i64,
@@ -305,9 +306,10 @@ pub const Blinker = struct {
     has_window: bool = false,
     has_icon: bool = false,
 
-    pub fn init(fd: sys.Fd, interval_ms: u32, now_ms: i64) Blinker {
+    pub fn init(io: std.Io, fd: sys.Fd, interval_ms: u32, now_ms: i64) Blinker {
         std.debug.assert(interval_ms != 0);
         return .{
+            .io = io,
             .fd = fd,
             .interval_ms = interval_ms,
             .next_tick_ms = now_ms + @as(i64, interval_ms),
@@ -335,7 +337,7 @@ pub const Blinker = struct {
     /// Called by the capture parser for bytes that are not title sequences.
     pub fn emit(self: *Blinker, bytes: []const u8) !void {
         self.boundary.feed(bytes);
-        try sys.writeAll(self.fd, bytes);
+        try sys.writeAll(self.io, self.fd, bytes);
     }
 
     /// Called only for a complete, bounded OSC 0, 1, or 2 title.
@@ -385,10 +387,10 @@ pub const Blinker = struct {
 
     fn writeTitle(self: *Blinker, selector: u8, value: []const u8) !void {
         const lead = [_]u8{ esc, ']', selector, ';' };
-        try sys.writeAll(self.fd, &lead);
-        try sys.writeAll(self.fd, if (self.filled) "● " else "○ ");
-        try sys.writeAll(self.fd, value);
-        try sys.writeAll(self.fd, &[_]u8{ esc, '\\' });
+        try sys.writeAll(self.io, self.fd, &lead);
+        try sys.writeAll(self.io, self.fd, if (self.filled) "● " else "○ ");
+        try sys.writeAll(self.io, self.fd, value);
+        try sys.writeAll(self.io, self.fd, &[_]u8{ esc, '\\' });
     }
 };
 
@@ -411,7 +413,7 @@ test "title insertion waits for split terminal control sequences" {
     }
 
     boundary.feed("\x1b]777;partial");
-    var blinker = Blinker.init(-1, 100, 0);
+    var blinker = Blinker.init(std.testing.io, -1, 100, 0);
     blinker.boundary = boundary;
     try std.testing.expectEqual(@as(c_int, 100), blinker.timeout(100));
     try blinker.tick(100);

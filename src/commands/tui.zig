@@ -50,10 +50,10 @@ fn runWithFilter(gpa: std.mem.Allocator, io: Io, home: ?[]const u8, allowed_numb
     var page: tui_page.Page = .{};
     defer page.deinit(gpa);
 
-    try sys.writeAll(terminal_output, noout.begin_marker);
+    try sys.writeAll(io, terminal_output, noout.begin_marker);
     region_active.store(true, .release);
     defer {
-        sys.writeAll(terminal_output, noout.end_marker) catch {};
+        sys.writeAll(io, terminal_output, noout.end_marker) catch {};
         region_active.store(false, .release);
     }
 
@@ -96,22 +96,22 @@ fn runWithFilter(gpa: std.mem.Allocator, io: Io, home: ?[]const u8, allowed_numb
             } else if (!model.detail_selected.isSet(index)) continue;
             const section = detail.document[item.section_start..item.section_end];
             if (std.mem.eql(u8, section, "=== out ===")) continue;
-            try sys.writeAll(1, detail.itemValue(item));
+            try sys.writeAll(io, 1, detail.itemValue(item));
         }
     }
-    if (model.selection_exported) try writeSelectedNumbers(&model);
+    if (model.selection_exported) try writeSelectedNumbers(io, &model);
 }
 
-fn writeSelectedNumbers(model: *const Model) !void {
+fn writeSelectedNumbers(io: Io, model: *const Model) !void {
     var wrote = false;
     for (model.visibleNumbers(), 0..) |number, index| {
         if (!model.isSelected(index)) continue;
-        if (wrote) try sys.writeAll(1, " ");
+        if (wrote) try sys.writeAll(io, 1, " ");
         var buffer: [24]u8 = undefined;
-        try sys.writeAll(1, try std.fmt.bufPrint(&buffer, "{d}", .{number}));
+        try sys.writeAll(io, 1, try std.fmt.bufPrint(&buffer, "{d}", .{number}));
         wrote = true;
     }
-    if (wrote) try sys.writeAll(1, "\n");
+    if (wrote) try sys.writeAll(io, 1, "\n");
 }
 
 fn ensurePage(

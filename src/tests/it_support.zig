@@ -54,7 +54,7 @@ pub fn leaveJournal() void {
     sys.setEnv("TJ_JOURNAL", "");
 }
 
-/// Restores process environment variables when a fixture leaves scope. Zig's
+/// Restores the environment snapshot when a fixture leaves scope. Zig's
 /// test runner executes many tests in one process, so a failed assertion must
 /// not silently configure whichever test happens to run next.
 pub const EnvGuard = struct {
@@ -199,6 +199,7 @@ fn runNonTtyProgram(gpa: std.mem.Allocator, program: Program, args: []const []co
     try argv.appendSlice(gpa, args);
     return std.process.run(gpa, std.testing.io, .{
         .argv = argv.items,
+        .environ_map = sys.environMap(),
         .stdout_limit = .limited(1 << 20),
         .stderr_limit = .limited(1 << 20),
     });
@@ -223,6 +224,7 @@ fn runWithClosedStdoutProgram(gpa: std.mem.Allocator, program: Program, args: []
 
     var child = try std.process.spawn(io, .{
         .argv = argv.items,
+        .environ_map = sys.environMap(),
         .stdin = .ignore,
         .stdout = .pipe,
         .stderr = .pipe,
@@ -264,7 +266,7 @@ fn runNonTtyInJournalProgram(
     defer argv.deinit(gpa);
     try argv.append(gpa, program.executable());
     try argv.appendSlice(gpa, args);
-    var environ = try std.process.Environ.createMap(std.testing.environ, gpa);
+    var environ = try sys.environMap().clone(gpa);
     defer environ.deinit();
     try environ.put("TJ_JOURNAL", journal);
     try environ.put("TJ_NEXT", next);
@@ -315,7 +317,7 @@ pub fn finishKeepingTail(
     var completed = false;
     var master_closed = false;
     defer if (!completed) {
-        if (!master_closed) sys.close(child.master);
+        if (!master_closed) sys.close(std.testing.io, child.master);
         child.killAndReap();
     };
     var buf: [64 * 1024]u8 = undefined;
@@ -344,7 +346,7 @@ pub fn finishKeepingTail(
         }
     }
 
-    sys.close(child.master);
+    sys.close(std.testing.io, child.master);
     master_closed = true;
     while (true) {
         if (sys.tryWaitFor(child.pid)) |wait| {
@@ -507,7 +509,7 @@ pub const TerminalSession = struct {
 
     pub fn deinit(self: *TerminalSession) void {
         if (!self.finished) {
-            sys.close(self.child.master);
+            sys.close(std.testing.io, self.child.master);
             self.child.killAndReap();
         }
         self.transcript.deinit(self.gpa);
@@ -628,6 +630,7 @@ pub fn fishSupportsNativeMarkers() bool {
     const fish = fishExecutable() orelse return false;
     const result = std.process.run(std.testing.allocator, std.testing.io, .{
         .argv = &.{ fish, "--version" },
+        .environ_map = sys.environMap(),
         .stdout_limit = .limited(256),
         .stderr_limit = .limited(256),
     }) catch return false;

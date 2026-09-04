@@ -356,8 +356,8 @@ test "entry ranges are inclusive numeric current-journal references" {
     try std.testing.expectError(error.CrossJournalMutation, parseInteractionRange("@abcd.2..@abcd.10"));
 }
 
-pub fn note(comptime fmt: []const u8, args: anytype) void {
+pub fn note(io: Io, comptime fmt: []const u8, args: anytype) void {
     var buf: [512]u8 = undefined;
     const text = std.fmt.bufPrint(&buf, fmt, args) catch return;
-    sys.writeAll(2, text) catch {};
+    sys.writeAll(io, 2, text) catch {};
 }

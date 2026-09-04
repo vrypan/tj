@@ -59,7 +59,7 @@ pub fn run(
             }
             return (try proxy.run(gpa, io, opts)).exit_code;
         },
-        .save => return saveTemporary(),
+        .save => return saveTemporary(io),
         .use => {
             const opts: proxy.Options = .{
                 .journal = .{ .existing = parsed.positionals.items[0] },
@@ -188,8 +188,8 @@ fn emitHandoff(
     const text = try handoff.encode(&request, &marker);
     const flags: posix.O = .{ .ACCMODE = .WRONLY, .CLOEXEC = true };
     const tty_fd = posix.openatZ(posix.AT.FDCWD, "/dev/tty", flags, 0) catch return error.NoControllingTerminal;
-    defer sys.close(tty_fd);
-    try sys.writeAll(tty_fd, text);
+    defer sys.close(io, tty_fd);
+    try sys.writeAll(io, tty_fd, text);
     var reply: [1]u8 = undefined;
     const handoff_fd_text = sys.env("TJ_HANDOFF_FD") orelse return error.NotInJournal;
     const handoff_fd: sys.Fd = std.fmt.parseInt(sys.Fd, handoff_fd_text, 10) catch return error.NotInJournal;
@@ -212,16 +212,16 @@ fn emitHandoff(
     return 0;
 }
 
-fn saveTemporary() !u8 {
+fn saveTemporary(io: Io) !u8 {
     if (!insideWriter() or !sys.envPresent("TJ_TEMPORARY")) return error.NotTemporaryJournal;
     const session = sys.env("TJ_SESSION_ID") orelse return error.NotTemporaryJournal;
     if (session.len != handoff.session_len) return error.NotTemporaryJournal;
     const flags: posix.O = .{ .ACCMODE = .WRONLY, .CLOEXEC = true };
     const tty_fd = posix.openatZ(posix.AT.FDCWD, "/dev/tty", flags, 0) catch return error.NoControllingTerminal;
-    defer sys.close(tty_fd);
+    defer sys.close(io, tty_fd);
     var marker_buf: [handoff.session_len + 16]u8 = undefined;
     const marker = std.fmt.bufPrint(&marker_buf, "\x1b]3110;SAVE;{s}\x1b\\", .{session}) catch unreachable;
-    try sys.writeAll(tty_fd, marker);
+    try sys.writeAll(io, tty_fd, marker);
     var reply: [1]u8 = undefined;
     const fd_text = sys.env("TJ_HANDOFF_FD") orelse return error.NotTemporaryJournal;
     const fd: sys.Fd = std.fmt.parseInt(sys.Fd, fd_text, 10) catch return error.NotTemporaryJournal;

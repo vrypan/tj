@@ -150,7 +150,7 @@ pub fn catOne(
     // agent - take a fragment for the whole thing. It goes to stderr so that
     // stdout stays exactly what was asked for.
     if (sink.shownLines() < sink.totalLines()) {
-        context.note("tj: {s}: showing {d} of {d} lines\n", .{
+        context.note(io, "tj: {s}: showing {d} of {d} lines\n", .{
             text,
             sink.shownLines(),
             sink.totalLines(),

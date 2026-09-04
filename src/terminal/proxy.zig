@@ -82,9 +82,6 @@ pub const Options = struct {
 };
 
 pub fn run(gpa: std.mem.Allocator, io: std.Io, opts: Options) !Result {
-    const argv = try buildArgv(gpa, opts.argv);
-    defer freeArgv(gpa, argv);
-
     // Lifecycle acquisition is strict: selection, numbering, and locking all
     // complete before a pty or child process exists.
     var store = switch (opts.journal) {
@@ -94,15 +91,12 @@ pub fn run(gpa: std.mem.Allocator, io: std.Io, opts: Options) !Result {
     defer {
         const saved_temporary = store.saved_temporary;
         const journal = store.journalId();
-        if (saved_temporary) warnStartup("tjctl: saved journal {s}\n", .{journal});
+        if (saved_temporary) warnStartup(io, "tjctl: saved journal {s}\n", .{journal});
         store.close();
     }
 
     const title_enabled = !std.mem.eql(u8, opts.title, "none") and sys.isTty(io, stdout_fd);
-    defer if (title_enabled) terminal_title.pop(stdout_fd);
-
-    const title_env = try gpa.dupeZ(u8, opts.title);
-    defer gpa.free(title_env);
+    defer if (title_enabled) terminal_title.pop(io, stdout_fd);
 
     // Confirm the selected journal before the fresh child takes ownership of
     // the terminal. Zooi restores the exact screen contents on exit, after
@@ -111,7 +105,7 @@ pub fn run(gpa: std.mem.Allocator, io: std.Io, opts: Options) !Result {
     // never wait for input.
     if (opts.splash and sys.isTty(io, stdin_fd)) {
         const choice = splash.show(gpa, store.journalId(), store.next_number.?) catch blk: {
-            warnStartup("tjctl: recording journal {s}; next entry @{d}\r\n", .{ store.journalId(), store.next_number.? });
+            warnStartup(io, "tjctl: recording journal {s}; next entry @{d}\r\n", .{ store.journalId(), store.next_number.? });
             break :blk splash.Choice.proceed;
         };
         if (choice == .cancel) return error.StartupCancelled;
@@ -149,12 +143,26 @@ pub fn run(gpa: std.mem.Allocator, io: std.Io, opts: Options) !Result {
     };
 
     const pty = try sys.openPty(
+        io,
         if (have_term) &outer_term else null,
         if (have_ws) &outer_ws else null,
     );
+    errdefer {
+        sys.close(io, pty.master);
+        sys.close(io, pty.slave);
+    }
 
-    const sig_fds = try sys.selfPipe();
+    const sig_fds = try sys.selfPipe(io);
+    errdefer {
+        sig_pipe_w.store(-1, .monotonic);
+        sys.close(io, sig_fds[0]);
+        sys.close(io, sig_fds[1]);
+    }
     const handoff_fds = try sys.socketPair();
+    errdefer {
+        sys.close(io, handoff_fds[0]);
+        sys.close(io, handoff_fds[1]);
+    }
     sig_pipe_w.store(sig_fds[1], .monotonic);
 
     installSignalHandlers();
@@ -163,12 +171,12 @@ pub fn run(gpa: std.mem.Allocator, io: std.Io, opts: Options) !Result {
     var blinker_storage: terminal_title.Blinker = undefined;
     var blinker: ?*terminal_title.Blinker = null;
     if (title_enabled) {
-        terminal_title.push(stdout_fd);
+        terminal_title.push(io, stdout_fd);
         if (opts.title_blink_ms == 0) {
-            terminal_title.writeFallback(stdout_fd, store.journalId());
+            terminal_title.writeFallback(io, stdout_fd, store.journalId());
         } else {
             const now_ms = std.Io.Clock.now(.awake, io).toMilliseconds();
-            blinker_storage = .init(stdout_fd, opts.title_blink_ms, now_ms);
+            blinker_storage = .init(io, stdout_fd, opts.title_blink_ms, now_ms);
             blinker = &blinker_storage;
             blinker_storage.startJournal(store.journalId()) catch {};
         }
@@ -178,18 +186,19 @@ pub fn run(gpa: std.mem.Allocator, io: std.Io, opts: Options) !Result {
     // pass through the terminal - a hostile file, a compromised ssh peer -
     // never learn it, so they cannot steer the proxy's own control protocol.
     const session_token = generateSessionToken(io);
-    exportEnvironment(&store, title_env, opts.title_blink_ms, handoff_fds[1], &session_token);
+    var child_environment = try sys.environMap().clone(gpa);
+    defer child_environment.deinit();
+    try exportEnvironment(&child_environment, &store, opts.title, opts.title_blink_ms, handoff_fds[1], &session_token);
+    const default_argv = [_][]const u8{sys.env("SHELL") orelse "/bin/zsh"};
+    var executable = try sys.Exec.init(gpa, if (opts.argv.len == 0) &default_argv else opts.argv, &child_environment);
+    defer executable.deinit();
 
     const pid = c.fork();
-    if (pid < 0) {
-        sys.close(pty.master);
-        sys.close(pty.slave);
-        return error.ForkFailed;
-    }
-    if (pid == 0) childExec(pty, argv);
+    if (pid < 0) return error.ForkFailed;
+    if (pid == 0) childExec(pty, &executable);
 
-    sys.close(pty.slave);
-    sys.close(handoff_fds[1]);
+    sys.close(io, pty.slave);
+    sys.close(io, handoff_fds[1]);
 
     var raw: ?tty.Saved = null;
     if (have_term) {
@@ -213,52 +222,21 @@ pub fn run(gpa: std.mem.Allocator, io: std.Io, opts: Options) !Result {
     output.flush(&recorder);
     if (blinker) |active| active.flush() catch {};
 
-    sys.close(pty.master);
-    sys.close(sig_fds[0]);
+    sys.close(io, pty.master);
+    sys.close(io, sig_fds[0]);
     sig_pipe_w.store(-1, .monotonic);
-    sys.close(sig_fds[1]);
-    sys.close(handoff_fds[0]);
+    sys.close(io, sig_fds[1]);
+    sys.close(io, handoff_fds[0]);
 
     const child_result = sys.waitFor(pid);
     if (!store.hasRecordedEntry()) warnNothingRecorded(io);
     return .{ .exit_code = child_result.code };
 }
 
-/// Resolves the command to run: what the user asked for, else their shell.
-fn buildArgv(gpa: std.mem.Allocator, requested: []const []const u8) ![:null]const ?[*:0]const u8 {
-    var words: std.ArrayList([]const u8) = .empty;
-    defer words.deinit(gpa);
-
-    if (requested.len > 0) {
-        try words.appendSlice(gpa, requested);
-    } else {
-        try words.append(gpa, sys.env("SHELL") orelse "/bin/zsh");
-    }
-
-    const argv = try gpa.allocSentinel(?[*:0]const u8, words.items.len, null);
-    var duplicated: usize = 0;
-    errdefer {
-        for (argv[0..duplicated]) |word| gpa.free(std.mem.span(word.?));
-        gpa.free(argv);
-    }
-    for (words.items, 0..) |word, i| {
-        argv[i] = try gpa.dupeZ(u8, word);
-        duplicated += 1;
-    }
-    return argv;
-}
-
-/// Safe to call once the child has been forked: the child received its own
-/// copy of this memory, so releasing the parent's has no effect on the exec.
-fn freeArgv(gpa: std.mem.Allocator, argv: [:null]const ?[*:0]const u8) void {
-    for (argv) |word| gpa.free(std.mem.span(word.?));
-    gpa.free(argv);
-}
-
 /// Everything here runs between fork and exec, so it stays within the set of
 /// calls that are safe in a forked child.
-fn childExec(pty: sys.Pty, argv: [:null]const ?[*:0]const u8) noreturn {
-    sys.close(pty.master);
+fn childExec(pty: sys.Pty, executable: *sys.Exec) noreturn {
+    _ = c.close(pty.master);
 
     // Become a POSIX session leader and adopt the pty as controlling terminal,
     // so job control, Ctrl-C and SIGWINCH all work inside the child.
@@ -268,15 +246,15 @@ fn childExec(pty: sys.Pty, argv: [:null]const ?[*:0]const u8) noreturn {
     _ = c.dup2(pty.slave, stdin_fd);
     _ = c.dup2(pty.slave, stdout_fd);
     _ = c.dup2(pty.slave, stderr_fd);
-    if (pty.slave > stderr_fd) sys.close(pty.slave);
+    if (pty.slave > stderr_fd) _ = c.close(pty.slave);
 
     // exec resets handled signals on its own, but an ignored disposition
     // survives it, and a shell that inherits SIGPIPE ignored misbehaves.
     resetSignal(.PIPE);
 
-    _ = sys.execvp(argv[0].?, argv.ptr);
+    executable.exec();
 
-    const name = std.mem.span(argv[0].?);
+    const name = std.mem.span(executable.argv[0].?);
     _ = c.write(stderr_fd, "tj: cannot execute ", 19);
     _ = c.write(stderr_fd, name.ptr, name.len);
     _ = c.write(stderr_fd, "\r\n", 2);
@@ -323,63 +301,35 @@ fn generateSessionToken(io: std.Io) [handoff.session_len]u8 {
     return token;
 }
 
-/// Exported before the fork so the shell and its plugin inherit them.
-fn exportEnvironment(store: *Store, title: [:0]const u8, title_blink_ms: u32, handoff_fd: sys.Fd, session_token: *const [handoff.session_len]u8) void {
-    var journal: [journal_name.max_len + 1]u8 = undefined;
-    @memcpy(journal[0..store.journal.len], store.journal);
-    journal[store.journal.len] = 0;
-    sys.setEnv("TJ_JOURNAL", journal[0..store.journal.len :0]);
-
-    var next: [16]u8 = undefined;
-    const next_text = std.fmt.bufPrint(next[0 .. next.len - 1], "{d}", .{store.next_number.?}) catch return;
-    next[next_text.len] = 0;
-    sys.setEnv("TJ_NEXT", next[0..next_text.len :0]);
-
-    sys.setEnv("TJ_TITLE", title.ptr);
-    var blink: [16]u8 = undefined;
-    const blink_text = std.fmt.bufPrint(&blink, "{d}", .{title_blink_ms}) catch unreachable;
-    blink[blink_text.len] = 0;
-    sys.setEnv("TJ_TITLE_BLINK", blink[0..blink_text.len :0]);
-    var handoff_fd_text: [16]u8 = undefined;
-    const handoff_fd_value = std.fmt.bufPrint(&handoff_fd_text, "{d}", .{handoff_fd}) catch unreachable;
-    handoff_fd_text[handoff_fd_value.len] = 0;
-    sys.setEnv("TJ_HANDOFF_FD", handoff_fd_text[0..handoff_fd_value.len :0]);
-    var session_env: [handoff.session_len + 1]u8 = undefined;
-    @memcpy(session_env[0..handoff.session_len], session_token);
-    session_env[handoff.session_len] = 0;
-    sys.setEnv("TJ_SESSION_ID", session_env[0..handoff.session_len :0]);
+/// Build the shell's environment without changing the proxy's own snapshot.
+fn exportEnvironment(environment: *std.process.Environ.Map, store: *Store, title: []const u8, title_blink_ms: u32, handoff_fd: sys.Fd, session_token: *const [handoff.session_len]u8) !void {
+    try environment.put("TJ_JOURNAL", store.journal);
+    var number: [32]u8 = undefined;
+    try environment.put("TJ_NEXT", try std.fmt.bufPrint(&number, "{d}", .{store.next_number.?}));
+    try environment.put("TJ_TITLE", title);
+    try environment.put("TJ_TITLE_BLINK", try std.fmt.bufPrint(&number, "{d}", .{title_blink_ms}));
+    try environment.put("TJ_HANDOFF_FD", try std.fmt.bufPrint(&number, "{d}", .{handoff_fd}));
+    try environment.put("TJ_SESSION_ID", session_token);
     if (store.temporary) {
-        var temporary: [2:0]u8 = .{ '1', 0 };
-        sys.setEnv("TJ_TEMPORARY", temporary[0..1 :0]);
+        try environment.put("TJ_TEMPORARY", "1");
     } else {
-        sys.unsetEnv("TJ_TEMPORARY");
+        _ = environment.swapRemove("TJ_TEMPORARY");
     }
-    // Also when it came from --home: every `tj` invoked inside the writer has
-    // to resolve references against the selected journal root.
-    var root: [std.fs.max_path_bytes + 1]u8 = undefined;
-    if (store.root.realPath(store.io, root[0..std.fs.max_path_bytes])) |len| {
-        root[len] = 0;
-        sys.setEnv("TJ_HOME", root[0..len :0]);
+    var root: [std.fs.max_path_bytes]u8 = undefined;
+    if (store.root.realPath(store.io, &root)) |len| {
+        try environment.put("TJ_HOME", root[0..len]);
     } else |_| {}
 
     var path_buf: [std.fs.max_path_bytes]u8 = undefined;
-    var value_buf: [std.fs.max_path_bytes + 1]u8 = undefined;
     const path = sys.selfExePath(store.io, &path_buf) orelse return;
-    if (path.len < value_buf.len) {
-        @memcpy(value_buf[0..path.len], path);
-        value_buf[path.len] = 0;
-        sys.setEnv("TJCTL", value_buf[0..path.len :0]);
-    }
-
-    const sibling = siblingEntryPath(path, &value_buf);
-    var fallback: [3:0]u8 = .{ 't', 'j', 0 };
-    if (sibling) |entry_path| sibling_found: {
+    try environment.put("TJCTL", path);
+    var sibling_buf: [std.fs.max_path_bytes]u8 = undefined;
+    if (siblingEntryPath(path, &sibling_buf)) |entry_path| sibling_found: {
         std.Io.Dir.accessAbsolute(store.io, entry_path, .{}) catch break :sibling_found;
-        value_buf[entry_path.len] = 0;
-        sys.setEnv("TJ", value_buf[0..entry_path.len :0]);
+        try environment.put("TJ", entry_path);
         return;
     }
-    sys.setEnv("TJ", fallback[0..2 :0]);
+    try environment.put("TJ", "tj");
 }
 
 const journal_name = @import("../journal/name.zig");
@@ -390,15 +340,15 @@ fn siblingEntryPath(self_path: []const u8, buf: []u8) ?[]const u8 {
     return std.fmt.bufPrint(buf, "{s}/tj", .{dir}) catch null;
 }
 
-fn warnStartup(comptime fmt: []const u8, args: anytype) void {
+fn warnStartup(io: std.Io, comptime fmt: []const u8, args: anytype) void {
     var buf: [256]u8 = undefined;
     const text = std.fmt.bufPrint(&buf, fmt, args) catch return;
-    sys.writeAll(stderr_fd, text) catch {};
+    sys.writeAll(io, stderr_fd, text) catch {};
 }
 
 fn warnNothingRecorded(io: std.Io) void {
-    sys.writeAll(stderr_fd, nothing_recorded_message) catch return;
-    sys.writeAll(stderr_fd, if (sys.isTty(io, stderr_fd)) "\r\n" else "\n") catch {};
+    sys.writeAll(io, stderr_fd, nothing_recorded_message) catch return;
+    sys.writeAll(io, stderr_fd, if (sys.isTty(io, stderr_fd)) "\r\n" else "\n") catch {};
 }
 
 /// Turns scanner events into journal entries and forwards every byte the
@@ -450,7 +400,7 @@ const Recorder = struct {
     }
 
     fn forward(self: *Recorder, bytes: []const u8) void {
-        sys.writeAll(stdout_fd, bytes) catch {
+        sys.writeAll(self.store.io, stdout_fd, bytes) catch {
             self.broken = true;
         };
     }
@@ -591,7 +541,7 @@ fn pump(gpa: std.mem.Allocator, io: std.Io, home: ?[]const u8, master: sys.Fd, s
                 // The user's input ended, but the child may still be talking.
                 in.fd = -1;
             } else {
-                sys.writeAll(master, in_buf[0..n]) catch return;
+                sys.writeAll(io, master, in_buf[0..n]) catch return;
             }
         }
 
@@ -622,7 +572,7 @@ fn applyHandoff(gpa: std.mem.Allocator, io: std.Io, home: ?[]const u8, recorder:
         }, &stdout_file.interface) catch {};
         stdout_file.interface.flush() catch {};
     }
-    if (recorder.store.saved_temporary) warnStartup("tjctl: saved journal {s}\n", .{recorder.store.journalId()});
+    if (recorder.store.saved_temporary) warnStartup(io, "tjctl: saved journal {s}\n", .{recorder.store.journalId()});
     recorder.store.close();
     recorder.store.* = target;
     if (recorder.blinker) |active| active.startJournal(recorder.store.journalId()) catch {};
@@ -631,7 +581,7 @@ fn applyHandoff(gpa: std.mem.Allocator, io: std.Io, home: ?[]const u8, recorder:
 }
 
 fn handoffReply(recorder: *Recorder, status: u8) void {
-    if (recorder.handoff_reply_fd) |fd| sys.writeAll(fd, &[_]u8{status}) catch {};
+    if (recorder.handoff_reply_fd) |fd| sys.writeAll(recorder.store.io, fd, &[_]u8{status}) catch {};
 }
 
 fn drainSignals(sig_r: sys.Fd, master: sys.Fd, pid: c.pid_t) !void {

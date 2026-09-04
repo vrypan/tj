@@ -379,7 +379,7 @@ test "entries record cwd and tjcd changes zsh without expanding its reference" {
     defer gpa.free(qualified);
     try support.appendShellQuoted(gpa, &outside_script, qualified);
     try outside_script.appendSlice(gpa, " || exit; print -r -- \"OUTSIDE_TJCD=$PWD\"");
-    var environ = try std.process.Environ.createMap(std.testing.environ, gpa);
+    var environ = try support.sys.environMap().clone(gpa);
     defer environ.deinit();
     try environ.put("TJ_HOME", home);
     try environ.put("TJ_JOURNAL", "");

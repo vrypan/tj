@@ -20,7 +20,7 @@ pub fn run(gpa: std.mem.Allocator, io: Io, parsed: *const zecli.Parsed, child: [
         };
     }
     return switch (mode) {
-        .noout => (try noout.run(gpa, child)).exit_code,
+        .noout => (try noout.run(gpa, io, child)).exit_code,
         .fence => runFenceCommand(gpa, io, child, out),
     };
 }
@@ -69,17 +69,17 @@ fn runFenceCommand(gpa: std.mem.Allocator, io: Io, words: []const []const u8, ou
     var read_open = true;
     var write_open = true;
     errdefer {
-        if (read_open) sys.close(fds[0]);
-        if (write_open) sys.close(fds[1]);
+        if (read_open) sys.close(io, fds[0]);
+        if (write_open) sys.close(io, fds[1]);
     }
 
-    const argv = try buildArgv(gpa, words);
-    defer freeArgv(gpa, argv);
+    var executable = try sys.Exec.init(gpa, words, sys.environMap());
+    defer executable.deinit();
     const pid = c.fork();
     if (pid < 0) return error.ForkFailed;
-    if (pid == 0) childExec(fds, argv);
+    if (pid == 0) childExec(fds, &executable);
 
-    sys.close(fds[1]);
+    sys.close(io, fds[1]);
     write_open = false;
     var filter = fence.Filter.init(gpa, out, sys.env("TJ_JOURNAL") != null and sys.isTty(io, 1));
     defer filter.deinit();
@@ -101,39 +101,20 @@ fn runFenceCommand(gpa: std.mem.Allocator, io: Io, words: []const []const u8, ou
             failure = err;
         };
     }
-    sys.close(fds[0]);
+    sys.close(io, fds[0]);
     read_open = false;
     const result = sys.waitFor(pid);
     if (failure) |err| return err;
     return result.code;
 }
 
-fn buildArgv(gpa: std.mem.Allocator, words: []const []const u8) ![:null]const ?[*:0]const u8 {
-    const argv = try gpa.allocSentinel(?[*:0]const u8, words.len, null);
-    var duplicated: usize = 0;
-    errdefer {
-        for (argv[0..duplicated]) |word| gpa.free(std.mem.span(word.?));
-        gpa.free(argv);
-    }
-    for (words, 0..) |word, i| {
-        argv[i] = try gpa.dupeZ(u8, word);
-        duplicated += 1;
-    }
-    return argv;
-}
-
-fn freeArgv(gpa: std.mem.Allocator, argv: [:null]const ?[*:0]const u8) void {
-    for (argv) |word| gpa.free(std.mem.span(word.?));
-    gpa.free(argv);
-}
-
-fn childExec(fds: [2]c_int, argv: [:null]const ?[*:0]const u8) noreturn {
-    sys.close(fds[0]);
+fn childExec(fds: [2]c_int, executable: *sys.Exec) noreturn {
+    _ = c.close(fds[0]);
     if (c.dup2(fds[1], 1) < 0) c._exit(127);
-    sys.close(fds[1]);
-    _ = sys.execvp(argv[0].?, argv.ptr);
+    _ = c.close(fds[1]);
+    executable.exec();
 
-    const name = std.mem.span(argv[0].?);
+    const name = std.mem.span(executable.argv[0].?);
     _ = c.write(2, "tj: cannot execute ", 19);
     _ = c.write(2, name.ptr, name.len);
     _ = c.write(2, "\r\n", 2);

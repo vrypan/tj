@@ -18,6 +18,7 @@ pub const panic = std.debug.FullPanic(struct {
 }.restoreThenPanic);
 
 pub fn main(init: std.process.Init) !u8 {
+    @import("environment.zig").init(init.environ_map);
     const arena = init.arena.allocator();
     const gpa = frontend.commandAllocator();
     defer frontend.deinitAllocator("tjctl");

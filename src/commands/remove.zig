@@ -121,7 +121,7 @@ pub fn removeInteraction(
     if (target.number >= highest) return error.CurrentInteraction;
 
     if (!force and try pins.isPinned(io, mutation.root, mutation.journal, target.number)) {
-        context.note("tj: skipped pinned entry @{d}; use --force to remove it\n", .{target.number});
+        context.note(io, "tj: skipped pinned entry @{d}; use --force to remove it\n", .{target.number});
         return;
     }
 
@@ -149,7 +149,7 @@ pub fn removeInteractionRange(
     const selected = try context.selectedNumbers(gpa, io, mutation.root, mutation.journal, range);
     defer gpa.free(selected);
     const result = try removeNumbers(gpa, io, &mutation, selected, force);
-    noteSkippedPins(result.skipped_pinned);
+    noteSkippedPins(io, result.skipped_pinned);
 }
 
 pub const RemovalResult = struct {
@@ -212,9 +212,9 @@ fn removeNumbers(
     return .{ .removed = staged.items.len, .skipped_pinned = skipped_pinned };
 }
 
-fn noteSkippedPins(skipped_pinned: usize) void {
+fn noteSkippedPins(io: Io, skipped_pinned: usize) void {
     if (skipped_pinned == 0) return;
-    context.note("tj: skipped {d} pinned {s}; use --force to remove {s}\n", .{
+    context.note(io, "tj: skipped {d} pinned {s}; use --force to remove {s}\n", .{
         skipped_pinned,
         if (skipped_pinned == 1) "entry" else "entries",
         if (skipped_pinned == 1) "it" else "them",

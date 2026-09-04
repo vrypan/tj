@@ -25,10 +25,7 @@ pub const Deadline = struct {
 };
 
 fn monotonicMillis() !i64 {
-    var now: c.timespec = undefined;
-    if (c.clock_gettime(.MONOTONIC, &now) != 0) return error.ClockFailed;
-    return @as(i64, @intCast(now.sec)) * std.time.ms_per_s +
-        @divTrunc(@as(i64, @intCast(now.nsec)), std.time.ns_per_ms);
+    return @intCast(std.Io.Clock.now(.awake, std.testing.io).toMilliseconds());
 }
 
 pub const PtyChild = struct {
@@ -36,7 +33,7 @@ pub const PtyChild = struct {
     pid: c.pid_t,
 
     pub fn write(self: PtyChild, bytes: []const u8) !void {
-        try sys.writeAll(self.master, bytes);
+        try sys.writeAll(std.testing.io, self.master, bytes);
     }
 
     pub fn resize(self: PtyChild, rows: u16, cols: u16) !void {
@@ -89,7 +86,7 @@ pub const PtyChild = struct {
         var closed = false;
         var reaped = false;
         errdefer {
-            if (!closed) sys.close(self.master);
+            if (!closed) sys.close(std.testing.io, self.master);
             if (!reaped) self.killAndReap();
         }
 
@@ -103,7 +100,7 @@ pub const PtyChild = struct {
             if (n == 0) break;
             try out.appendSlice(gpa, buf[0..n]);
         }
-        sys.close(self.master);
+        sys.close(std.testing.io, self.master);
         closed = true;
 
         // Closing the terminal is part of the fixture's normal shutdown. It
@@ -128,37 +125,30 @@ pub const PtyChild = struct {
 };
 
 pub fn spawn(gpa: std.mem.Allocator, argv: []const []const u8, rows: u16, cols: u16) !PtyChild {
-    // Keep the owning slices around rather than recovering their lengths from
-    // the C pointers later: an argument containing a NUL would then be freed
-    // at the wrong length.
-    const owned = try gpa.alloc([:0]u8, argv.len);
-    const cargv = try gpa.allocSentinel(?[*:0]const u8, argv.len, null);
-    for (argv, 0..) |word, i| {
-        owned[i] = try gpa.dupeZ(u8, word);
-        cargv[i] = owned[i].ptr;
-    }
+    var executable = try sys.Exec.init(gpa, argv, sys.environMap());
+    defer executable.deinit();
 
     const ws: posix.winsize = .{ .row = rows, .col = cols, .xpixel = 0, .ypixel = 0 };
-    const pty = try sys.openPty(null, &ws);
+    const pty = try sys.openPty(std.testing.io, null, &ws);
+    errdefer {
+        sys.close(std.testing.io, pty.master);
+        sys.close(std.testing.io, pty.slave);
+    }
 
     const pid = c.fork();
     if (pid < 0) return error.ForkFailed;
     if (pid == 0) {
-        // The child got its own copy of cargv at fork; the parent frees below.
-        sys.close(pty.master);
+        _ = c.close(pty.master);
         _ = c.setsid();
         sys.setControllingTty(pty.slave) catch {};
         _ = c.dup2(pty.slave, 0);
         _ = c.dup2(pty.slave, 1);
         _ = c.dup2(pty.slave, 2);
-        if (pty.slave > 2) sys.close(pty.slave);
-        _ = sys.execvp(cargv[0].?, cargv.ptr);
+        if (pty.slave > 2) _ = c.close(pty.slave);
+        executable.exec();
         c._exit(127);
     }
 
-    sys.close(pty.slave);
-    for (owned) |word| gpa.free(word);
-    gpa.free(owned);
-    gpa.free(cargv);
+    sys.close(std.testing.io, pty.slave);
     return .{ .master = pty.master, .pid = pid };
 }

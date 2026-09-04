@@ -1,8 +1,7 @@
 //! The system calls the proxy needs.
 //!
-//! Everything that Zig 0.16's `std.posix` provides is used from there. What is
-//! left - process control, ioctl, and the pty grant/unlock dance - has no std
-//! equivalent in this release, so it is declared against libc directly. Only
+//! Ordinary I/O uses std.Io; process control, ioctl, and the PTY allocation
+//! sequence still call libc where the standard APIs do not fit. Only
 //! plain libc symbols are used, no libutil or other add-on library, which keeps
 //! `zig build -Dtarget=...` working for every supported target with nothing
 //! installed on the host.
@@ -11,23 +10,26 @@ const std = @import("std");
 const builtin = @import("builtin");
 const c = std.c;
 const posix = std.posix;
+const environment = @import("environment.zig");
+
+pub const Exec = @import("child.zig").Exec;
+pub const initEnvironment = environment.init;
+pub const environMap = environment.map;
+pub const env = environment.get;
+pub const envPresent = environment.contains;
+pub const setEnv = environment.setForTest;
+pub const unsetEnv = environment.unsetForTest;
 
 pub const Fd = c.fd_t;
 
 // --- declarations std does not provide at all ------------------------------
 //
-// Everything else in this file goes through std.posix or std.c. These six have
-// no declaration anywhere in std, as of 0.17-dev: the pty allocation sequence,
-// PATH-searching exec, and environment updates.
+// Zig 0.16 does not declare the four PTY allocation functions below.
 
 extern "c" fn posix_openpt(oflag: c_int) c_int;
 extern "c" fn grantpt(fd: c_int) c_int;
 extern "c" fn unlockpt(fd: c_int) c_int;
 extern "c" fn ptsname(fd: c_int) ?[*:0]const u8;
-extern "c" fn setenv(name: [*:0]const u8, value: [*:0]const u8, overwrite: c_int) c_int;
-extern "c" fn unsetenv(name: [*:0]const u8) c_int;
-
-pub extern "c" fn execvp(file: [*:0]const u8, argv: [*:null]const ?[*:0]const u8) c_int;
 
 /// std.posix.T only carries the terminal ioctl numbers on some targets, so the
 /// ones tj needs are spelled out here.
@@ -62,18 +64,18 @@ pub const Pty = struct {
 
 /// Allocates a pty pair, seeding the slave with the given terminal settings and
 /// window size so the child starts out matching the outer terminal.
-pub fn openPty(term: ?*const posix.termios, size: ?*const posix.winsize) Error!Pty {
+pub fn openPty(io: std.Io, term: ?*const posix.termios, size: ?*const posix.winsize) Error!Pty {
     const flags: posix.O = .{ .ACCMODE = .RDWR, .NOCTTY = true };
     const master = posix_openpt(@bitCast(@as(u32, @bitCast(flags))));
     if (master < 0) return error.Syscall;
-    errdefer close(master);
+    errdefer close(io, master);
 
     if (grantpt(master) != 0) return error.Syscall;
     if (unlockpt(master) != 0) return error.Syscall;
     const name = ptsname(master) orelse return error.Syscall;
 
     const slave = posix.openatZ(posix.AT.FDCWD, name, flags, 0) catch return error.Syscall;
-    errdefer close(slave);
+    errdefer close(io, slave);
 
     if (term) |t| posix.tcsetattr(slave, .NOW, t.*) catch {};
     if (size) |ws| try setWinsize(slave, ws);
@@ -107,7 +109,7 @@ pub fn isTty(io: std.Io, fd: Fd) bool {
 /// ends are non-blocking, because a handler that blocked on a full pipe would
 /// deadlock the process it is meant to be steering, and close-on-exec, so they
 /// never reach the shell.
-pub fn selfPipe() Error![2]Fd {
+pub fn selfPipe(io: std.Io) Error![2]Fd {
     var fds: [2]c_int = undefined;
     if (c.pipe(&fds) != 0) return error.Syscall;
     for (fds) |fd| {
@@ -116,8 +118,8 @@ pub fn selfPipe() Error![2]Fd {
             c.fcntl(fd, posix.F.SETFL, flags | O_NONBLOCK) < 0 or
             c.fcntl(fd, posix.F.SETFD, FD_CLOEXEC) < 0)
         {
-            close(fds[0]);
-            close(fds[1]);
+            close(io, fds[0]);
+            close(io, fds[1]);
             return error.Syscall;
         }
     }
@@ -137,8 +139,14 @@ pub fn socketPair() Error![2]Fd {
 const O_NONBLOCK: c_int = @bitCast(@as(u32, @bitCast(posix.O{ .NONBLOCK = true })));
 const FD_CLOEXEC: c_int = 1;
 
-pub fn close(fd: Fd) void {
-    _ = c.close(fd);
+pub fn close(io: std.Io, fd: Fd) void {
+    file(fd).close(io);
+}
+
+/// The descriptor's blocking mode is irrelevant to close and TTY queries.
+/// Stream writes here are only used with blocking terminal/pipe descriptors.
+fn file(fd: Fd) std.Io.File {
+    return .{ .handle = fd, .flags = .{ .nonblocking = false } };
 }
 
 /// Returns 0 at end of stream. EIO on a pty master means the slave side is
@@ -151,20 +159,8 @@ pub fn read(fd: Fd, buf: []u8) Error!usize {
 }
 
 /// Writes the whole slice, retrying on interruption and short writes.
-pub fn writeAll(fd: Fd, buf: []const u8) Error!void {
-    var off: usize = 0;
-    while (off < buf.len) {
-        const n = c.write(fd, buf.ptr + off, buf.len - off);
-        if (n > 0) {
-            off += @intCast(n);
-            continue;
-        }
-        if (n == 0) return error.Syscall;
-        switch (posix.errno(n)) {
-            .INTR => continue,
-            else => return error.Syscall,
-        }
-    }
+pub fn writeAll(io: std.Io, fd: Fd, buf: []const u8) Error!void {
+    file(fd).writeStreamingAll(io, buf) catch return error.Syscall;
 }
 
 // --- processes -------------------------------------------------------------
@@ -216,28 +212,6 @@ pub fn killGroup(pid: c.pid_t, sig: posix.SIG) void {
 pub fn sleepMs(io: std.Io, ms: u64) void {
     const duration = std.Io.Duration.fromNanoseconds(@as(i96, ms) * std.time.ns_per_ms);
     std.Io.sleep(io, duration, .awake) catch {};
-}
-
-// --- environment -----------------------------------------------------------
-
-pub fn env(name: [*:0]const u8) ?[]const u8 {
-    const value = c.getenv(name) orelse return null;
-    const slice = std.mem.span(value);
-    return if (slice.len == 0) null else slice;
-}
-
-/// Unlike `env`, this distinguishes an empty value from an unset variable.
-/// NO_COLOR uses presence, not contents, as its opt-out signal.
-pub fn envPresent(name: [*:0]const u8) bool {
-    return c.getenv(name) != null;
-}
-
-pub fn setEnv(name: [*:0]const u8, value: [*:0]const u8) void {
-    _ = setenv(name, value, 1);
-}
-
-pub fn unsetEnv(name: [*:0]const u8) void {
-    _ = unsetenv(name);
 }
 
 /// Absolute path of the running binary, so the shell plugin can invoke exactly

@@ -13,13 +13,16 @@ const sys = @import("sys");
 const tjctl = std.fmt.comptimePrint("{s}", .{@import("build_options").tjctl_exe});
 
 pub fn main(init: std.process.Init) !u8 {
+    sys.initEnvironment(init.environ_map);
     const before = posix.tcgetattr(0) catch return 1;
 
-    const argv = [_:null]?[*:0]const u8{ tjctl, "new", "--no-splash", "--title", "none", "--", "/bin/sh", "-c", "sleep 1" };
+    const argv = [_][]const u8{ tjctl, "new", "--no-splash", "--title", "none", "--", "/bin/sh", "-c", "sleep 1" };
+    var executable = try sys.Exec.init(init.gpa, &argv, init.environ_map);
+    defer executable.deinit();
     const pid = c.fork();
     if (pid < 0) return 1;
     if (pid == 0) {
-        _ = sys.execvp(argv[0].?, &argv);
+        executable.exec();
         c._exit(127);
     }
 
@@ -36,7 +39,7 @@ pub fn main(init: std.process.Init) !u8 {
         if (raw) "yes" else "no",
         if (restored) "yes" else "no",
     }) catch return 1;
-    _ = c.write(1, msg.ptr, msg.len);
+    try std.Io.File.stdout().writeStreamingAll(init.io, msg);
 
     return if (raw and restored) 0 else 1;
 }

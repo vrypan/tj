@@ -64,7 +64,7 @@ test "tj-md renders selected entries as a plain fenced transcript" {
     defer gpa.free(journal_id);
     const ids = try std.fmt.allocPrint(gpa, "{d} {d}\n", .{ selected[0], selected[1] });
     defer gpa.free(ids);
-    var environ = try std.process.Environ.createMap(std.testing.environ, gpa);
+    var environ = try support.sys.environMap().clone(gpa);
     defer environ.deinit();
     try environ.put("TJ", support.tj);
     try environ.put("TJ_HOME", home);

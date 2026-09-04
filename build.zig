@@ -149,7 +149,7 @@ pub fn build(b: *std.Build) void {
         .filters = &.{"it_splash"},
     });
 
-    // The integration fixture changes process-wide environment variables and
+    // The integration fixture updates a shared environment snapshot and
     // uses PTYs. Run its test binary directly so Zig's terminal runner invokes
     // its test functions serially, rather than the build-server runner which
     // dispatches them concurrently.

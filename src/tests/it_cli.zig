@@ -197,6 +197,7 @@ test "command output honors append redirection" {
     ;
     const result = try std.process.run(gpa, std.testing.io, .{
         .argv = &.{ "/bin/sh", "-c", script, "tj-append-test", output, support.tj, support.tjctl },
+        .environ_map = support.sys.environMap(),
         .stdout_limit = .limited(1 << 20),
         .stderr_limit = .limited(1 << 20),
     });

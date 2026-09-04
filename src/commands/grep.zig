@@ -399,9 +399,9 @@ pub fn grepCommand(
     const current = sys.env("TJ_JOURNAL");
     if (!request.all and (current == null or current.?.len == 0)) {
         if (request.tui) {
-            cmd_context.note("tj grep --tui: no current journal\n", .{});
+            cmd_context.note(io, "tj grep --tui: no current journal\n", .{});
         } else {
-            cmd_context.note("tj grep: no current journal; use --all\n", .{});
+            cmd_context.note(io, "tj grep: no current journal; use --all\n", .{});
         }
         return 2;
     }
