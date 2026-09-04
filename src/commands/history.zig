@@ -187,7 +187,9 @@ pub fn listInteractions(
     }
     for (parsed.flags.items) |flag| {
         if (!std.mem.eql(u8, flag.name, "tag")) continue;
-        try filters.append(gpa, annotations.normalizeTag(gpa, flag.value.?) catch return error.InvalidTag);
+        const tag = annotations.normalizeTag(gpa, flag.value.?) catch return error.InvalidTag;
+        errdefer gpa.free(tag);
+        try filters.append(gpa, tag);
     }
     const pinned_only = parsed.enabled("pinned");
 

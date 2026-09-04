@@ -161,6 +161,7 @@ pub fn listWithin(
             try std.fmt.allocPrint(gpa, "{s}/", .{entry.name})
         else
             try gpa.dupe(u8, entry.name);
+        errdefer gpa.free(name);
         try found.append(gpa, name);
     }
     return found.toOwnedSlice(gpa);

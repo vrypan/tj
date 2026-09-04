@@ -135,6 +135,25 @@ pub const Store = struct {
         truncated: bool = false,
     };
 
+    const PendingPublication = struct {
+        path: ?[]u8,
+        mime: []u8,
+
+        fn init(gpa: std.mem.Allocator, path: ?[]const u8, mime: []const u8) !PendingPublication {
+            const owned_path = if (path) |value| try gpa.dupe(u8, value) else null;
+            errdefer if (owned_path) |value| gpa.free(value);
+            return .{
+                .path = owned_path,
+                .mime = try gpa.dupe(u8, mime),
+            };
+        }
+
+        fn deinit(self: PendingPublication, gpa: std.mem.Allocator) void {
+            if (self.path) |path| gpa.free(path);
+            gpa.free(self.mime);
+        }
+    };
+
     /// Creates a new journal. `home_override` wins over `$TJ_HOME`, which wins
     /// over `~/.tj`.
     pub fn createJournal(gpa: std.mem.Allocator, io: Io, home_override: ?[]const u8) !Store {
@@ -462,52 +481,45 @@ pub const Store = struct {
     }
 
     fn openResource(self: *Store, current: *Interaction, path: []const u8, mime: []const u8) !void {
-        var already_published = false;
-        for (current.published[0..current.published_count]) |entry| {
+        var existing: ?usize = null;
+        for (current.published[0..current.published_count], 0..) |entry, index| {
             if (std.mem.eql(u8, entry.path, path)) {
-                already_published = true;
+                existing = index;
                 break;
             }
         }
-        if (!already_published and current.published_count == current.published.len) {
+        if (existing == null and current.published_count == current.published.len) {
             return error.TooManyResources;
         }
+        const pending = try PendingPublication.init(self.gpa, if (existing == null) path else null, mime);
+        errdefer pending.deinit(self.gpa);
 
         if (std.mem.lastIndexOfScalar(u8, path, '/')) |cut| {
             try current.dir.createDirPath(self.io, path[0..cut]);
         }
         const file = try current.dir.createFile(self.io, path, .{ .permissions = file_permissions });
         errdefer file.close(self.io);
-        const entry = try self.recordPublished(current, path, mime);
+
+        const entry = if (existing) |index| blk: {
+            self.warn("resource {s} published twice; keeping the last", .{path});
+            self.gpa.free(current.published[index].mime);
+            current.published[index].mime = pending.mime;
+            current.published[index].truncated = false;
+            break :blk index;
+        } else blk: {
+            const index = current.published_count;
+            current.published[index] = .{
+                .path = pending.path.?,
+                .mime = pending.mime,
+            };
+            current.published_count += 1;
+            break :blk index;
+        };
 
         current.open_region = .{ .resource = .{
             .file = file,
             .entry = entry,
         } };
-    }
-
-    /// Finds or makes the `meta.json` entry for this path. Publishing the same
-    /// name twice within one interaction means the last one wins.
-    fn recordPublished(self: *Store, current: *Interaction, path: []const u8, mime: []const u8) !usize {
-        for (current.published[0..current.published_count], 0..) |*entry, i| {
-            if (!std.mem.eql(u8, entry.path, path)) continue;
-            self.warn("resource {s} published twice; keeping the last", .{path});
-            // Duplicate before freeing: on failure the entry must keep a
-            // valid mime rather than a dangling one `finish` would free again.
-            const owned = try self.gpa.dupe(u8, mime);
-            self.gpa.free(entry.mime);
-            entry.mime = owned;
-            entry.truncated = false;
-            return i;
-        }
-
-        if (current.published_count == current.published.len) return error.TooManyResources;
-        current.published[current.published_count] = .{
-            .path = try self.gpa.dupe(u8, path),
-            .mime = try self.gpa.dupe(u8, mime),
-        };
-        current.published_count += 1;
-        return current.published_count - 1;
     }
 
     fn appendResource(self: *Store, current: *Interaction, open: *OpenResource, bytes: []const u8) void {
@@ -2254,6 +2266,19 @@ test "exceeding the resource limit leaves no open region or file" {
     defer entry.close(io);
     try std.testing.expectError(error.FileNotFound, entry.openFile(io, "rejected", .{}));
     store.close();
+}
+
+fn checkPendingPublicationAllocations(gpa: std.mem.Allocator) !void {
+    const pending = try Store.PendingPublication.init(gpa, "report.txt", "text/plain");
+    defer pending.deinit(gpa);
+}
+
+test "pending resource metadata owns every partial allocation" {
+    try std.testing.checkAllAllocationFailures(
+        std.testing.allocator,
+        checkPendingPublicationAllocations,
+        .{},
+    );
 }
 
 test "an unfinished noout region is reset at the entry boundary" {
