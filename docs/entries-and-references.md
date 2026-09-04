@@ -208,6 +208,15 @@ it useful with another command:
 tj tui | script
 ```
 
+The optional `contrib/tj-md` companion turns a selection into a Markdown
+terminal transcript. It reads the IDs from standard input; `--prompt` uses
+the recorded prompt before each command.
+
+```sh
+tj tui | contrib/tj-md > transcript.md
+tj tui | contrib/tj-md --prompt
+```
+
 The detail view is a list of selectable logical lines, including its metadata,
 `cwd`, `cmd`, and every output line. Long lines are clipped on screen rather
 than wrapped; selecting one still prints its complete value. `Up`, `Down`,

@@ -8,6 +8,7 @@ test {
     _ = @import("it_fullscreen.zig");
     _ = @import("it_empty.zig");
     _ = @import("it_resources.zig");
+    _ = @import("it_contrib.zig");
     _ = @import("it_replay.zig");
     _ = @import("it_tui.zig");
     _ = @import("it_fish.zig");

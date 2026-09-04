@@ -47,9 +47,9 @@ The install contains:
 - `share/tj/tj.plugin.fish`
 - zsh, bash, and fish command completions
 
-The repository's `contrib/` directory also contains optional `tj-grep` and
-`tj-tape` integrations. They are not installed or supported as part of TJ's
-command interface.
+The repository's `contrib/` directory also contains optional `tj-grep`,
+`tj-md`, and `tj-tape` integrations. They are not installed or supported as
+part of TJ's command interface.
 
 Remove files installed by `make install` with the same prefix:
 

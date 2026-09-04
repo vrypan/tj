@@ -1,0 +1,112 @@
+#!/usr/bin/env bash
+# Render selected journal entries as a Markdown terminal transcript.
+
+set -euo pipefail
+
+usage() {
+    cat <<'EOF'
+Usage: tj-md [--prompt]
+
+Read space- or newline-separated numeric entry IDs from standard input and
+write one Markdown console block to standard output.
+
+Options:
+  -p, --prompt  Use each entry's recorded prompt instead of "$ "
+  -h, --help    Show this help
+
+Examples:
+  tj tui | tj-md > transcript.md
+  printf '12 14 15\n' | tj-md --prompt
+EOF
+}
+
+show_prompt=false
+while (($#)); do
+    case "$1" in
+        -p|--prompt)
+            show_prompt=true
+            shift
+            ;;
+        -h|--help)
+            usage
+            exit 0
+            ;;
+        *)
+            usage >&2
+            exit 2
+            ;;
+    esac
+done
+
+[[ -n ${TJ_JOURNAL:-} ]] || {
+    echo 'tj-md: not inside a TJ journal writer' >&2
+    exit 2
+}
+
+tj_bin=${TJ:-tj}
+ids=()
+while IFS= read -r line || [[ -n $line ]]; do
+    words=()
+    read -r -a words <<<"$line"
+    for id in "${words[@]}"; do
+        [[ $id =~ ^[1-9][0-9]*$ ]] || {
+            printf 'tj-md: invalid entry ID: %s\n' "$id" >&2
+            exit 2
+        }
+        ids+=("$id")
+    done
+done
+
+((${#ids[@]} != 0)) || {
+    echo 'tj-md: no entry IDs on standard input' >&2
+    exit 2
+}
+
+transcript=$(mktemp "${TMPDIR:-/tmp}/tj-md.XXXXXX")
+noout_open=false
+cleanup() {
+    if $noout_open; then
+        printf '\033]3110;END\033\\' || true
+    fi
+    rm -f "$transcript"
+}
+trap cleanup EXIT
+
+for id in "${ids[@]}"; do
+    if $show_prompt; then
+        command "$tj_bin" cat --plain "@$id/prompt" | command cat >>"$transcript"
+    else
+        printf '$ ' >>"$transcript"
+    fi
+    command "$tj_bin" cat --plain "@$id/cmd" | command cat >>"$transcript"
+    printf '\n\n' >>"$transcript"
+    command "$tj_bin" cat --plain "@$id/out" | command cat >>"$transcript"
+    printf '\n\n' >>"$transcript"
+done
+
+# A fixed ``` fence can be closed by recorded output. Use at least three
+# backticks and one more than any run in the complete transcript.
+fence_length=$(awk '
+    {
+        text = $0
+        while (match(text, /`+/)) {
+            if (RLENGTH > max) max = RLENGTH
+            text = substr(text, RSTART + RLENGTH)
+        }
+    }
+    END {
+        if (max < 3) max = 3
+        else max += 1
+        print max
+    }
+' "$transcript")
+printf -v fence '%*s' "$fence_length" ''
+fence=${fence// /\`}
+
+if [[ -n ${TJ_JOURNAL:-} && -t 1 ]]; then
+    printf '\033]3110;NOOUT\033\\'
+    noout_open=true
+fi
+printf '%sconsole\n' "$fence"
+cat "$transcript"
+printf '%s\n' "$fence"
