@@ -232,6 +232,13 @@ test "completion offers resources but never tj's own bookkeeping" {
     try std.testing.expect(std.mem.indexOf(u8, r.out.items, "@1/prompt") != null);
     try std.testing.expect(std.mem.indexOf(u8, r.out.items, "@1/rc") != null);
     try std.testing.expect(std.mem.indexOf(u8, r.out.items, "meta.json") == null);
+
+    for ([_][]const u8{ "@1/../../", "@1/./", "@1//" }) |attempt| {
+        var invalid = try support.run(gpa, &.{ "--home", home, "complete", attempt }, 24, 80);
+        defer invalid.out.deinit(gpa);
+        try std.testing.expectEqual(@as(u8, 0), invalid.code);
+        try std.testing.expectEqual(@as(usize, 0), invalid.out.items.len);
+    }
 }
 
 test "command substitutions resolve entry paths" {

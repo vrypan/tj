@@ -107,7 +107,7 @@ fn parseNumber(text: []const u8) Error!u32 {
 
 /// A resource path must stay inside its interaction: a program that publishes
 /// one chooses the name, so this is a security boundary, not a nicety.
-fn validateSubpath(subpath: []const u8) Error!void {
+pub fn validateSubpath(subpath: []const u8) Error!void {
     if (subpath.len == 0) return;
     if (subpath[0] == '/') return error.Malformed;
 

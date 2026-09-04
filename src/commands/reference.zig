@@ -113,6 +113,8 @@ pub fn completeResources(
     defer gpa.free(ref_text);
     const ref = reference.parse(ref_text) catch return;
     const directory = if (cut < body.len) body[cut + 1 ..] else "";
+    if (cut < body.len and directory.len == 0) return;
+    reference.validateSubpath(directory) catch return;
 
     const found = store.locate(gpa, io, root, sys.env("TJ_JOURNAL"), ref) catch return;
     defer found.deinit(gpa);
