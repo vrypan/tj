@@ -360,6 +360,7 @@ pub const Store = struct {
         });
 
         const file = try dir.createFile(self.io, "out", .{ .permissions = file_permissions });
+        errdefer file.close(self.io);
         self.current = .{
             .number = number,
             .dir = dir,
@@ -479,8 +480,11 @@ pub const Store = struct {
         for (current.published[0..current.published_count], 0..) |*entry, i| {
             if (!std.mem.eql(u8, entry.path, path)) continue;
             self.warn("resource {s} published twice; keeping the last", .{path});
+            // Duplicate before freeing: on failure the entry must keep a
+            // valid mime rather than a dangling one `finish` would free again.
+            const owned = try self.gpa.dupe(u8, mime);
             self.gpa.free(entry.mime);
-            entry.mime = try self.gpa.dupe(u8, mime);
+            entry.mime = owned;
             entry.truncated = false;
             return i;
         }
@@ -706,6 +710,11 @@ pub const Store = struct {
             self.closeOpenRegion(current);
             current.file.close(self.io);
             current.dir.close(self.io);
+            if (current.expanded) |text| self.gpa.free(text);
+            for (current.published[0..current.published_count]) |entry| {
+                self.gpa.free(entry.path);
+                self.gpa.free(entry.mime);
+            }
             self.current = null;
         }
     }

@@ -66,9 +66,11 @@ fn copyFence(gpa: std.mem.Allocator, io: Io, input: Io.File, out: *Io.Writer) !u
 fn runFenceCommand(gpa: std.mem.Allocator, words: []const []const u8, out: *Io.Writer) !u8 {
     var fds: [2]c_int = undefined;
     if (c.pipe(&fds) != 0) return error.Syscall;
+    var read_open = true;
+    var write_open = true;
     errdefer {
-        sys.close(fds[0]);
-        sys.close(fds[1]);
+        if (read_open) sys.close(fds[0]);
+        if (write_open) sys.close(fds[1]);
     }
 
     const argv = try buildArgv(gpa, words);
@@ -78,6 +80,7 @@ fn runFenceCommand(gpa: std.mem.Allocator, words: []const []const u8, out: *Io.W
     if (pid == 0) childExec(fds, argv);
 
     sys.close(fds[1]);
+    write_open = false;
     var filter = fence.Filter.init(gpa, out, sys.env("TJ_JOURNAL") != null and sys.isTty(1));
     defer filter.deinit();
     var bytes: [4096]u8 = undefined;
@@ -99,6 +102,7 @@ fn runFenceCommand(gpa: std.mem.Allocator, words: []const []const u8, out: *Io.W
         };
     }
     sys.close(fds[0]);
+    read_open = false;
     const result = sys.waitFor(pid);
     if (failure) |err| return err;
     return result.code;

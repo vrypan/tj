@@ -132,13 +132,15 @@ fn emitHandoff(
         .new => |name| try store.Store.createNamedJournal(gpa, io, opts.home, name, false),
         .existing => |selector| try store.Store.continueJournal(gpa, io, opts.home, selector),
     };
-    errdefer target.close();
+    var preflight_open = true;
+    errdefer if (preflight_open) target.close();
     const selected = try gpa.dupe(u8, target.journalId());
     defer gpa.free(selected);
     const selected_next = target.next_number.?;
     // The proxy must acquire this same target while the helper waits for its
     // acknowledgement, so release the short-lived CLI preflight lock now.
     target.close();
+    preflight_open = false;
 
     if (title.len > handoff.max_field or selected.len > handoff.max_field) return error.RequestTooLarge;
     var request: handoff.Request = .{
