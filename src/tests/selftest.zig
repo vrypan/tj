@@ -13,8 +13,6 @@ const sys = @import("sys");
 const tjctl = std.fmt.comptimePrint("{s}", .{@import("build_options").tjctl_exe});
 
 pub fn main(init: std.process.Init) !u8 {
-    _ = init;
-
     const before = posix.tcgetattr(0) catch return 1;
 
     const argv = [_:null]?[*:0]const u8{ tjctl, "new", "--no-splash", "--title", "none", "--", "/bin/sh", "-c", "sleep 1" };
@@ -25,7 +23,7 @@ pub fn main(init: std.process.Init) !u8 {
         c._exit(127);
     }
 
-    sys.sleepMs(400);
+    sys.sleepMs(init.io, 400);
     const during = posix.tcgetattr(0) catch return 1;
     const raw = !during.lflag.ICANON and !during.lflag.ECHO;
 

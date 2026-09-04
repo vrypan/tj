@@ -255,16 +255,16 @@ pub fn listInteractions(
 
     const date_width = 12;
     const prefix_width = 2 + 1 + number_width + 1 + size_width + 1 + date_width + 1;
-    const columns = report.terminalColumns();
+    const columns = report.terminalColumns(io);
     const payload_width: ?usize = if (columns) |value|
         if (value > prefix_width) value - prefix_width else 1
     else
         null;
-    const color_enabled = report.layoutColorEnabled();
+    const color_enabled = report.layoutColorEnabled(io);
     const current = sys.env("TJ_JOURNAL");
     var noout_region: report.NooutRegion = .{
         .out = out,
-        .enabled = current != null and current.?.len != 0 and sys.isTty(1),
+        .enabled = current != null and current.?.len != 0 and sys.isTty(io, 1),
     };
     defer noout_region.finish();
     const now_ms = Io.Clock.now(.real, io).toMilliseconds();

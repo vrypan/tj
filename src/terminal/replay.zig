@@ -180,9 +180,9 @@ pub const Options = struct {
 
     /// Sleeps unless only the total was asked for. Returns what it cost
     /// either way, so duration reporting and playback cannot drift apart.
-    fn wait(self: Options, millis: i64) !u64 {
+    fn wait(self: Options, io: Io, millis: i64) !u64 {
         const ms = try self.delay(millis);
-        if (!self.duration_only) sys.sleepMs(ms);
+        if (!self.duration_only) sys.sleepMs(io, ms);
         return ms;
     }
 };
@@ -210,7 +210,7 @@ pub fn play(
         const timing = store.readTiming(gpa, io, root, journal, number);
 
         if (previous_end) |ended| {
-            if (timing) |value| try addDuration(&total_ms, try options.wait(value.started - ended));
+            if (timing) |value| try addDuration(&total_ms, try options.wait(io, value.started - ended));
         }
 
         if (!options.duration_only) {
@@ -220,7 +220,7 @@ pub fn play(
         }
         try addDuration(&total_ms, try typeOut(io, root, journal, number, options, &replay_out));
 
-        if (timing) |value| try addDuration(&total_ms, try options.wait(value.duration()));
+        if (timing) |value| try addDuration(&total_ms, try options.wait(io, value.duration()));
 
         if (!options.duration_only) {
             _ = try writeResource(io, root, journal, number, "out", &replay_out);
@@ -293,7 +293,7 @@ fn typeOut(
             for (bytes[0..n]) |char| {
                 try out.writeAll(&[_]u8{char});
                 try out.flush();
-                sys.sleepMs(per_char);
+                sys.sleepMs(io, per_char);
             }
         }
     }

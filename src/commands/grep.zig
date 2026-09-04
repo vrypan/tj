@@ -59,12 +59,12 @@ pub fn grepRequest(parsed: *const zecli.Parsed) !GrepRequest {
     return request;
 }
 
-pub fn colorEnabled(when: ColorWhen) bool {
+pub fn colorEnabled(io: Io, when: ColorWhen) bool {
     return switch (when) {
         .never => false,
         .always => true,
         .auto => blk: {
-            if (!sys.isTty(1)) break :blk false;
+            if (!sys.isTty(io, 1)) break :blk false;
             const term = sys.env("TERM") orelse break :blk false;
             break :blk term.len != 0 and !std.mem.eql(u8, term, "dumb");
         },
@@ -421,17 +421,17 @@ pub fn grepCommand(
         return 0;
     }
 
-    const terminal_columns = if (sys.isTty(1)) report.terminalColumns() else null;
+    const terminal_columns = if (sys.isTty(io, 1)) report.terminalColumns(io) else null;
     var output: GrepOutput = .{
         .io = io,
         .out = out,
         .noout_region = .{
             .out = out,
-            .enabled = current != null and current.?.len != 0 and sys.isTty(1),
+            .enabled = current != null and current.?.len != 0 and sys.isTty(io, 1),
         },
-        .match_sgr = if (colorEnabled(request.color)) selectedMatchSgr(sys.env("GREP_COLORS")) else "",
+        .match_sgr = if (colorEnabled(io, request.color)) selectedMatchSgr(sys.env("GREP_COLORS")) else "",
         .terminal_columns = terminal_columns,
-        .layout_color = report.layoutColorEnabled(),
+        .layout_color = report.layoutColorEnabled(io),
         .reference_width = 1,
     };
     defer output.noout_region.finish();

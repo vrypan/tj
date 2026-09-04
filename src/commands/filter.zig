@@ -21,7 +21,7 @@ pub fn run(gpa: std.mem.Allocator, io: Io, parsed: *const zecli.Parsed, child: [
     }
     return switch (mode) {
         .noout => (try noout.run(gpa, child)).exit_code,
-        .fence => runFenceCommand(gpa, child, out),
+        .fence => runFenceCommand(gpa, io, child, out),
     };
 }
 
@@ -33,7 +33,7 @@ fn modeFromParsed(parsed: *const zecli.Parsed) !Mode {
 }
 
 fn copyNoout(io: Io, out: *Io.Writer) !u8 {
-    const enabled = sys.env("TJ_JOURNAL") != null and sys.isTty(1);
+    const enabled = sys.env("TJ_JOURNAL") != null and sys.isTty(io, 1);
     if (enabled) try out.writeAll(noout.begin_marker);
     defer if (enabled) out.writeAll(noout.end_marker) catch {};
 
@@ -52,7 +52,7 @@ fn copyFence(gpa: std.mem.Allocator, io: Io, input: Io.File, out: *Io.Writer) !u
     var reader_buffer: [4096]u8 = undefined;
     var bytes: [4096]u8 = undefined;
     var reader = input.readerStreaming(io, &reader_buffer);
-    var filter = fence.Filter.init(gpa, out, sys.env("TJ_JOURNAL") != null and sys.isTty(1));
+    var filter = fence.Filter.init(gpa, out, sys.env("TJ_JOURNAL") != null and sys.isTty(io, 1));
     defer filter.deinit();
     while (true) {
         const n = try reader.interface.readSliceShort(&bytes);
@@ -63,7 +63,7 @@ fn copyFence(gpa: std.mem.Allocator, io: Io, input: Io.File, out: *Io.Writer) !u
     return 0;
 }
 
-fn runFenceCommand(gpa: std.mem.Allocator, words: []const []const u8, out: *Io.Writer) !u8 {
+fn runFenceCommand(gpa: std.mem.Allocator, io: Io, words: []const []const u8, out: *Io.Writer) !u8 {
     var fds: [2]c_int = undefined;
     if (c.pipe(&fds) != 0) return error.Syscall;
     var read_open = true;
@@ -81,7 +81,7 @@ fn runFenceCommand(gpa: std.mem.Allocator, words: []const []const u8, out: *Io.W
 
     sys.close(fds[1]);
     write_open = false;
-    var filter = fence.Filter.init(gpa, out, sys.env("TJ_JOURNAL") != null and sys.isTty(1));
+    var filter = fence.Filter.init(gpa, out, sys.env("TJ_JOURNAL") != null and sys.isTty(io, 1));
     defer filter.deinit();
     var bytes: [4096]u8 = undefined;
     var failure: ?anyerror = null;

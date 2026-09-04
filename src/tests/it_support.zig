@@ -352,7 +352,7 @@ pub fn finishKeepingTail(
             return .{ .tail = tail, .total = total, .code = wait.code };
         }
         const interval = try deadline.pollInterval(10) orelse return error.PtyTimeout;
-        sys.sleepMs(@intCast(interval));
+        sys.sleepMs(std.testing.io, @intCast(interval));
     }
 }
 

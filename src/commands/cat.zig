@@ -50,7 +50,7 @@ pub fn catResource(
 ) !void {
     // Terminals can render escape sequences, pipes cannot. Follow the usual
     // convention and let either flag settle it explicitly.
-    const request = catRequest(parsed, sys.isTty(1));
+    const request = catRequest(parsed, sys.isTty(io, 1));
 
     // `tj cat ./notes.txt` is a plain file read that happens to share a
     // command with references. Opening the journal root up front made it fail

@@ -73,7 +73,7 @@ pub fn removeJournal(
         const numbers = try store.listNumbers(gpa, io, root, journal);
         defer gpa.free(numbers);
         for (numbers) |number| if (try pins.isPinned(io, root, journal, number)) return error.PinnedInteraction;
-        if (!sys.isTty(0)) return error.ConfirmationRequired;
+        if (!sys.isTty(io, 0)) return error.ConfirmationRequired;
         try out.print("Remove journal {s} with {d} {s}? [y/N] ", .{
             journal,
             entries,

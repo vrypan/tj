@@ -117,8 +117,8 @@ pub fn build(b: *std.Build) void {
     integration_options.addOptionPath("tjctl_fish_completion", completion_outputs[5]);
 
     // Integration tests import the same command and storage modules as the
-    // binaries, including embedded SQLite. Give their root module the exact
-    // same C sources, include paths, and package imports.
+    // binaries. Give their root module the same libc linkage and package
+    // imports.
     const integration_mod = applicationModule(b, zecli, "src/integration_test.zig", target, optimize, false);
     integration_mod.addImport("zooi", zooi.module("zooi"));
     integration_mod.addOptions("build_options", integration_options);

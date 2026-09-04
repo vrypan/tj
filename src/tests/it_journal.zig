@@ -649,7 +649,7 @@ test "only one process writes a journal and descendants do not retain its lock" 
     try std.testing.expect(std.mem.indexOf(u8, blocked.out.items, "already being written") != null);
     try std.testing.expect(std.mem.indexOf(u8, blocked.out.items, "SECOND-RAN") == null);
 
-    _ = std.c.kill(holder.pid, posix.SIG.TERM);
+    posix.kill(holder.pid, posix.SIG.TERM) catch {};
     _ = try holder.finish(gpa, &holder_out, support.timeout_ms);
 
     var background = try support.runTjctl(gpa, &.{ "--home", scratch.path(), "use", &id, "--", "/bin/sh", "-c", "(sleep 3) </dev/null >/dev/null 2>&1 &" }, 24, 80);

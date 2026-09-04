@@ -98,7 +98,7 @@ pub fn run(gpa: std.mem.Allocator, io: std.Io, opts: Options) !Result {
         store.close();
     }
 
-    const title_enabled = !std.mem.eql(u8, opts.title, "none") and sys.isTty(stdout_fd);
+    const title_enabled = !std.mem.eql(u8, opts.title, "none") and sys.isTty(io, stdout_fd);
     defer if (title_enabled) terminal_title.pop(stdout_fd);
 
     const title_env = try gpa.dupeZ(u8, opts.title);
@@ -109,7 +109,7 @@ pub fn run(gpa: std.mem.Allocator, io: std.Io, opts: Options) !Result {
     // which a continuation reconstructs its transcript without hiding any of
     // it behind the splash. Redirected and otherwise non-interactive starts
     // never wait for input.
-    if (opts.splash and sys.isTty(stdin_fd)) {
+    if (opts.splash and sys.isTty(io, stdin_fd)) {
         const choice = splash.show(gpa, store.journalId(), store.next_number.?) catch blk: {
             warnStartup("tjctl: recording journal {s}; next entry @{d}\r\n", .{ store.journalId(), store.next_number.? });
             break :blk splash.Choice.proceed;
@@ -136,7 +136,7 @@ pub fn run(gpa: std.mem.Allocator, io: std.Io, opts: Options) !Result {
     // query them (line width, control characters) see the truth from the start.
     // With a redirected stdin there is no outer terminal to copy or restore;
     // the proxy still runs, the pty just starts with the system defaults.
-    const on_tty = sys.isTty(stdin_fd);
+    const on_tty = sys.isTty(io, stdin_fd);
     var outer_term: posix.termios = undefined;
     var outer_ws: posix.winsize = undefined;
     const have_term = on_tty and blk: {
@@ -220,7 +220,7 @@ pub fn run(gpa: std.mem.Allocator, io: std.Io, opts: Options) !Result {
     sys.close(handoff_fds[0]);
 
     const child_result = sys.waitFor(pid);
-    if (!store.hasRecordedEntry()) warnNothingRecorded();
+    if (!store.hasRecordedEntry()) warnNothingRecorded(io);
     return .{ .exit_code = child_result.code };
 }
 
@@ -364,7 +364,7 @@ fn exportEnvironment(store: *Store, title: [:0]const u8, title_blink_ms: u32, ha
 
     var path_buf: [std.fs.max_path_bytes]u8 = undefined;
     var value_buf: [std.fs.max_path_bytes + 1]u8 = undefined;
-    const path = sys.selfExePath(&path_buf) orelse return;
+    const path = sys.selfExePath(store.io, &path_buf) orelse return;
     if (path.len < value_buf.len) {
         @memcpy(value_buf[0..path.len], path);
         value_buf[path.len] = 0;
@@ -396,9 +396,9 @@ fn warnStartup(comptime fmt: []const u8, args: anytype) void {
     sys.writeAll(stderr_fd, text) catch {};
 }
 
-fn warnNothingRecorded() void {
+fn warnNothingRecorded(io: std.Io) void {
     sys.writeAll(stderr_fd, nothing_recorded_message) catch return;
-    sys.writeAll(stderr_fd, if (sys.isTty(stderr_fd)) "\r\n" else "\n") catch {};
+    sys.writeAll(stderr_fd, if (sys.isTty(io, stderr_fd)) "\r\n" else "\n") catch {};
 }
 
 /// Turns scanner events into journal entries and forwards every byte the

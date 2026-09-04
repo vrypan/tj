@@ -322,7 +322,7 @@ test "whole-journal removal is outside-writer only and refuses active journals" 
     defer active_rename.out.deinit(gpa);
     try std.testing.expectEqual(@as(u8, 1), active_rename.code);
     try std.testing.expect(std.mem.indexOf(u8, active_rename.out.items, "already being written") != null);
-    _ = std.c.kill(writer.pid, posix.SIG.TERM);
+    posix.kill(writer.pid, posix.SIG.TERM) catch {};
     _ = try writer.finish(gpa, &writer_out, support.timeout_ms);
 
     var renamed = try support.runTjctl(gpa, &.{ "--home", home, "mv", id, "renamed-journal" }, 24, 100);

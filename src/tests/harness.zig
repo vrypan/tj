@@ -42,7 +42,7 @@ pub const PtyChild = struct {
     pub fn resize(self: PtyChild, rows: u16, cols: u16) !void {
         const ws: posix.winsize = .{ .row = rows, .col = cols, .xpixel = 0, .ypixel = 0 };
         try sys.setWinsize(self.master, &ws);
-        _ = c.kill(self.pid, posix.SIG.WINCH);
+        posix.kill(self.pid, posix.SIG.WINCH) catch {};
     }
 
     /// Reads until `marker` appears or the deadline passes. Returns everything
@@ -116,7 +116,7 @@ pub const PtyChild = struct {
                 return wait.code;
             }
             const interval = try reap_deadline.pollInterval(10) orelse return error.PtyTimeout;
-            sys.sleepMs(@intCast(interval));
+            sys.sleepMs(std.testing.io, @intCast(interval));
         }
     }
 

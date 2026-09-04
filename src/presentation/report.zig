@@ -41,8 +41,8 @@ pub fn decimalWidth(number: u32) usize {
 }
 
 /// The terminal's width, or null when stdout is not one.
-pub fn terminalColumns() ?usize {
-    if (!sys.isTty(1)) return null;
+pub fn terminalColumns(io: Io) ?usize {
+    if (!sys.isTty(io, 1)) return null;
     if (sys.getWinsize(1)) |size| {
         if (size.col != 0) return size.col;
     } else |_| {}
@@ -55,8 +55,8 @@ pub fn terminalColumns() ?usize {
 
 /// Whether a report should colour its own layout. Distinct from `--color`,
 /// which is a per-command request about matches rather than about layout.
-pub fn layoutColorEnabled() bool {
-    if (!sys.isTty(1) or sys.envPresent("NO_COLOR")) return false;
+pub fn layoutColorEnabled(io: Io) bool {
+    if (!sys.isTty(io, 1) or sys.envPresent("NO_COLOR")) return false;
     const term = sys.env("TERM") orelse return false;
     return !std.mem.eql(u8, term, "dumb");
 }

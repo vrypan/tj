@@ -120,7 +120,7 @@ pub fn usageJournal(
 
     var noout_region: report.NooutRegion = .{
         .out = out,
-        .enabled = sys.isTty(1),
+        .enabled = sys.isTty(io, 1),
     };
     defer noout_region.finish();
     try noout_region.begin();
@@ -145,7 +145,7 @@ pub fn usageJournal(
         return;
     }
 
-    const color_enabled = report.layoutColorEnabled();
+    const color_enabled = report.layoutColorEnabled(io);
     const qualified = if (sys.env("TJ_JOURNAL")) |current|
         !std.mem.eql(u8, current, journal)
     else
@@ -167,7 +167,7 @@ pub fn usageJournal(
         largest = @max(largest, entry.bytes);
     }
     const prefix_width = reference_width + 1 + size_width + 1;
-    const columns = report.terminalColumns() orelse 80;
+    const columns = report.terminalColumns(io) orelse 80;
     const available = if (columns > prefix_width) columns - prefix_width else 1;
 
     for (measured.entries) |entry| {

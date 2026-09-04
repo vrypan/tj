@@ -382,7 +382,7 @@ test "signals sent to tj are forwarded to the shell" {
     // need longer than the test budget to get there, so the shell sleeps in
     // short steps instead of one long one.
     const from = out.items.len;
-    _ = std.c.kill(child.pid, posix.SIG.TERM);
+    posix.kill(child.pid, posix.SIG.TERM) catch {};
     try std.testing.expect(try child.readUntilFrom(gpa, &out, from, "GOTTERM", support.timeout_ms));
     _ = try child.finish(gpa, &out, support.timeout_ms);
 }

@@ -275,7 +275,7 @@ test "an interrupted writer leaves the entry without an rc" {
     // The echoed input arrives before preexec. Wait for the plugin's command
     // boundary so the proxy has opened the interaction before interrupting it.
     try terminal.expectFrom(from, "133;C");
-    _ = std.c.kill(terminal.child.pid, posix.SIG.TERM);
+    posix.kill(terminal.child.pid, posix.SIG.TERM) catch {};
     _ = try terminal.finish();
 
     const cmd = try journal.read(gpa, "1/cmd");

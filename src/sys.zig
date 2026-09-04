@@ -97,8 +97,8 @@ pub fn setControllingTty(fd: Fd) Error!void {
 
 /// Asked before any terminal query, because std's tcgetattr treats ENOTTY as
 /// an unexpected error and dumps a stack trace for it in debug builds.
-pub fn isTty(fd: Fd) bool {
-    return c.isatty(fd) == 1;
+pub fn isTty(io: std.Io, fd: Fd) bool {
+    return (std.Io.File{ .handle = fd, .flags = .{ .nonblocking = false } }).isTty(io) catch false;
 }
 
 // --- descriptors -----------------------------------------------------------
@@ -213,16 +213,9 @@ pub fn killGroup(pid: c.pid_t, sig: posix.SIG) void {
     posix.kill(-pid, sig) catch {};
 }
 
-pub fn sleepMs(ms: u64) void {
-    var req: c.timespec = .{
-        .sec = @intCast(ms / 1000),
-        .nsec = @intCast((ms % 1000) * std.time.ns_per_ms),
-    };
-    var rem: c.timespec = undefined;
-    while (c.nanosleep(&req, &rem) != 0) {
-        if (posix.errno(@as(c_int, -1)) != .INTR) return;
-        req = rem;
-    }
+pub fn sleepMs(io: std.Io, ms: u64) void {
+    const duration = std.Io.Duration.fromNanoseconds(@as(i96, ms) * std.time.ns_per_ms);
+    std.Io.sleep(io, duration, .awake) catch {};
 }
 
 // --- environment -----------------------------------------------------------
@@ -249,17 +242,7 @@ pub fn unsetEnv(name: [*:0]const u8) void {
 
 /// Absolute path of the running binary, so the shell plugin can invoke exactly
 /// the build that started the journal writer.
-pub fn selfExePath(buf: []u8) ?[]const u8 {
-    switch (builtin.os.tag) {
-        .linux => {
-            const n = c.readlink("/proc/self/exe", buf.ptr, buf.len);
-            if (n <= 0 or @as(usize, @intCast(n)) >= buf.len) return null;
-            return buf[0..@intCast(n)];
-        },
-        else => {
-            var size: u32 = @intCast(buf.len);
-            if (c._NSGetExecutablePath(buf.ptr, &size) != 0) return null;
-            return std.mem.sliceTo(buf, 0);
-        },
-    }
+pub fn selfExePath(io: std.Io, buf: []u8) ?[]const u8 {
+    const n = std.process.executablePath(io, buf) catch return null;
+    return buf[0..n];
 }
