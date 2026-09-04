@@ -10,36 +10,6 @@ const options = @import("build_options");
 const tj = options.tj_exe;
 const support = @import("it_support.zig");
 
-test "legacy and corrupt journal metadata fail with explicit diagnostics" {
-    const gpa = std.testing.allocator;
-    const io = std.testing.io;
-    var scratch = try support.Scratch.open();
-    defer scratch.close();
-
-    const legacy = journal_name.legacy(37, .{2} ** 10);
-    const corrupt = journal_name.legacy(38, .{3} ** 10);
-    try scratch.makeJournal(legacy, &.{"1"});
-    try scratch.makeJournal(corrupt, &.{"1"});
-    var legacy_dir = try scratch.tmp.dir.openDir(io, &legacy, .{});
-    defer legacy_dir.close(io);
-    try legacy_dir.writeFile(io, .{ .sub_path = "annotations.json", .data = "{}\n" });
-    var corrupt_dir = try scratch.tmp.dir.openDir(io, &corrupt, .{});
-    defer corrupt_dir.close(io);
-    try corrupt_dir.writeFile(io, .{ .sub_path = "journal.sqlite3", .data = "not sqlite" });
-
-    for ([_]struct { id: journal_name.Legacy, diagnostic: []const u8 }{
-        .{ .id = legacy, .diagnostic = "legacy annotations.json is unsupported" },
-        .{ .id = corrupt, .diagnostic = "invalid or incompatible journal.sqlite3" },
-    }) |case| {
-        const result = try support.runNonTtyInJournal(gpa, &.{ "--home", scratch.path(), "name" }, &case.id, "2");
-        defer gpa.free(result.stdout);
-        defer gpa.free(result.stderr);
-        try std.testing.expectEqual(@as(u8, 1), result.term.exited);
-        try std.testing.expectEqualStrings("", result.stdout);
-        try std.testing.expect(std.mem.indexOf(u8, result.stderr, case.diagnostic) != null);
-    }
-}
-
 test "usage sums logical journal bytes and charts every entry in number order" {
     const gpa = std.testing.allocator;
     const io = std.testing.io;
@@ -51,9 +21,6 @@ test "usage sums logical journal bytes and charts every entry in number order" {
     var journal = try scratch.tmp.dir.openDir(io, &id, .{});
     defer journal.close(io);
 
-    try journal.writeFile(io, .{ .sub_path = "journal.sqlite3", .data = &([_]u8{'a'} ** 100) });
-    try journal.writeFile(io, .{ .sub_path = "journal.sqlite3-wal", .data = &([_]u8{'w'} ** 11) });
-    try journal.writeFile(io, .{ .sub_path = "journal.sqlite3-shm", .data = &([_]u8{'s'} ** 13) });
     try journal.writeFile(io, .{ .sub_path = "log", .data = &([_]u8{'l'} ** 105) });
 
     var one = try journal.openDir(io, "1", .{});
@@ -73,7 +40,7 @@ test "usage sums logical journal bytes and charts every entry in number order" {
     defer gpa.free(total.stdout);
     defer gpa.free(total.stderr);
     try std.testing.expectEqual(@as(u8, 0), total.term.exited);
-    try std.testing.expectEqualStrings("3.2k\n", total.stdout);
+    try std.testing.expectEqualStrings("3.1k\n", total.stdout);
     try std.testing.expectEqualStrings("", total.stderr);
 
     const bytes = try support.runTjctlNonTtyInJournal(gpa, &.{ "--home", scratch.path(), "du", "--bytes" }, &id, "11");
@@ -87,7 +54,7 @@ test "usage sums logical journal bytes and charts every entry in number order" {
     defer gpa.free(chart.stdout);
     defer gpa.free(chart.stderr);
     try std.testing.expectEqual(@as(u8, 0), chart.term.exited);
-    try std.testing.expect(std.mem.startsWith(u8, chart.stdout, "Total 3.2k\n\nEntry Size Chart\n"));
+    try std.testing.expect(std.mem.startsWith(u8, chart.stdout, "Total 3.1k\n\nEntry Size Chart\n"));
     const one_at = std.mem.indexOf(u8, chart.stdout, " @1 1.0k ") orelse return error.TestUnexpectedResult;
     const three_at = std.mem.indexOf(u8, chart.stdout, " @3 2.0k ") orelse return error.TestUnexpectedResult;
     const ten_at = std.mem.indexOf(u8, chart.stdout, "@10   0b\n") orelse return error.TestUnexpectedResult;
@@ -105,7 +72,7 @@ test "usage sums logical journal bytes and charts every entry in number order" {
     defer gpa.free(exact_chart.stdout);
     defer gpa.free(exact_chart.stderr);
     try std.testing.expectEqual(@as(u8, 0), exact_chart.term.exited);
-    try std.testing.expect(std.mem.startsWith(u8, exact_chart.stdout, "Total 3301\n\nEntry Size Chart\n"));
+    try std.testing.expect(std.mem.startsWith(u8, exact_chart.stdout, "Total 3177\n\nEntry Size Chart\n"));
     try std.testing.expect(std.mem.indexOf(u8, exact_chart.stdout, " @1 1024 ") != null);
     try std.testing.expect(std.mem.indexOf(u8, exact_chart.stdout, " @3 2048 ") != null);
     try std.testing.expect(std.mem.indexOf(u8, exact_chart.stdout, "@10    0\n") != null);
@@ -326,7 +293,7 @@ test "new accepts canonical names generates readable defaults and requires child
     try std.testing.expect(found_generated);
 }
 
-test "mv preserves entries and annotations while invalidating the old identity" {
+test "mv preserves entries and pins while invalidating the old identity" {
     const gpa = std.testing.allocator;
     const io = std.testing.io;
     support.leaveJournal();
@@ -341,15 +308,15 @@ test "mv preserves entries and annotations while invalidating the old identity" 
     entry.close(io);
     journal.close(io);
 
-    const named = try support.runNonTtyInJournal(
+    const pinned = try support.runNonTtyInJournal(
         gpa,
-        &.{ "--home", scratch.path(), "name", "@1", "green-build" },
+        &.{ "--home", scratch.path(), "pin", "@1" },
         "release-build",
         "2",
     );
-    defer gpa.free(named.stdout);
-    defer gpa.free(named.stderr);
-    try std.testing.expectEqual(@as(u8, 0), named.term.exited);
+    defer gpa.free(pinned.stdout);
+    defer gpa.free(pinned.stderr);
+    try std.testing.expectEqual(@as(u8, 0), pinned.term.exited);
 
     const moved = try support.runTjctlNonTty(gpa, &.{ "--home", scratch.path(), "mv", "build", "renamed-build" });
     defer gpa.free(moved.stdout);
@@ -362,11 +329,16 @@ test "mv preserves entries and annotations while invalidating the old identity" 
     defer gpa.free(old.stderr);
     try std.testing.expect(old.term.exited != 0);
 
-    const contents = try support.runNonTtyInJournal(gpa, &.{ "--home", scratch.path(), "cat", "@renamed-build.green-build/out" }, "renamed-build", "2");
+    const contents = try support.runNonTtyInJournal(gpa, &.{ "--home", scratch.path(), "cat", "@renamed-build.1/out" }, "renamed-build", "2");
     defer gpa.free(contents.stdout);
     defer gpa.free(contents.stderr);
     try std.testing.expectEqual(@as(u8, 0), contents.term.exited);
     try std.testing.expectEqualStrings("all tests passed\n", contents.stdout);
+
+    const listed = try support.runNonTtyInJournal(gpa, &.{ "--home", scratch.path(), "pin" }, "renamed-build", "2");
+    defer gpa.free(listed.stdout);
+    defer gpa.free(listed.stderr);
+    try std.testing.expectEqualStrings("@1\n", listed.stdout);
 
     const collision = try support.runTjctlNonTty(gpa, &.{ "--home", scratch.path(), "mv", "renamed-build", "renamed-build" });
     defer gpa.free(collision.stdout);

@@ -272,7 +272,7 @@ test "native grep searches literal command and output lines with stable statuses
     defer gpa.free(command_only.stdout);
     defer gpa.free(command_only.stderr);
     try std.testing.expectEqual(@as(u8, 0), command_only.term.exited);
-    try std.testing.expectEqualStrings("     1 > : COMMAND_LITERAL_012\n", command_only.stdout);
+    try std.testing.expectEqualStrings("   1 > : COMMAND_LITERAL_012\n", command_only.stdout);
     try std.testing.expectEqualStrings("", command_only.stderr);
 
     const automatic_pipe = try support.runNonTtyInJournal(gpa, &.{ "--home", home, "grep", "--cmd", "--color", "auto", "COMMAND_LITERAL_012" }, id, "");
@@ -283,7 +283,7 @@ test "native grep searches literal command and output lines with stable statuses
     const forced_color = try support.runNonTtyInJournal(gpa, &.{ "--home", home, "grep", "--cmd", "--color=always", "COMMAND_LITERAL_012" }, id, "");
     defer gpa.free(forced_color.stdout);
     defer gpa.free(forced_color.stderr);
-    try std.testing.expectEqualStrings("     1 > :\x1b[01;31m COMMAND_LITERAL_012\x1b[m\n", forced_color.stdout);
+    try std.testing.expectEqualStrings("   1 > :\x1b[01;31m COMMAND_LITERAL_012\x1b[m\n", forced_color.stdout);
 
     const disabled_color = try support.runNonTtyInJournal(gpa, &.{ "--home", home, "grep", "--cmd", "--color=never", "COMMAND_LITERAL_012" }, id, "");
     defer gpa.free(disabled_color.stdout);
@@ -294,19 +294,19 @@ test "native grep searches literal command and output lines with stable statuses
     defer gpa.free(output_only.stdout);
     defer gpa.free(output_only.stderr);
     try std.testing.expectEqual(@as(u8, 0), output_only.term.exited);
-    try std.testing.expectEqualStrings("     2 < OUTPUT_LITERAL_012\n", output_only.stdout);
+    try std.testing.expectEqualStrings("   2 < OUTPUT_LITERAL_012\n", output_only.stdout);
 
     const folded = try support.runNonTtyInJournal(gpa, &.{ "--home", home, "grep", "-i", "mixedascii012" }, id, "");
     defer gpa.free(folded.stdout);
     defer gpa.free(folded.stderr);
     try std.testing.expectEqual(@as(u8, 0), folded.term.exited);
-    try std.testing.expect(std.mem.indexOf(u8, folded.stdout, "     2 < MixedAscii012") != null);
+    try std.testing.expect(std.mem.indexOf(u8, folded.stdout, "   2 < MixedAscii012") != null);
 
     const literal = try support.runNonTtyInJournal(gpa, &.{ "--home", home, "grep", "--cmd", "[x].*" }, id, "");
     defer gpa.free(literal.stdout);
     defer gpa.free(literal.stderr);
     try std.testing.expectEqual(@as(u8, 0), literal.term.exited);
-    try std.testing.expectEqualStrings("     3 > : '[x].*'\n", literal.stdout);
+    try std.testing.expectEqualStrings("   3 > : '[x].*'\n", literal.stdout);
 
     const missing = try support.runNonTtyInJournal(gpa, &.{ "--home", home, "grep", "absent-literal-012" }, id, "");
     defer gpa.free(missing.stdout);
@@ -330,8 +330,8 @@ test "native grep searches literal command and output lines with stable statuses
     defer gpa.free(both.stdout);
     defer gpa.free(both.stderr);
     try std.testing.expectEqual(@as(u8, 0), both.term.exited);
-    try std.testing.expect(std.mem.indexOf(u8, both.stdout, "     4 >") != null);
-    try std.testing.expect(std.mem.indexOf(u8, both.stdout, "     4 <") != null);
+    try std.testing.expect(std.mem.indexOf(u8, both.stdout, "   4 >") != null);
+    try std.testing.expect(std.mem.indexOf(u8, both.stdout, "   4 <") != null);
 
     const outside = try support.runNonTtyInJournal(gpa, &.{ "--home", home, "grep", "x" }, "", "");
     defer gpa.free(outside.stdout);
@@ -467,7 +467,7 @@ test "terminal native grep omits its results while redirected output stays plain
     try terminal.write("\n");
     try terminal.expectPromptFrom(from);
 
-    // Grep rows share history's entry annotation and failure markers.
+    // Grep rows share history's pin and failure markers.
     var journal_dir_handle = try journal.journalDir();
     defer journal_dir_handle.close(std.testing.io);
     try journal_dir_handle.writeFile(std.testing.io, .{ .sub_path = "1/rc", .data = "7\n" });
@@ -475,21 +475,14 @@ test "terminal native grep omits its results while redirected output stays plain
     defer support.leaveJournal();
     const home = try journal.homeArg(gpa);
     defer gpa.free(home);
-    for ([_][]const []const u8{
-        &.{ "--home", home, "name", "@1", "grep-hit" },
-        &.{ "--home", home, "tag", "@1", "bug", "parser" },
-        &.{ "--home", home, "pin", "@1" },
-    }) |annotation_args| {
-        var result = try support.run(gpa, annotation_args, 24, 100);
-        defer result.out.deinit(gpa);
-        try std.testing.expectEqual(@as(u8, 0), result.code);
-    }
+    var pin_result = try support.run(gpa, &.{ "--home", home, "pin", "@1" }, 24, 100);
+    defer pin_result.out.deinit(gpa);
+    try std.testing.expectEqual(@as(u8, 0), pin_result.code);
 
     from = transcript.items.len;
     try terminal.write("env -u NO_COLOR TERM=xterm-256color GREP_COLORS='mt=4;32' \"$TJ\" grep --color auto --out NOOUT_GREP_PAYLOAD_012\n");
-    try terminal.expectFrom(from, "*@#\x1b[31m!\x1b[0m \x1b[33m1\x1b[0m \x1b[2m<\x1b[0m");
+    try terminal.expectFrom(from, "*\x1b[31m!\x1b[0m \x1b[33m1\x1b[0m \x1b[2m<\x1b[0m");
     try terminal.expectFrom(from, "\x1b[4;32mNOOUT_GREP_PAYLOAD_012\x1b[m");
-    try terminal.expectFrom(from, "\x1b[32m@grep-hit #bug #parser\x1b[0m");
     try terminal.expectFrom(from, "\x1b[31m!7\x1b[0m");
     try terminal.expectPromptFrom(from);
 
@@ -525,7 +518,7 @@ test "terminal native grep omits its results while redirected output stays plain
     const redirected = try journal.tmp.dir.readFileAlloc(std.testing.io, "redirected-grep", gpa, .limited(4096));
     defer gpa.free(redirected);
     try std.testing.expectEqualStrings(
-        "*@#! 1 < NOOUT_GREP_PAYLOAD_012 padded result @grep-hit #bug #parser !7\n",
+        "*! 1 < NOOUT_GREP_PAYLOAD_012 padded result !7\n",
         redirected,
     );
     const redirected_out = try journal.read(gpa, "4/out");
@@ -737,9 +730,9 @@ test "zsh completion keeps special resource names as one inert argument" {
     try terminal.cancelZleLine();
 
     from = out.items.len;
-    try terminal.write("tj hist --t");
+    try terminal.write("tj hist --p");
     try terminal.write("\t");
-    try terminal.expectFrom(from, "--tag");
+    try terminal.expectFrom(from, "--pin");
     try terminal.cancelZleLine();
 
     // A generated command completer must report success after adding matches.
@@ -759,10 +752,6 @@ test "zsh completion keeps special resource names as one inert argument" {
     );
     try terminal.cancelZleLine();
 
-    from = out.items.len;
-    try terminal.write("command \"$TJ\" name @1 build-failure\n");
-    try terminal.expectPromptFrom(from);
-
     // Tab remains resource completion until Enter accepts the completed word.
     from = out.items.len;
     try terminal.write("cat @1/");
@@ -776,19 +765,6 @@ test "zsh completion keeps special resource names as one inert argument" {
         "_tj_test_preexec() { print -r -- \"TJ_PREEXEC=${(qqq)1}\" > /dev/tty; }; " ++
             "add-zsh-hook preexec _tj_test_preexec\n",
     );
-    try terminal.expectPromptFrom(from);
-
-    // The global shorthand completer works beneath a named interaction in an
-    // arbitrary command. It does not change what will be executed.
-    from = out.items.len;
-    try terminal.write("cat @build-failure/files/note");
-    try terminal.write("\t");
-    try terminal.expectFrom(from, "file.txt");
-    try terminal.cancelZleLine();
-
-    from = out.items.len;
-    try terminal.write("cat \"$(tj '@build-failure/files/note *$ file.txt')\"\n");
-    try terminal.expectFrom(from, "special-resource-content");
     try terminal.expectPromptFrom(from);
 
     // The original shorthand completion remains available.

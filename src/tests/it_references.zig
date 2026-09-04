@@ -158,7 +158,7 @@ test "a malformed reference and a missing one are told apart" {
 
 // Reference expansion, validation, and completion.
 
-test "resolved bare references expand while unknown handles stay literal" {
+test "numeric bare references expand while unknown handles stay literal" {
     if (!support.haveZsh()) return error.SkipZigTest;
     const gpa = std.testing.allocator;
     var journal = try support.Journal.open(gpa);
@@ -172,8 +172,7 @@ test "resolved bare references expand while unknown handles stay literal" {
 
     for ([_][]const u8{
         "echo seed",
-        "command \"$TJ\" name @1 build-failure",
-        "printf 'NAMED=%s\\n' @build-failure/out",
+        "printf 'RESOLVED=%s\\n' @1/out",
         "printf 'HANDLE=%s\\n' @someone",
     }) |line| {
         const from = out.items.len;
@@ -184,12 +183,12 @@ test "resolved bare references expand while unknown handles stay literal" {
     try terminal.write("exit 0\n");
     try std.testing.expectEqual(@as(u8, 0), try terminal.finish());
 
-    try std.testing.expect(std.mem.indexOf(u8, out.items, "NAMED=") != null);
+    try std.testing.expect(std.mem.indexOf(u8, out.items, "RESOLVED=") != null);
     try std.testing.expect(std.mem.indexOf(u8, out.items, "/1/out") != null);
     try std.testing.expect(std.mem.indexOf(u8, out.items, "HANDLE=@someone") != null);
-    const typed = try journal.read(gpa, "3/cmd");
+    const typed = try journal.read(gpa, "2/cmd");
     defer gpa.free(typed);
-    try std.testing.expectEqualStrings("printf 'NAMED=%s\\n' @build-failure/out", typed);
+    try std.testing.expectEqualStrings("printf 'RESOLVED=%s\\n' @1/out", typed);
 }
 
 test "a reference cannot escape its entry directory" {

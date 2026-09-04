@@ -5,7 +5,7 @@
 - [Journals](journals.md) — creating, opening, replaying, renaming, and deleting
   journals
 - [Entries and references](entries-and-references.md) — resources, ranges,
-  annotations, removal, and the TUI
+  pins, removal, and the TUI
 - [Shell integration](shell-integration.md) — zsh and Fish setup, references,
   completion, prompts, and terminal titles
 - [Search and output](search-and-output.md) — grep, rendering, fullscreen output,

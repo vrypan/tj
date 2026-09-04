@@ -2,7 +2,6 @@
 
 const std = @import("std");
 const posix = std.posix;
-const harness = @import("harness.zig");
 const journal_name = @import("../journal/name.zig");
 
 const support = @import("it_support.zig");
@@ -41,8 +40,6 @@ test "entry mutations reject qualified journals while reads still work" {
     try std.testing.expectEqual(@as(u8, 0), resolved.code);
 
     for ([_][]const []const u8{
-        &.{ "name", qualified, "forbidden" },
-        &.{ "tag", qualified, "forbidden" },
         &.{ "pin", qualified },
         &.{ "rm", qualified },
     }) |command_args| {
@@ -57,9 +54,6 @@ test "entry mutations reject qualified journals while reads still work" {
 
     var check_root = try journal.tmp.dir.openDir(io, support.journal_dir, .{});
     defer check_root.close(io);
-    var annotations_path_buf: [64]u8 = undefined;
-    const annotations_path = try std.fmt.bufPrint(&annotations_path_buf, "{s}/journal.sqlite3", .{foreign});
-    try std.testing.expectError(error.FileNotFound, check_root.openFile(io, annotations_path, .{}));
     var interaction_path_buf: [64]u8 = undefined;
     const interaction_path = try std.fmt.bufPrint(&interaction_path_buf, "{s}/1", .{foreign});
     var still_there = try check_root.openDir(io, interaction_path, .{});
@@ -78,9 +72,6 @@ test "output and entry removal clean data without reusing numbers" {
     defer gpa.free(home);
 
     for ([_][]const []const u8{
-        &.{ "name", "@1", "kept-name" },
-        &.{ "name", "@2", "removed-name" },
-        &.{ "tag", "@2", "old" },
         &.{ "pin", "@1" },
         &.{ "pin", "@2" },
     }) |command_args| {
@@ -132,11 +123,6 @@ test "output and entry removal clean data without reusing numbers" {
     marker.close(io);
     try std.testing.expectError(error.FileNotFound, dir.openDir(io, "2", .{}));
 
-    var names = try support.run(gpa, &.{ "--home", home, "name" }, 24, 100);
-    defer names.out.deinit(gpa);
-    try std.testing.expect(std.mem.indexOf(u8, names.out.items, "kept-name  @1") != null);
-    try std.testing.expect(std.mem.indexOf(u8, names.out.items, "removed-name") == null);
-
     const id = try journal.journalName(gpa);
     defer gpa.free(id);
     const child = try support.spawnContinuedJournalZsh(gpa, &journal, id);
@@ -174,8 +160,6 @@ test "entry ranges remove existing entries across holes and reject the running b
     defer gpa.free(home);
 
     for ([_][]const []const u8{
-        &.{ "name", "@2", "range-name" },
-        &.{ "tag", "@3", "range-tag" },
         &.{ "pin", "@4" },
     }) |command_args| {
         var argv: std.ArrayList([]const u8) = .empty;
@@ -231,12 +215,6 @@ test "entry ranges remove existing entries across holes and reject the running b
     defer gpa.free(range_cmd);
     try std.testing.expectEqualStrings("command \"$TJ\" rm @2..@5", range_cmd);
 
-    var remaining_names = try support.run(gpa, &.{ "--home", home, "name" }, 24, 100);
-    defer remaining_names.out.deinit(gpa);
-    try std.testing.expect(std.mem.indexOf(u8, remaining_names.out.items, "range-name") == null);
-    var remaining_tags = try support.run(gpa, &.{ "--home", home, "tag" }, 24, 100);
-    defer remaining_tags.out.deinit(gpa);
-    try std.testing.expect(std.mem.indexOf(u8, remaining_tags.out.items, "range-tag") == null);
     var remaining_pins = try support.run(gpa, &.{ "--home", home, "pin" }, 24, 100);
     defer remaining_pins.out.deinit(gpa);
     try std.testing.expect(std.mem.indexOf(u8, remaining_pins.out.items, "@4") != null);
@@ -296,51 +274,6 @@ test "rm accepts mixed target lists and applies force to every target" {
     try std.testing.expectEqual(@as(u8, 0), forced.code);
     try std.testing.expectError(error.FileNotFound, dir.openDir(io, "3", .{}));
     try std.testing.expectError(error.FileNotFound, dir.openDir(io, "6", .{}));
-}
-
-test "concurrent annotation commands preserve every update" {
-    if (!support.haveZsh()) return error.SkipZigTest;
-    const gpa = std.testing.allocator;
-    var journal = try support.Journal.open(gpa);
-    defer journal.close();
-    try support.recordJournal(gpa, &journal, &.{"echo concurrent"});
-    try journal.enter(gpa);
-    const home = try journal.homeArg(gpa);
-    defer gpa.free(home);
-
-    const tags = [_][]const u8{ "alpha", "beta", "gamma", "delta", "epsilon", "zeta" };
-    var children: [tags.len]harness.PtyChild = undefined;
-    for (tags, 0..) |tag, i| {
-        children[i] = try support.spawnTj(gpa, &.{ support.tj, "--home", home, "tag", "@1", tag }, 24, 80);
-    }
-    // Keep these children raw: they are launched as one concurrent batch and
-    // deliberately finished only after every writer has started.
-    for (children) |child| {
-        var transcript: std.ArrayList(u8) = .empty;
-        defer transcript.deinit(gpa);
-        const status = try child.finish(gpa, &transcript, support.timeout_ms);
-        if (status != 0) std.debug.print("concurrent annotation child failed ({d}): {s}\n", .{ status, transcript.items });
-        try std.testing.expectEqual(@as(u8, 0), status);
-    }
-
-    var listed = try support.run(gpa, &.{ "--home", home, "tag", "@1" }, 24, 120);
-    defer listed.out.deinit(gpa);
-    for (tags) |tag| try std.testing.expect(std.mem.indexOf(u8, listed.out.items, tag) != null);
-
-    const first = try support.spawnTj(gpa, &.{ support.tj, "--home", home, "name", "@1", "first-name" }, 24, 80);
-    const second = try support.spawnTj(gpa, &.{ support.tj, "--home", home, "name", "@1", "second-name" }, 24, 80);
-    var first_out: std.ArrayList(u8) = .empty;
-    defer first_out.deinit(gpa);
-    var second_out: std.ArrayList(u8) = .empty;
-    defer second_out.deinit(gpa);
-    try std.testing.expectEqual(@as(u8, 0), try first.finish(gpa, &first_out, support.timeout_ms));
-    try std.testing.expectEqual(@as(u8, 0), try second.finish(gpa, &second_out, support.timeout_ms));
-
-    var named = try support.run(gpa, &.{ "--home", home, "name", "@1" }, 24, 100);
-    defer named.out.deinit(gpa);
-    const first_won = std.mem.indexOf(u8, named.out.items, "first-name") != null;
-    const second_won = std.mem.indexOf(u8, named.out.items, "second-name") != null;
-    try std.testing.expect(first_won != second_won);
 }
 
 test "whole-journal removal is outside-writer only and refuses active journals" {

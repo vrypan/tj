@@ -11,7 +11,6 @@ const cli_spec = @import("../cli/tj_spec.zig");
 const store = @import("../journal/store.zig");
 const sys = @import("../sys.zig");
 const reference = @import("../journal/reference.zig");
-const annotations = @import("../journal/annotations.zig");
 const mutation_lock = @import("../journal/mutation_lock.zig");
 
 pub const Error = error{
@@ -27,14 +26,6 @@ pub const Error = error{
     BadTitleBlink,
     InsideJournal,
     CrossJournalMutation,
-    InvalidName,
-    InvalidTag,
-    NameTaken,
-    AnnotationBusy,
-    AnnotationConstraint,
-    InvalidAnnotationDatabase,
-    LegacyAnnotationsUnsupported,
-    AnnotationDatabaseFailure,
     UnsupportedRemoval,
     InvalidRange,
     CurrentInteraction,
@@ -196,7 +187,6 @@ pub fn openCurrentMutation(
     errdefer lock.close(io);
     if (mode == .exclusive) {
         try store.recoverPendingOutputRemovals(gpa, io, root, journal);
-        try annotations.recoverStagedRemovals(gpa, io, root, journal);
         store.cleanupJournalTrash(io, root, journal);
     }
     return .{ .root = root, .journal = journal, .lock = lock };
@@ -227,7 +217,7 @@ pub fn openMutationTargets(
     ref: []const u8,
 ) !MutationTargets {
     if (try parseInteractionRange(ref)) |range| {
-        var mutation = try openCurrentMutation(gpa, io, home, .shared);
+        var mutation = try openCurrentMutation(gpa, io, home, .exclusive);
         errdefer mutation.deinit(io);
         const numbers = try selectedNumbers(gpa, io, mutation.root, mutation.journal, range);
         return .{ .mutation = mutation, .numbers = numbers };
@@ -241,7 +231,7 @@ pub fn openMutationTargets(
     defer target.deinit(gpa);
     try requireInteraction(target);
 
-    var mutation = try openCurrentMutation(gpa, io, home, .shared);
+    var mutation = try openCurrentMutation(gpa, io, home, .exclusive);
     errdefer mutation.deinit(io);
     if (!store.interactionExists(io, mutation.root, mutation.journal, target.number)) {
         return error.NoSuchInteraction;
@@ -343,10 +333,7 @@ pub fn parseInteractionRangeEndpoint(text: []const u8) !u32 {
     const parsed = reference.parse(text) catch return error.InvalidRange;
     if (parsed.subpath.len != 0 or parsed.trailing_slash) return error.InvalidRange;
     return switch (parsed.body) {
-        .current => |target| switch (target) {
-            .number => |number| number,
-            .name => error.InvalidRange,
-        },
+        .current => |target| target,
         .qualified => error.CrossJournalMutation,
         .previous => error.InvalidRange,
     };

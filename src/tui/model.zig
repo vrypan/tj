@@ -8,23 +8,17 @@ const context = @import("../commands/context.zig");
 const store = @import("../journal/store.zig");
 const tui_detail = @import("detail.zig");
 
-const max_input = 63;
-
 fn orderU32(wanted: u32, item: u32) std.math.Order {
     return std.math.order(wanted, item);
 }
 
-pub const Mode = enum { normal, add_tag, remove_tag, name, delete_confirm, detail };
+pub const Mode = enum { normal, delete_confirm, detail };
 
 pub const Effect = enum {
     none,
     quit,
     refresh,
     toggle_pin,
-    begin_name,
-    add_tag,
-    remove_tag,
-    set_name,
     begin_delete,
     delete,
     delete_unpinned,
@@ -49,8 +43,6 @@ pub const Model = struct {
     viewport: zooi.Viewport = .{},
     size: zooi.Size = .{ .rows = 24, .cols = 80 },
     mode: Mode = .normal,
-    input: [max_input]u8 = undefined,
-    input_len: usize = 0,
     status_buf: [256]u8 = undefined,
     status_len: usize = 0,
     delete_pinned_count: usize = 0,
@@ -158,20 +150,6 @@ pub const Model = struct {
         self.status_len = 0;
     }
 
-    pub fn inputText(self: *const Model) []const u8 {
-        return self.input[0..self.input_len];
-    }
-
-    pub fn setInput(self: *Model, text: []const u8) void {
-        const len = @min(text.len, self.input.len);
-        @memcpy(self.input[0..len], text[0..len]);
-        self.input_len = len;
-    }
-
-    pub fn clearInput(self: *Model) void {
-        self.input_len = 0;
-    }
-
     pub fn detailSelectedCount(self: *const Model) usize {
         return self.detail_selected.count();
     }
@@ -207,18 +185,6 @@ pub const Model = struct {
     pub fn detailClearSelection(self: *Model) void {
         self.detail_selected.unsetAll();
         self.detail_range_anchor = null;
-    }
-
-    pub fn pushInput(self: *Model, codepoint: u21) void {
-        // Journal names and tags intentionally have conservative ASCII
-        // grammars. Rejecting other input here makes the prompt match them.
-        if (codepoint < 0x20 or codepoint > 0x7e or self.input_len == self.input.len) return;
-        self.input[self.input_len] = @intCast(codepoint);
-        self.input_len += 1;
-    }
-
-    pub fn popInput(self: *Model) void {
-        if (self.input_len != 0) self.input_len -= 1;
     }
 
     pub fn reload(
@@ -303,7 +269,6 @@ pub fn handleEvent(model: *Model, event: zooi.Event) Effect {
         },
         .key => |key| switch (model.mode) {
             .normal => normalKey(model, key),
-            .add_tag, .remove_tag, .name => promptKey(model, key),
             .delete_confirm => deleteConfirmKey(model, key),
             .detail => detailKey(model, key),
         },
@@ -343,17 +308,6 @@ fn normalKey(model: *Model, key: zooi.Key) Effect {
             'r' => return .refresh,
             'p' => if (model.count != 0) return .toggle_pin,
             ' ' => if (model.count != 0) model.toggleCurrentSelection(),
-            't' => if (model.count != 0) {
-                model.clearInput();
-                model.clearStatus();
-                model.mode = .add_tag;
-            },
-            'T' => if (model.count != 0) {
-                model.clearInput();
-                model.clearStatus();
-                model.mode = .remove_tag;
-            },
-            'n' => if (model.count != 0) return .begin_name,
             'd' => if (model.count != 0) return .begin_delete,
             'e' => {
                 if (model.selectedCount() == 0) {
@@ -365,36 +319,6 @@ fn normalKey(model: *Model, key: zooi.Key) Effect {
             else => {},
         },
         .enter => if (model.count != 0) return .open_detail,
-        else => {},
-    }
-    return .none;
-}
-
-fn promptKey(model: *Model, key: zooi.Key) Effect {
-    if (key == .ctrl_c or key == .escape) {
-        model.mode = .normal;
-        model.clearInput();
-        model.setStatus("cancelled", .{});
-        return .none;
-    }
-    switch (key) {
-        .backspace => model.popInput(),
-        .character => |codepoint| model.pushInput(codepoint),
-        .enter => {
-            const effect: Effect = switch (model.mode) {
-                .add_tag => .add_tag,
-                .remove_tag => .remove_tag,
-                .name => .set_name,
-                .normal, .delete_confirm, .detail => .none,
-            };
-            if (model.input_len == 0 and model.mode != .name) {
-                model.mode = .normal;
-                model.setStatus("cancelled: empty tag", .{});
-                return .none;
-            }
-            model.mode = .normal;
-            return effect;
-        },
         else => {},
     }
     return .none;
@@ -515,21 +439,6 @@ test "browser navigation clamps and scrolls" {
     try std.testing.expectEqual(@as(usize, 0), model.viewport.offset);
     model.moveCursor(20);
     try std.testing.expectEqual(@as(usize, 3), model.viewport.cursor);
-}
-
-test "browser prompt maps add remove and empty-name removal" {
-    var model: Model = .{ .mode = .add_tag };
-    _ = promptKey(&model, .{ .character = 'B' });
-    _ = promptKey(&model, .{ .character = 'u' });
-    _ = promptKey(&model, .{ .character = 'g' });
-    try std.testing.expectEqual(Effect.add_tag, promptKey(&model, .enter));
-    try std.testing.expectEqualStrings("Bug", model.inputText());
-
-    model.mode = .remove_tag;
-    model.clearInput();
-    try std.testing.expectEqual(Effect.none, promptKey(&model, .enter));
-    model.mode = .name;
-    try std.testing.expectEqual(Effect.set_name, promptKey(&model, .enter));
 }
 
 test "browser deletion requires explicit confirmation" {

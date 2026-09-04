@@ -6,9 +6,9 @@ const zecli = @import("zecli");
 
 const store = @import("../journal/store.zig");
 const sys = @import("../sys.zig");
-const annotations = @import("../journal/annotations.zig");
+const pins = @import("../journal/pins.zig");
 const context = @import("context.zig");
-const cmd_annotate = @import("annotate.zig");
+const cmd_pin = @import("pin.zig");
 
 pub const RemoveRequest = struct {
     targets: []const []const u8,
@@ -20,34 +20,13 @@ pub fn removeRequest(parsed: *const zecli.Parsed) !RemoveRequest {
     return .{ .targets = parsed.positionals.items, .force = parsed.enabled("force") };
 }
 
-test "annotation and removal requests select one semantic mode" {
+test "pin and removal requests select one semantic mode" {
     const gpa = std.testing.allocator;
 
     {
-        var parsed = try context.parseTestCommand(.name, &.{});
-        defer parsed.deinit(gpa);
-        try std.testing.expect(try cmd_annotate.nameRequest(&parsed) == .list);
-    }
-    {
-        var parsed = try context.parseTestCommand(.name, &.{ "@2", "build-failure" });
-        defer parsed.deinit(gpa);
-        const request = (try cmd_annotate.nameRequest(&parsed)).set;
-        try std.testing.expectEqualStrings("@2", request.ref);
-        try std.testing.expectEqualStrings("build-failure", request.name);
-    }
-    {
-        var parsed = try context.parseTestCommand(.tag, &.{ "--remove", "@2", "@4..@6", "bug", "parser" });
-        defer parsed.deinit(gpa);
-        const request = (try cmd_annotate.tagRequest(&parsed, 2)).remove;
-        try std.testing.expectEqual(@as(usize, 2), request.targets.len);
-        try std.testing.expectEqualStrings("@2", request.targets[0]);
-        try std.testing.expectEqualStrings("@4..@6", request.targets[1]);
-        try std.testing.expectEqual(@as(usize, 2), request.tags.len);
-    }
-    {
         var parsed = try context.parseTestCommand(.pin, &.{"@2"});
         defer parsed.deinit(gpa);
-        try std.testing.expectEqualStrings("@2", (try cmd_annotate.pinRequest(&parsed)).set);
+        try std.testing.expectEqualStrings("@2", (try cmd_pin.request(&parsed)).set);
     }
     {
         var parsed = try context.parseTestCommand(.rm, &.{ "--force", "@2", "@4/out", "@6..@8" });
@@ -91,13 +70,9 @@ pub fn removeJournal(
 
     const entries = try store.countInteractions(gpa, io, root, journal);
     if (!force) {
-        var metadata = try annotations.openRead(gpa, io, root, journal);
-        defer metadata.deinit(gpa);
-        var pins = try metadata.pins();
-        defer pins.deinit();
-        while (try pins.next()) |number| {
-            if (store.interactionExists(io, root, journal, number)) return error.PinnedInteraction;
-        }
+        const numbers = try store.listNumbers(gpa, io, root, journal);
+        defer gpa.free(numbers);
+        for (numbers) |number| if (try pins.isPinned(io, root, journal, number)) return error.PinnedInteraction;
         if (!sys.isTty(0)) return error.ConfirmationRequired;
         try out.print("Remove journal {s} with {d} {s}? [y/N] ", .{
             journal,
@@ -145,9 +120,7 @@ pub fn removeInteraction(
         return error.NoSuchInteraction;
     if (target.number >= highest) return error.CurrentInteraction;
 
-    var read_metadata = try annotations.openRead(gpa, io, mutation.root, mutation.journal);
-    defer read_metadata.deinit(gpa);
-    if (!force and try read_metadata.isPinned(target.number)) {
+    if (!force and try pins.isPinned(io, mutation.root, mutation.journal, target.number)) {
         context.note("tj: skipped pinned entry @{d}; use --force to remove it\n", .{target.number});
         return;
     }
@@ -161,12 +134,6 @@ pub fn removeInteraction(
 
     const staged = try store.stageInteractionRemoval(gpa, io, mutation.root, mutation.journal, target.number);
     defer gpa.free(staged);
-    var metadata = try annotations.openWrite(gpa, io, mutation.root, mutation.journal);
-    defer metadata.deinit(gpa);
-    var transaction = try metadata.begin();
-    defer transaction.deinit();
-    try metadata.removeEntry(target.number);
-    try transaction.commit();
     try store.finishStagedRemoval(io, mutation.root, staged);
 }
 
@@ -221,13 +188,8 @@ fn removeNumbers(
         if (index != 0 and numbers[index - 1] >= number) return error.BadArguments;
     }
 
-    var read_metadata = try annotations.openRead(gpa, io, mutation.root, mutation.journal);
-    defer read_metadata.deinit(gpa);
-
-    // One pass decides what is being removed, and the transaction below is
-    // driven by that decision rather than recomputing it against a second
-    // connection. The staged directories and the deleted annotations then
-    // cannot describe different sets of entries.
+    // One pass decides what is being removed. Pin markers move with staged
+    // entry directories, so no separate metadata cleanup is needed.
     const Staged = struct { number: u32, path: []u8 };
     var staged: std.ArrayList(Staged) = .empty;
     defer {
@@ -238,7 +200,7 @@ fn removeNumbers(
 
     var skipped_pinned: usize = 0;
     for (numbers) |number| {
-        if (!force and try read_metadata.isPinned(number)) {
+        if (!force and try pins.isPinned(io, mutation.root, mutation.journal, number)) {
             skipped_pinned += 1;
             continue;
         }
@@ -246,14 +208,6 @@ fn removeNumbers(
         staged.appendAssumeCapacity(.{ .number = number, .path = path });
     }
 
-    if (staged.items.len != 0) {
-        var metadata = try annotations.openWrite(gpa, io, mutation.root, mutation.journal);
-        defer metadata.deinit(gpa);
-        var transaction = try metadata.begin();
-        defer transaction.deinit();
-        for (staged.items) |item| try metadata.removeEntry(item.number);
-        try transaction.commit();
-    }
     for (staged.items) |item| try store.finishStagedRemoval(io, mutation.root, item.path);
     return .{ .removed = staged.items.len, .skipped_pinned = skipped_pinned };
 }

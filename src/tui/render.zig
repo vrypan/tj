@@ -5,7 +5,6 @@ const zooi = @import("zooi");
 
 const presentation = @import("../presentation/entry.zig");
 const report = @import("../presentation/report.zig");
-const annotations = @import("../journal/annotations.zig");
 const page_module = @import("page.zig");
 
 const header_style: zooi.Style = .{ .bold = true };
@@ -60,14 +59,12 @@ pub fn draw(journal: []const u8, model: anytype, page: *const page_module.Page, 
             journal,
             row.info.number,
             false,
-            if (row.annotation) |*value| value else null,
+            row.pinned,
             row.info.exit_code,
         );
         const flags = row_view.flags();
         screen.writeStyled(flags[0..1], base_style);
-        screen.writeStyled(flags[1..2], base_style);
-        screen.writeStyled(flags[2..3], base_style);
-        screen.writeStyled(flags[3..4], if (focused) base_style else if (row_view.failed()) failure_style else base_style);
+        screen.writeStyled(flags[1..2], if (focused) base_style else if (row_view.failed()) failure_style else base_style);
         screen.writeStyled(" ", base_style);
 
         var number_buf: [24]u8 = undefined;
@@ -86,22 +83,8 @@ pub fn draw(journal: []const u8, model: anytype, page: *const page_module.Page, 
         var metadata_parts = row_view.metadata();
         while (metadata_parts.next()) |part| {
             screen.writeStyled(" ", base_style);
-            const role_style = if (focused)
-                base_style
-            else switch (part.role()) {
-                .metadata => metadata_style,
-                .failure => failure_style,
-                else => unreachable,
-            };
+            const role_style = if (focused) base_style else failure_style;
             switch (part) {
-                .name => |name| {
-                    screen.writeStyled("@", base_style);
-                    screen.writeStyled(name, role_style);
-                },
-                .tag => |tag| {
-                    screen.writeStyled("#", base_style);
-                    screen.writeStyled(tag, role_style);
-                },
                 .failure => |code| {
                     var rc_buf: [8]u8 = undefined;
                     const rc = try std.fmt.bufPrint(&rc_buf, "!{d}", .{code});
@@ -196,22 +179,11 @@ fn drawFooter(model: anytype, screen: *zooi.Screen) void {
     const row: u16 = model.size.rows - 1;
     screen.move(row, 0);
     switch (model.mode) {
-        .add_tag, .remove_tag, .name => {
-            const label = switch (model.mode) {
-                .add_tag => "tag: ",
-                .remove_tag => "untag: ",
-                .name => "name: ",
-                .normal, .delete_confirm, .detail => unreachable,
-            };
-            screen.write(label);
-            screen.write(model.inputText());
-            screen.showCursor(row, @intCast(zooi.displayWidth(label) + zooi.displayWidth(model.inputText())));
-        },
         .normal => {
             if (model.status_len != 0) {
                 screen.writeStyled(model.status(), .{ .fg = .{ .ansi = 3 } });
             } else {
-                screen.writeStyled("space toggle  shift+nav range  esc clear  ⏎ details  e export  p pin  t/T tag  n name  d delete  q quit", footer_style);
+                screen.writeStyled("space toggle  shift+nav range  esc clear  ⏎ details  e export  p pin  d delete  q quit", footer_style);
             }
         },
         .delete_confirm => {
@@ -226,7 +198,7 @@ fn drawFooter(model: anytype, screen: *zooi.Screen) void {
     }
 }
 
-const TestMode = enum { normal, add_tag, remove_tag, name, delete_confirm, detail };
+const TestMode = enum { normal, delete_confirm, detail };
 const TestDetailItem = struct { section_start: usize, section_end: usize };
 const TestDetail = struct { number: u32, document: []const u8, items: []const TestDetailItem };
 
@@ -262,10 +234,6 @@ const TestModel = struct {
         return self.status_buf[0..self.status_len];
     }
 
-    pub fn inputText(self: *const TestModel) []const u8 {
-        return self.input;
-    }
-
     pub fn detailSelectedCount(self: *const TestModel) usize {
         return self.detail_selected.count();
     }
@@ -291,19 +259,18 @@ test "entry render leaves a blank row after the bold header" {
         .size = .{ .rows = 5, .cols = 40 },
         .selected = selected,
     };
-    const failed_annotation: annotations.Entry = .{ .number = 12 };
     var rows = [_]page_module.Row{
         .{
             .index = 0,
             .info = .{ .number = 7, .exit_code = 0, .command = "echo ok", .out_bytes = 12, .out_present = true },
             .command = @constCast("echo ok"),
-            .annotation = null,
+            .pinned = false,
         },
         .{
             .index = 1,
             .info = .{ .number = 12, .exit_code = 2, .command = "make", .out_bytes = 800, .out_present = true },
             .command = @constCast("make"),
-            .annotation = failed_annotation,
+            .pinned = false,
         },
     };
     const page: page_module.Page = .{ .range = .{ .start = 0, .end = 2 }, .rows = &rows, .valid = true };
@@ -335,7 +302,7 @@ test "entry render includes the last row at minimum terminal height" {
         .index = 0,
         .info = .{ .number = 42, .exit_code = 0, .command = "visible", .out_bytes = 0, .out_present = true },
         .command = @constCast("visible"),
-        .annotation = null,
+        .pinned = false,
     }};
     const page: page_module.Page = .{ .range = .{ .start = 0, .end = 1 }, .rows = &rows, .valid = true };
 

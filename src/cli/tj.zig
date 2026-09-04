@@ -43,12 +43,10 @@ pub fn routeBareReference(
     return routed;
 }
 
-/// Annotation removal is deliberately a leading mode: accepting it after a
-/// target would make the remaining words change meaning halfway through the
-/// command. Zecli owns routing and parsing; this is TJ's one raw-order rule.
+/// Pin removal is deliberately a leading mode.
 pub fn validateRemoveOrdering(which: CommandName, args: []const [:0]const u8) !void {
     switch (which) {
-        .name, .tag, .pin => {},
+        .pin => {},
         else => return,
     }
     for (args, 0..) |arg, i| {
@@ -84,11 +82,11 @@ test "a non-reference stays a normal root command" {
     try std.testing.expectEqual(args.ptr, routed.ptr);
 }
 
-test "annotation removal remains a leading mode" {
-    try validateRemoveOrdering(.name, &.{ "name", "--remove", "old-name" });
+test "pin removal remains a leading mode" {
+    try validateRemoveOrdering(.pin, &.{ "pin", "--remove", "@1" });
     try validateRemoveOrdering(.rm, &.{ "rm", "--force", "@2" });
     try std.testing.expectError(
         error.InvalidCommandArguments,
-        validateRemoveOrdering(.tag, &.{ "tag", "@1", "--remove", "bug" }),
+        validateRemoveOrdering(.pin, &.{ "pin", "@1", "--remove" }),
     );
 }

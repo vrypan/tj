@@ -18,9 +18,9 @@ after a writer has ended, and would throw away exactly the recordings worth
 keeping. Only journals newly created by an empty `tjctl new` may be removed at
 writer exit; `tjctl use` never deletes its existing journal.
 
-Explicit `tj rm`, entry names, tags, and pins do not settle retention. Pins
-protect entries and journals from ordinary explicit removal unless `--force`
-is used, but promise nothing about a future automatic policy. Generated
+Explicit `tj rm` and pins do not settle retention. Pins protect entries and
+journals from ordinary explicit removal unless `--force` is used, but promise
+nothing about a future automatic policy. Generated
 `YYMMDD-RANDOM` names are mutable identities rather than timestamps: retention
 must use authoritative metadata and must not parse age from a journal name.
 Any retention design must decide its relationship to pins separately.

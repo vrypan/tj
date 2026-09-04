@@ -4,7 +4,7 @@ TJ records terminal work in persistent journals. Each shell command becomes a
 numbered entry containing the command, working directory, terminal output,
 prompt, exit status, and timing metadata.
 
-Recorded entries can be inspected, searched, named, tagged, pinned, removed,
+Recorded entries can be inspected, searched, pinned, removed,
 or used as input to later commands. Reading an entry does not run its command
 again.
 
@@ -131,8 +131,6 @@ tj hist @12                   # show details for one entry
 tj cat @12                    # show recorded output
 tj cat @12/out                # show only recorded output
 tj grep 'connection refused'  # search commands and output
-tj name @12 build-failure
-tj tag @12 @15..@18 bug
 tj pin @12
 tj rm @15..@18
 ```
@@ -153,8 +151,8 @@ valid bare `@REF` on Enter as a convenience, so `cat @12/out` runs as
 Qualified references select another journal: `@work.12/out`. Commands that
 change entries only operate on the current journal.
 
-See [Entries and references](docs/entries-and-references.md) for ranges, names,
-tags, pins, removal, completion, and the TUI.
+See [Entries and references](docs/entries-and-references.md) for ranges, pins,
+removal, completion, and the TUI.
 
 ## Contributing
 

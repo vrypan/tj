@@ -17,7 +17,7 @@ long. If the name is omitted, TJ creates one.
 ## Temporary journals
 
 `tjctl new --temp [NAME]` creates a journal intended for short-lived work. TJ
-removes it when its writer exits, even if it has entries, pins, names, or tags.
+removes it when its writer exits, even if it has entries or pins.
 Save it while the shell is active to keep it:
 
 ```sh
@@ -165,5 +165,5 @@ tjctl rm project-work --force
 The journal must not be active. TJ asks for confirmation when appropriate and
 refuses to delete pinned entries unless `--force` is present.
 
-Deletion removes the journal directory and all entries and annotations stored
+Deletion removes the journal directory and all entries and pins stored
 inside it.

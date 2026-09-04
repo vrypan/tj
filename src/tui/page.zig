@@ -4,7 +4,7 @@ const std = @import("std");
 const Io = std.Io;
 const zooi = @import("zooi");
 
-const annotations = @import("../journal/annotations.zig");
+const pins = @import("../journal/pins.zig");
 const presentation = @import("../presentation/entry.zig");
 const store = @import("../journal/store.zig");
 
@@ -12,12 +12,11 @@ pub const Row = struct {
     index: usize,
     info: store.InteractionInfo,
     command: []u8,
-    annotation: ?annotations.Entry,
+    pinned: bool,
 
     fn deinit(self: *Row, gpa: std.mem.Allocator) void {
         self.info.deinit(gpa);
         gpa.free(self.command);
-        if (self.annotation) |*value| value.deinit(gpa);
         self.* = undefined;
     }
 };
@@ -55,12 +54,9 @@ pub const Page = struct {
 
         var root = try store.openRoot(io, home);
         defer root.close(io);
-        var metadata = try annotations.openRead(gpa, io, root, journal);
-        defer metadata.deinit(gpa);
-
         for (wanted.start..wanted.end) |index| {
             if (index >= numbers.len) break;
-            var row = (try loadRow(gpa, io, root, &metadata, journal, numbers[index], index)) orelse continue;
+            var row = (try loadRow(gpa, io, root, journal, numbers[index], index)) orelse continue;
             next.append(gpa, row) catch |err| {
                 row.deinit(gpa);
                 return err;
@@ -85,7 +81,6 @@ fn loadRow(
     gpa: std.mem.Allocator,
     io: Io,
     root: store.Dir,
-    metadata: *annotations.Connection,
     journal: []const u8,
     number: u32,
     index: usize,
@@ -101,16 +96,11 @@ fn loadRow(
     errdefer info.deinit(gpa);
     const command = try presentation.displayCommand(gpa, info.command);
     errdefer gpa.free(command);
-    const annotation = try metadata.get(gpa, number);
-    errdefer if (annotation) |value| {
-        var owned = value;
-        owned.deinit(gpa);
-    };
     return .{
         .index = index,
         .info = info,
         .command = command,
-        .annotation = annotation,
+        .pinned = try pins.isPinned(io, root, journal, number),
     };
 }
 

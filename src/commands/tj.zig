@@ -13,7 +13,7 @@ const context = @import("context.zig");
 const cmd_grep = @import("grep.zig");
 const cmd_history = @import("history.zig");
 const cmd_reference = @import("reference.zig");
-const cmd_annotate = @import("annotate.zig");
+const cmd_pin = @import("pin.zig");
 const cmd_remove = @import("remove.zig");
 const cmd_cat = @import("cat.zig");
 const cmd_tui = @import("tui.zig");
@@ -37,9 +37,7 @@ pub fn run(
         .resolve => try cmd_reference.resolveReference(gpa, io, home, parsed, out),
         .complete => try cmd_reference.completeReference(gpa, io, home, parsed, out),
         .cat => try cmd_cat.catResource(gpa, io, home, parsed, out),
-        .name => try cmd_annotate.nameCommand(gpa, io, home, parsed, out),
-        .tag => try cmd_annotate.tagCommand(gpa, io, home, parsed, out),
-        .pin => try cmd_annotate.pinCommand(gpa, io, home, parsed, out),
+        .pin => try cmd_pin.pinCommand(gpa, io, home, parsed, out),
         .rm => try cmd_remove.removeCommand(gpa, io, home, parsed, out),
         .grep => return cmd_grep.grepCommand(gpa, io, home, parsed, out),
     }

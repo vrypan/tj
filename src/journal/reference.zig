@@ -1,11 +1,8 @@
-//! The `@` namespace: names for previous computations, alongside the
-//! filesystem's names for files.
+//! The `@` namespace for previous computations.
 //!
 //!     @42/out                           entry 42, current journal
-//!     @build-failure/out                named entry, current journal
 //!     @-/out                            the last completed entry
 //!     @release-build.42                 entry 42 in another journal
-//!     @release-build.build-failure/out  named entry in another journal
 //!     @build.42/files/data.csv          the same, by a unique suffix
 //!
 //! Selectors resolve by exact canonical journal name first, then by a unique
@@ -15,21 +12,16 @@
 //! store's job, since only it knows what is on disk.
 
 const std = @import("std");
-const annotations = @import("annotations.zig");
-
 pub const max_suffix = 63;
 
-pub const Target = union(enum) {
-    number: u32,
-    name: []const u8,
-};
+pub const Target = u32;
 
 pub const Body = union(enum) {
     /// `@-`
     previous,
-    /// `@N` or `@NAME`
+    /// `@N`
     current: Target,
-    /// `@SUFFIX.N` or `@SUFFIX.NAME`
+    /// `@SUFFIX.N`
     qualified: struct { suffix: []const u8, target: Target },
 };
 
@@ -78,22 +70,11 @@ fn parseBody(text: []const u8) Error!Body {
         const target = text[dot + 1 ..];
         if (suffix.len == 0 or suffix.len > max_suffix) return error.NotAReference;
         if (!validJournalSelector(suffix)) return error.NotAReference;
-        return .{ .qualified = .{ .suffix = suffix, .target = try parseTarget(target) } };
+        return .{ .qualified = .{ .suffix = suffix, .target = try parseNumber(target) } };
     }
 
-    return .{ .current = try parseTarget(text) };
-}
-
-fn parseTarget(text: []const u8) Error!Target {
-    if (text.len == 0) return error.Malformed;
-    var all_digits = true;
-    for (text) |char| if (!std.ascii.isDigit(char)) {
-        all_digits = false;
-        break;
-    };
-    if (all_digits) return .{ .number = try parseNumber(text) };
-    if (annotations.validName(text)) return .{ .name = text };
-    return error.NotAReference;
+    for (text) |char| if (!std.ascii.isDigit(char)) return error.NotAReference;
+    return .{ .current = try parseNumber(text) };
 }
 
 fn parseNumber(text: []const u8) Error!u32 {
@@ -140,14 +121,14 @@ pub fn looksLikeReference(word: []const u8) bool {
 
 test "plain entry references" {
     const ref = try parse("@42");
-    try std.testing.expectEqual(@as(u32, 42), ref.body.current.number);
+    try std.testing.expectEqual(@as(u32, 42), ref.body.current);
     try std.testing.expectEqualStrings("", ref.subpath);
     try std.testing.expect(!ref.trailing_slash);
 }
 
 test "a subpath is kept verbatim" {
     const ref = try parse("@42/files/data.csv");
-    try std.testing.expectEqual(@as(u32, 42), ref.body.current.number);
+    try std.testing.expectEqual(@as(u32, 42), ref.body.current);
     try std.testing.expectEqualStrings("files/data.csv", ref.subpath);
     try std.testing.expect(ref.trailing_slash);
 }
@@ -166,28 +147,18 @@ test "the previous entry" {
 test "journal-qualified references" {
     const ref = try parse("@release-build.42/out");
     try std.testing.expectEqualStrings("release-build", ref.body.qualified.suffix);
-    try std.testing.expectEqual(@as(u32, 42), ref.body.qualified.target.number);
+    try std.testing.expectEqual(@as(u32, 42), ref.body.qualified.target);
     try std.testing.expectEqualStrings("out", ref.subpath);
 
     const full = try parse("@01knxf1n5ffvk9jsm8wve1pgsd.7");
     try std.testing.expectEqualStrings("01knxf1n5ffvk9jsm8wve1pgsd", full.body.qualified.suffix);
-    try std.testing.expectEqual(@as(u32, 7), full.body.qualified.target.number);
-}
-
-test "entry names share the reference namespace" {
-    const current = try parse("@build-failure/out");
-    try std.testing.expectEqualStrings("build-failure", current.body.current.name);
-    try std.testing.expectEqualStrings("out", current.subpath);
-
-    const qualified = try parse("@release-build.build-failure/out");
-    try std.testing.expectEqualStrings("release-build", qualified.body.qualified.suffix);
-    try std.testing.expectEqualStrings("build-failure", qualified.body.qualified.target.name);
+    try std.testing.expectEqual(@as(u32, 7), full.body.qualified.target);
 }
 
 test "an all-digit reference is never read as a journal suffix" {
     const ref = try parse("@1234567890");
     try std.testing.expect(ref.body == .current);
-    try std.testing.expectEqual(@as(u32, 1234567890), ref.body.current.number);
+    try std.testing.expectEqual(@as(u32, 1234567890), ref.body.current);
 }
 
 test "ordinary words are left alone" {

@@ -1,8 +1,7 @@
 //! Full-screen, current-journal entry browser.
 //!
 //! Zooi owns terminal mechanics. TJ owns the model and every mutation, using
-//! the same command-layer annotation operations as `tj name`, `tj tag`, and
-//! `tj pin`.
+//! the same command-layer pin operations as `tj pin`.
 
 const std = @import("std");
 const Io = std.Io;
@@ -10,8 +9,8 @@ const posix = std.posix;
 const c = std.c;
 const zooi = @import("zooi");
 
-const annotations = @import("../journal/annotations.zig");
-const cmd_annotate = @import("annotate.zig");
+const pins = @import("../journal/pins.zig");
+const cmd_pin = @import("pin.zig");
 const cmd_remove = @import("remove.zig");
 const context = @import("context.zig");
 const noout = @import("../protocol/noout.zig");
@@ -130,7 +129,7 @@ fn ensurePage(
 
 fn effectMutatesPage(effect: Effect) bool {
     return switch (effect) {
-        .refresh, .toggle_pin, .add_tag, .remove_tag, .set_name, .begin_delete, .delete, .delete_unpinned => true,
+        .refresh, .toggle_pin, .begin_delete, .delete, .delete_unpinned => true,
         else => false,
     };
 }
@@ -167,67 +166,27 @@ fn executeEffect(
             try model.reload(gpa, io, home, journal);
             model.setStatus("refreshed", .{});
         },
-        .begin_name => {
-            const number = model.currentNumber() orelse return;
-            var root = try store.openRoot(io, home);
-            defer root.close(io);
-            var metadata = try annotations.openRead(gpa, io, root, journal);
-            defer metadata.deinit(gpa);
-            var entry = try metadata.get(gpa, number);
-            defer if (entry) |*value| value.deinit(gpa);
-            model.setInput(if (entry) |value| value.name orelse "" else "");
-            model.clearStatus();
-            model.mode = .name;
-        },
         .toggle_pin => {
             const numbers = try model.actionNumbers(gpa);
             defer gpa.free(numbers);
             var root = try store.openRoot(io, home);
             defer root.close(io);
-            var metadata = try annotations.openRead(gpa, io, root, journal);
-            defer metadata.deinit(gpa);
             var all_pinned = true;
-            for (numbers) |number| all_pinned = all_pinned and try metadata.isPinned(number);
-            try cmd_annotate.updatePinNumbers(gpa, io, home, numbers, !all_pinned);
+            for (numbers) |number| all_pinned = all_pinned and try pins.isPinned(io, root, journal, number);
+            try cmd_pin.updatePinNumbers(gpa, io, home, numbers, !all_pinned);
             model.setStatus("{d} {s} {s}", .{
                 numbers.len,
                 if (numbers.len == 1) "entry" else "entries",
                 if (all_pinned) "unpinned" else "pinned",
             });
         },
-        .add_tag, .remove_tag => {
-            const numbers = try model.actionNumbers(gpa);
-            defer gpa.free(numbers);
-            const tag = model.inputText();
-            try cmd_annotate.updateTagNumbers(gpa, io, home, numbers, &.{tag}, effect == .remove_tag);
-            model.setStatus("{d} {s} {s} #{s}", .{
-                numbers.len,
-                if (numbers.len == 1) "entry" else "entries",
-                if (effect == .remove_tag) "removed" else "tagged",
-                tag,
-            });
-        },
-        .set_name => {
-            const number = model.currentNumber() orelse return;
-            const name = model.inputText();
-            var ref_buf: [24]u8 = undefined;
-            const ref = try std.fmt.bufPrint(&ref_buf, "@{d}", .{number});
-            try cmd_annotate.updateName(gpa, io, home, ref, if (name.len == 0) null else name);
-            if (name.len == 0) {
-                model.setStatus("removed entry {d} name", .{number});
-            } else {
-                model.setStatus("named entry {d} @{s}", .{ number, name });
-            }
-        },
         .begin_delete => {
             const numbers = try model.actionNumbers(gpa);
             defer gpa.free(numbers);
             var root = try store.openRoot(io, home);
             defer root.close(io);
-            var metadata = try annotations.openRead(gpa, io, root, journal);
-            defer metadata.deinit(gpa);
             var pinned: usize = 0;
-            for (numbers) |number| pinned += @intFromBool(try metadata.isPinned(number));
+            for (numbers) |number| pinned += @intFromBool(try pins.isPinned(io, root, journal, number));
             model.delete_pinned_count = pinned;
             model.clearStatus();
             if (pinned == 0) {
@@ -301,13 +260,7 @@ fn deleteTargets(
 
 fn friendlyError(err: anyerror) []const u8 {
     return switch (err) {
-        error.InvalidName => "invalid name: use lowercase letters, digits, and internal hyphens",
-        error.InvalidTag => "invalid tag",
-        error.NameTaken => "that name is already used by another entry",
         error.NoSuchInteraction => "entry disappeared; press r to refresh",
-        error.AnnotationBusy => "journal metadata is busy",
-        error.AnnotationConstraint => "journal metadata violates its schema",
-        error.AnnotationDatabaseFailure => "cannot update journal metadata",
         else => @errorName(err),
     };
 }

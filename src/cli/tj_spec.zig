@@ -24,13 +24,6 @@ const hist_flags = [_]zecli.FlagSpec{
         .aliases = &.{"pin"},
         .description = "Show only pinned entries",
     },
-    .{
-        .name = "tag",
-        .value = .string,
-        .value_name = "TAG",
-        .description = "Show entries having this tag (AND when repeated)",
-        .repeatable = true,
-    },
 };
 
 const cat_flags = [_]zecli.FlagSpec{
@@ -53,7 +46,7 @@ const cat_flags = [_]zecli.FlagSpec{
 };
 
 const remove_flag = [_]zecli.FlagSpec{
-    .{ .name = "remove", .description = "Remove the selected annotation" },
+    .{ .name = "remove", .description = "Unpin the selected entry" },
 };
 
 const force_flag = [_]zecli.FlagSpec{
@@ -85,7 +78,7 @@ const filter_flags = [_]zecli.FlagSpec{
 const commands = [_]zecli.CommandSpec{
     .{
         .name = "tui",
-        .description = "Browse, inspect, annotate, and delete entries",
+        .description = "Browse, inspect, pin, and delete entries",
         .usage = "tj tui",
     },
     .{
@@ -101,7 +94,7 @@ const commands = [_]zecli.CommandSpec{
     .{
         .name = "hist",
         .aliases = &.{"history"},
-        .description = "List entries with annotations, size, and date",
+        .description = "List entries with pin status, size, and date",
         .usage = "tj hist [options] [TARGET...]",
         .flags = &hist_flags,
         .arguments = &.{.{
@@ -137,32 +130,6 @@ const commands = [_]zecli.CommandSpec{
         .description = "Print candidates for a partial journal reference",
         .usage = "tj complete [REF]",
         .arguments = &.{.{ .name = "REF", .description = "Partial journal reference", .completion = reference_completion }},
-    },
-    .{
-        .name = "name",
-        .description = "Name, query, remove, or list entry names",
-        .usage = "tj name [--remove] [REF [NAME]]",
-        .flags = &remove_flag,
-        .arguments = &.{
-            .{ .name = "REF", .description = "Entry reference or assigned name", .completion = reference_completion },
-            .{ .name = "NAME", .description = "New entry name" },
-        },
-    },
-    .{
-        .name = "tag",
-        .description = "Tag, query, remove, or list entry tags",
-        .usage = "tj tag [--remove] [TARGET... [TAG...]]",
-        .flags = &remove_flag,
-        .arguments = &.{
-            .{ .name = "TARGET", .description = "First entry reference or numeric range", .completion = reference_completion },
-            .{
-                .name = "TARGET_OR_TAG",
-                .description = "Additional targets, then journal-local tags",
-                .repeatable = true,
-                .completion = reference_completion,
-            },
-        },
-        .extra_help = "Targets must precede tags. With no tags, the selected targets are queried.\n",
     },
     .{
         .name = "pin",
@@ -210,8 +177,6 @@ pub const application = application: {
         \\  @42/out             entry 42 of this journal
         \\  @-/out              the last entry that completed
         \\  @release-build.42/out        entry 42 of another journal
-        \\  @build-failure/out  a named entry in this journal
-        \\  @release-build.build-failure/out  a named entry in another journal
         \\  tj @42/out           print a reference's filesystem path (tj resolve shorthand)
         \\
         \\Recording needs a shell plugin; zsh also expands bare references:

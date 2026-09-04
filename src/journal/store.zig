@@ -27,7 +27,7 @@ const File = std.Io.File;
 const sys = @import("../sys.zig");
 const journal_name = @import("name.zig");
 const altscreen = @import("../terminal/altscreen.zig");
-const annotations = @import("annotations.zig");
+const pins = @import("pins.zig");
 const mutation_lock = @import("mutation_lock.zig");
 
 /// The journal holds whatever appears on the terminal, which includes secrets.
@@ -59,7 +59,7 @@ pub const noout_placeholder = "<tj:noout>";
 
 /// tj's own bookkeeping, which a program may not overwrite by publishing a
 /// resource with the same name.
-const reserved_names = [_][]const u8{ "cmd", "cwd", "out", "prompt", "rc", "meta.json", "out.removed", ".meta.tmp", "log" };
+const reserved_names = [_][]const u8{ "cmd", "cwd", "out", "prompt", "rc", "meta.json", "out.removed", ".meta.tmp", "log", pins.marker_name };
 pub const temporary_marker = ".tj-temporary";
 
 const PromptState = enum { idle, capturing, ready };
@@ -1317,18 +1317,10 @@ pub fn locate(
     };
     errdefer gpa.free(journal);
 
-    const target: reference.Target = switch (ref.body) {
+    const number: u32 = switch (ref.body) {
         .current => |value| value,
         .qualified => |q| q.target,
-        .previous => .{ .number = try lastCompleted(gpa, io, root, journal) orelse return error.NothingCompleted },
-    };
-    const number: u32 = switch (target) {
-        .number => |value| value,
-        .name => |name| blk: {
-            var metadata = try annotations.openRead(gpa, io, root, journal);
-            defer metadata.deinit(gpa);
-            break :blk try metadata.numberForName(name) orelse return error.NoSuchInteraction;
-        },
+        .previous => try lastCompleted(gpa, io, root, journal) orelse return error.NothingCompleted,
     };
 
     var base: [std.fs.max_path_bytes]u8 = undefined;
@@ -1416,8 +1408,7 @@ pub fn highestNumber(gpa: std.mem.Allocator, io: Io, root: Dir, journal: []const
 }
 
 /// Makes an interaction disappear atomically from the journal namespace.
-/// Annotation cleanup happens after this rename; stale annotations are hidden
-/// by readers and pruned by the next mutation if that later write fails.
+/// Entry-local metadata moves with the directory and is removed with it.
 pub fn stageInteractionRemoval(
     gpa: std.mem.Allocator,
     io: Io,
@@ -1703,12 +1694,10 @@ pub fn removeJournal(gpa: std.mem.Allocator, io: Io, root: Dir, journal: []const
     defer if (mutation_lock_open) mutation_guard.close(io);
 
     if (!force) {
-        var metadata = try annotations.openRead(gpa, io, root, selected);
-        defer metadata.deinit(gpa);
-        var pins = try metadata.pins();
-        defer pins.deinit();
-        while (try pins.next()) |number| {
-            if (interactionExists(io, root, selected, number)) return error.PinnedInteraction;
+        const numbers = try listNumbers(gpa, io, root, selected);
+        defer gpa.free(numbers);
+        for (numbers) |number| {
+            if (try pins.isPinned(io, root, selected, number)) return error.PinnedInteraction;
         }
     }
 
@@ -1730,7 +1719,6 @@ pub fn removeJournal(gpa: std.mem.Allocator, io: Io, root: Dir, journal: []const
     lock.close(io);
     lock_open = false;
     mutation_lock.removeFile(io, root, selected);
-    mutation_lock.removeMetadataFile(io, root, selected);
     removeLockFile(io, root, selected);
 }
 
@@ -1771,7 +1759,6 @@ pub fn renameJournal(
 
     try root.rename(source, root, destination, io);
     mutation_lock.removeFile(io, root, source);
-    mutation_lock.removeMetadataFile(io, root, source);
     removeLockFile(io, root, source);
 }
 
@@ -2057,7 +2044,8 @@ fn isPrivate(name: []const u8) bool {
     return std.mem.eql(u8, name, "meta.json") or
         std.mem.eql(u8, name, "out.removed") or
         std.mem.eql(u8, name, ".meta.tmp") or
-        std.mem.eql(u8, name, "log");
+        std.mem.eql(u8, name, "log") or
+        std.mem.eql(u8, name, pins.marker_name);
 }
 
 test "tj's bookkeeping files are not part of the namespace" {
@@ -2065,6 +2053,7 @@ test "tj's bookkeeping files are not part of the namespace" {
     try std.testing.expect(isPrivate("out.removed"));
     try std.testing.expect(isPrivate(".meta.tmp"));
     try std.testing.expect(isPrivate("log"));
+    try std.testing.expect(isPrivate("pin"));
     try std.testing.expect(!isPrivate("cmd"));
     try std.testing.expect(!isPrivate("cwd"));
     try std.testing.expect(!isPrivate("out"));
@@ -2345,16 +2334,15 @@ test "resource paths that programs may use" {
 test "resource paths that must be refused" {
     for ([_][]const u8{
         // Escaping the interaction directory.
-        "../out",      "files/../../etc/passwd", "/etc/passwd", "a//b",
+        "../out",      "files/../../etc/passwd", "/etc/passwd",     "a//b",
         "./x",         "..",
         // Overwriting tj's own bookkeeping.
-                            "cmd",         "cwd",
-        "out",         "prompt",                 "rc",          "meta.json",
-        "out.removed", ".meta.tmp",              "log",         "CMD",
-        "Rc/child",    "meta.json/child",        "LOG/file",
+                            "cmd",             "cwd",
+        "out",         "prompt",                 "rc",              "meta.json",
+        "out.removed", ".meta.tmp",              "log",             "pin",
+        "CMD",         "Rc/child",               "meta.json/child", "LOG/file",
         // Nothing, or control characters.
-           "",
-        "a\x00b",      "a\nb",
+        "",            "a\x00b",                 "a\nb",
     }) |path| {
         try std.testing.expect(!validResourcePath(path));
     }

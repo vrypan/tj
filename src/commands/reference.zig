@@ -8,7 +8,6 @@ const zecli = @import("zecli");
 const store = @import("../journal/store.zig");
 const sys = @import("../sys.zig");
 const reference = @import("../journal/reference.zig");
-const annotations = @import("../journal/annotations.zig");
 
 /// Prints the path a reference names. The shell integration calls this for
 /// every `@`-word on a command line, so it has to be quiet and quick.
@@ -84,16 +83,6 @@ pub fn completeInteractions(
         const text = std.fmt.bufPrint(&buf, "{d}", .{number}) catch continue;
         if (!std.mem.startsWith(u8, text, prefix)) continue;
         try out.print("@{s}{s}\n", .{ qualifier, text });
-    }
-
-    var metadata = annotations.openRead(gpa, io, root, journal) catch return;
-    defer metadata.deinit(gpa);
-    var names = metadata.names() catch return;
-    defer names.deinit();
-    while (names.next() catch return) |entry| {
-        if (!store.interactionExists(io, root, journal, entry.number)) continue;
-        if (!std.mem.startsWith(u8, entry.name, prefix)) continue;
-        try out.print("@{s}{s}\n", .{ qualifier, entry.name });
     }
 }
 

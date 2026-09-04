@@ -3,7 +3,7 @@
 const std = @import("std");
 const Io = std.Io;
 
-const annotations = @import("../journal/annotations.zig");
+const pins = @import("../journal/pins.zig");
 const plain = @import("../presentation/plain.zig");
 const report = @import("../presentation/report.zig");
 const store = @import("../journal/store.zig");
@@ -50,10 +50,7 @@ pub fn load(
     const info = info_optional orelse return error.NoSuchInteraction;
     defer info.deinit(gpa);
 
-    var metadata = try annotations.openRead(gpa, io, root, journal);
-    defer metadata.deinit(gpa);
-    var annotation = try metadata.get(gpa, number);
-    defer if (annotation) |*value| value.deinit(gpa);
+    const pinned = try pins.isPinned(io, root, journal, number);
 
     var path_buf: [128]u8 = undefined;
     const cwd_path = try std.fmt.bufPrint(&path_buf, "{s}/{d}/cwd", .{ journal, number });
@@ -130,19 +127,7 @@ pub fn load(
     }
     try document.append(gpa, '\n');
 
-    if (annotation) |value| {
-        try document.print(gpa, "pinned    {s}\n", .{if (value.pinned) "yes" else "no"});
-        try document.print(gpa, "name      {s}\n", .{if (value.name) |name| name else "-"});
-        try document.appendSlice(gpa, "tags     ");
-        if (value.tags.items.len == 0) {
-            try document.appendSlice(gpa, " -");
-        } else {
-            for (value.tags.items) |tag| try document.print(gpa, " #{s}", .{tag});
-        }
-        try document.append(gpa, '\n');
-    } else {
-        try document.appendSlice(gpa, "pinned    no\nname      -\ntags      -\n");
-    }
+    try document.print(gpa, "pinned    {s}\n", .{if (pinned) "yes" else "no"});
     if (store.readTiming(gpa, io, root, journal, number)) |timing| {
         var started_buf: [32]u8 = undefined;
         var ended_buf: [32]u8 = undefined;
@@ -276,8 +261,6 @@ fn fieldLabelLength(line: []const u8) ?usize {
         "entry     ",
         "rc        ",
         "pinned    ",
-        "name      ",
-        "tags      ",
         "started   ",
         "ended     ",
         "duration  ",

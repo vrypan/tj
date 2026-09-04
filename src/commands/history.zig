@@ -7,7 +7,7 @@ const zecli = @import("zecli");
 const store = @import("../journal/store.zig");
 const sys = @import("../sys.zig");
 const journal_name = @import("../journal/name.zig");
-const annotations = @import("../journal/annotations.zig");
+const pins = @import("../journal/pins.zig");
 const report = @import("../presentation/report.zig");
 const context = @import("context.zig");
 const presentation = @import("../presentation/entry.zig");
@@ -151,7 +151,7 @@ pub fn appendWholeHistoryJournal(
 }
 
 pub fn historyReferenceWidth(journal: *const HistoryJournal, item: HistoryCursor.Item) usize {
-    return presentation.EntryPresentation.init(journal.name, item.number, item.qualified, null, null).referenceWidth();
+    return presentation.EntryPresentation.init(journal.name, item.number, item.qualified, false, null).referenceWidth();
 }
 
 pub fn writeHistoryReference(
@@ -161,7 +161,7 @@ pub fn writeHistoryReference(
     width: usize,
     color_enabled: bool,
 ) !void {
-    const entry = presentation.EntryPresentation.init(journal.name, item.number, item.qualified, null, null);
+    const entry = presentation.EntryPresentation.init(journal.name, item.number, item.qualified, false, null);
     const actual_width = entry.referenceWidth();
     try out.splatByteAll(' ', width - actual_width);
     if (color_enabled) try out.writeAll("\x1b[33m");
@@ -180,17 +180,6 @@ pub fn listInteractions(
     var root = try store.openRoot(io, home);
     defer root.close(io);
 
-    var filters: std.ArrayList([]u8) = .empty;
-    defer {
-        for (filters.items) |tag| gpa.free(tag);
-        filters.deinit(gpa);
-    }
-    for (parsed.flags.items) |flag| {
-        if (!std.mem.eql(u8, flag.name, "tag")) continue;
-        const tag = annotations.normalizeTag(gpa, flag.value.?) catch return error.InvalidTag;
-        errdefer gpa.free(tag);
-        try filters.append(gpa, tag);
-    }
     const pinned_only = parsed.enabled("pinned");
 
     var journals: std.ArrayList(HistoryJournal) = .empty;
@@ -265,7 +254,7 @@ pub fn listInteractions(
     const size_width = report.max_entry_size_width;
 
     const date_width = 12;
-    const prefix_width = 4 + 1 + number_width + 1 + size_width + 1 + date_width + 1;
+    const prefix_width = 2 + 1 + number_width + 1 + size_width + 1 + date_width + 1;
     const columns = report.terminalColumns();
     const payload_width: ?usize = if (columns) |value|
         if (value > prefix_width) value - prefix_width else 1
@@ -280,25 +269,11 @@ pub fn listInteractions(
     defer noout_region.finish();
     const now_ms = Io.Clock.now(.real, io).toMilliseconds();
 
-    var render_metadata: ?annotations.Connection = null;
-    defer if (render_metadata) |*metadata| metadata.deinit(gpa);
-    var render_journal: ?usize = null;
-    var render_annotations: annotations.Set = .{};
-    defer render_annotations.deinit(gpa);
     var render_cursor: HistoryCursor = .{ .journals = journals.items, .selections = selected.items };
     while (render_cursor.next()) |item| {
         const journal = &journals.items[item.journal_index];
-        if (render_journal != item.journal_index) {
-            if (render_metadata) |*metadata| metadata.deinit(gpa);
-            render_metadata = null;
-            render_metadata = try annotations.openRead(gpa, io, root, journal.name);
-            const replacement = try annotations.loadSet(gpa, &render_metadata.?);
-            render_annotations.deinit(gpa);
-            render_annotations = replacement;
-            render_journal = item.journal_index;
-        }
-        const annotation = render_annotations.get(item.number);
-        if (!historyEntryVisible(annotation, filters.items, pinned_only)) continue;
+        const pinned = try pins.isPinned(io, root, journal.name, item.number);
+        if (pinned_only and !pinned) continue;
 
         const info = try store.readInteraction(
             gpa,
@@ -315,7 +290,7 @@ pub fn listInteractions(
         const command = try presentation.displayCommand(gpa, info.command);
         defer gpa.free(command);
         try payload.appendSlice(gpa, command);
-        const row = presentation.EntryPresentation.init(journal.name, info.number, item.qualified, annotation, info.exit_code);
+        const row = presentation.EntryPresentation.init(journal.name, info.number, item.qualified, pinned, info.exit_code);
         const offsets = try row.appendMetadata(gpa, &payload);
         const flags = row.flags();
 
@@ -331,9 +306,9 @@ pub fn listInteractions(
 
         for (lines.items, 0..) |line, line_i| {
             if (line_i == 0) {
-                try out.writeAll(flags[0..3]);
+                try out.writeByte(flags[0]);
                 if (row.failed() and color_enabled) try out.writeAll("\x1b[31m");
-                try out.writeByte(flags[3]);
+                try out.writeByte(flags[1]);
                 if (row.failed() and color_enabled) try out.writeAll("\x1b[0m");
                 try out.writeByte(' ');
                 try writeHistoryReference(out, journal, item, number_width, color_enabled);
@@ -350,7 +325,7 @@ pub fn listInteractions(
             } else {
                 try out.splatByteAll(' ', prefix_width);
             }
-            try writeHistoryLine(out, payload.items, line, offsets.metadata_start, offsets.failure_start, color_enabled);
+            try writeHistoryLine(out, payload.items, line, offsets.failure_start, color_enabled);
             try out.writeByte('\n');
         }
     }
@@ -398,27 +373,6 @@ pub fn formatLsDate(started_ms: ?i64, now_ms: i64, buf: *[12]u8) []const u8 {
         buf[11] = '0' + @as(u8, @intCast(year % 10));
     }
     return buf;
-}
-
-pub fn historyEntryVisible(
-    annotation: ?*const annotations.Entry,
-    tags: []const []const u8,
-    pinned_only: bool,
-) bool {
-    if (pinned_only and (annotation == null or !annotation.?.pinned)) return false;
-    if (tags.len == 0) return true;
-    const entry = annotation orelse return false;
-    for (tags) |wanted| {
-        var found = false;
-        for (entry.tags.items) |actual| {
-            if (std.mem.eql(u8, wanted, actual)) {
-                found = true;
-                break;
-            }
-        }
-        if (!found) return false;
-    }
-    return true;
 }
 
 pub const HistoryLine = struct { start: usize, end: usize };
@@ -494,27 +448,12 @@ pub fn writeHistoryLine(
     out: *Io.Writer,
     text: []const u8,
     line: HistoryLine,
-    metadata_start: ?usize,
     rc_start: ?usize,
     color_enabled: bool,
 ) !void {
     if (!color_enabled) return out.writeAll(text[line.start..line.end]);
 
     var position = line.start;
-    if (metadata_start) |start| {
-        const styled_start = @max(line.start, start);
-        const styled_end = @min(line.end, rc_start orelse line.end);
-        if (position < @min(styled_start, line.end)) {
-            try out.writeAll(text[position..@min(styled_start, line.end)]);
-            position = @min(styled_start, line.end);
-        }
-        if (styled_start < styled_end) {
-            try out.writeAll("\x1b[32m");
-            try out.writeAll(text[styled_start..styled_end]);
-            try out.writeAll("\x1b[0m");
-            position = styled_end;
-        }
-    }
     if (rc_start) |start| {
         const styled_start = @max(line.start, start);
         if (position < @min(styled_start, line.end)) {
@@ -547,17 +486,17 @@ test "history wrapping prefers words and hard-wraps oversized words" {
     try std.testing.expectEqualStrings("gh", "abcdefgh"[hard.items[2].start..hard.items[2].end]);
 }
 
-test "history renders annotations green and failures red" {
+test "history renders failures red" {
     const gpa = std.testing.allocator;
-    const text = "false @build #bug !1";
+    const text = "false !1";
     var bytes: std.ArrayList(u8) = .empty;
     defer bytes.deinit(gpa);
     var writer = Io.Writer.Allocating.fromArrayList(gpa, &bytes);
     defer bytes = writer.toArrayList();
 
-    try writeHistoryLine(&writer.writer, text, .{ .start = 0, .end = text.len }, 6, 18, true);
+    try writeHistoryLine(&writer.writer, text, .{ .start = 0, .end = text.len }, 6, true);
     try std.testing.expectEqualStrings(
-        "false \x1b[32m@build #bug \x1b[0m\x1b[31m!1\x1b[0m",
+        "false \x1b[31m!1\x1b[0m",
         writer.writer.buffered(),
     );
 }

@@ -5,30 +5,11 @@
 
 const std = @import("std");
 
-const annotations = @import("../journal/annotations.zig");
 const context = @import("../commands/context.zig");
 const report = @import("report.zig");
 
-pub const ColorRole = enum {
-    base,
-    reference,
-    metadata,
-    failure,
-    date,
-    resource,
-};
-
 pub const MetadataPart = union(enum) {
-    name: []const u8,
-    tag: []const u8,
     failure: u8,
-
-    pub fn role(self: MetadataPart) ColorRole {
-        return switch (self) {
-            .name, .tag => .metadata,
-            .failure => .failure,
-        };
-    }
 };
 
 pub const EntryPresentation = struct {
@@ -36,24 +17,20 @@ pub const EntryPresentation = struct {
     number: u32,
     qualified: bool,
     pinned: bool,
-    name: ?[]const u8,
-    tags: []const []u8,
     exit_code: ?u8,
 
     pub fn init(
         journal: []const u8,
         number: u32,
         qualified: bool,
-        annotation: ?*const annotations.Entry,
+        pinned: bool,
         exit_code: ?u8,
     ) EntryPresentation {
         return .{
             .journal = journal,
             .number = number,
             .qualified = qualified,
-            .pinned = if (annotation) |value| value.pinned else false,
-            .name = if (annotation) |value| value.name else null,
-            .tags = if (annotation) |value| value.tags.items else &.{},
+            .pinned = pinned,
             .exit_code = exit_code,
         };
     }
@@ -62,11 +39,9 @@ pub const EntryPresentation = struct {
         return self.exit_code != null and self.exit_code.? != 0;
     }
 
-    pub fn flags(self: EntryPresentation) [4]u8 {
+    pub fn flags(self: EntryPresentation) [2]u8 {
         return .{
             if (self.pinned) '*' else ' ',
-            if (self.name != null) '@' else ' ',
-            if (self.tags.len != 0) '#' else ' ',
             if (self.failed()) '!' else ' ',
         };
     }
@@ -95,15 +70,13 @@ pub const EntryPresentation = struct {
         while (iterator.next()) |part| {
             width += 1;
             width += switch (part) {
-                .name => |name| 1 + name.len,
-                .tag => |tag| 1 + tag.len,
                 .failure => |code| 1 + report.decimalWidth(code),
             };
         }
         return width;
     }
 
-    /// Appends the canonical `@name #tag !rc` suffix to a command payload.
+    /// Appends the canonical `!rc` suffix to a command payload.
     /// Returned offsets let a byte renderer color metadata and failures
     /// without learning how the suffix is assembled.
     pub fn appendMetadata(
@@ -116,16 +89,6 @@ pub const EntryPresentation = struct {
         while (iterator.next()) |part| {
             if (payload.items.len != 0) try payload.append(gpa, ' ');
             switch (part) {
-                .name => |name| {
-                    if (result.metadata_start == null) result.metadata_start = payload.items.len;
-                    try payload.append(gpa, '@');
-                    try payload.appendSlice(gpa, name);
-                },
-                .tag => |tag| {
-                    if (result.metadata_start == null) result.metadata_start = payload.items.len;
-                    try payload.append(gpa, '#');
-                    try payload.appendSlice(gpa, tag);
-                },
                 .failure => |code| {
                     result.failure_start = payload.items.len;
                     try payload.print(gpa, "!{d}", .{code});
@@ -137,34 +100,18 @@ pub const EntryPresentation = struct {
 };
 
 pub const MetadataOffsets = struct {
-    metadata_start: ?usize = null,
     failure_start: ?usize = null,
 };
 
 pub const MetadataIterator = struct {
     entry: *const EntryPresentation,
-    stage: enum { name, tags, failure, done } = .name,
-    tag_index: usize = 0,
+    done: bool = false,
 
     pub fn next(self: *MetadataIterator) ?MetadataPart {
-        while (true) switch (self.stage) {
-            .name => {
-                self.stage = .tags;
-                if (self.entry.name) |name| return .{ .name = name };
-            },
-            .tags => {
-                if (self.tag_index < self.entry.tags.len) {
-                    defer self.tag_index += 1;
-                    return .{ .tag = self.entry.tags[self.tag_index] };
-                }
-                self.stage = .failure;
-            },
-            .failure => {
-                self.stage = .done;
-                if (self.entry.failed()) return .{ .failure = self.entry.exit_code.? };
-            },
-            .done => return null,
-        };
+        if (self.done) return null;
+        self.done = true;
+        if (self.entry.failed()) return .{ .failure = self.entry.exit_code.? };
+        return null;
     }
 };
 
@@ -174,32 +121,26 @@ pub fn displayCommand(gpa: std.mem.Allocator, command: []const u8) ![]u8 {
 
 test "entry presentation derives flags reference and metadata once" {
     const gpa = std.testing.allocator;
-    var annotation: annotations.Entry = .{ .number = 42, .name = try gpa.dupe(u8, "build") };
-    defer annotation.deinit(gpa);
-    try annotation.tags.append(gpa, try gpa.dupe(u8, "bug"));
-    annotation.pinned = true;
-
-    const entry = EntryPresentation.init("work", 42, true, &annotation, 7);
-    try std.testing.expectEqualStrings("*@#!", &entry.flags());
+    const entry = EntryPresentation.init("work", 42, true, true, 7);
+    try std.testing.expectEqualStrings("*!", &entry.flags());
     var reference_buf: [64]u8 = undefined;
     try std.testing.expectEqualStrings("@work.42", try entry.formatReference(&reference_buf));
-    try std.testing.expectEqual(@as(usize, 15), entry.metadataSuffixWidth());
+    try std.testing.expectEqual(@as(usize, 3), entry.metadataSuffixWidth());
 
     var payload: std.ArrayList(u8) = .empty;
     defer payload.deinit(gpa);
     try payload.appendSlice(gpa, "make check");
     const offsets = try entry.appendMetadata(gpa, &payload);
-    try std.testing.expectEqualStrings("make check @build #bug !7", payload.items);
-    try std.testing.expectEqual(@as(?usize, 11), offsets.metadata_start);
-    try std.testing.expectEqual(@as(?usize, 23), offsets.failure_start);
+    try std.testing.expectEqualStrings("make check !7", payload.items);
+    try std.testing.expectEqual(@as(?usize, 11), offsets.failure_start);
 }
 
 test "entry presentation keeps unfinished and successful entries distinct" {
-    const unfinished = EntryPresentation.init("work", 1, false, null, null);
-    const successful = EntryPresentation.init("work", 2, false, null, 0);
+    const unfinished = EntryPresentation.init("work", 1, false, false, null);
+    const successful = EntryPresentation.init("work", 2, false, false, 0);
     try std.testing.expect(!unfinished.failed());
     try std.testing.expect(!successful.failed());
-    try std.testing.expectEqualStrings("    ", &unfinished.flags());
+    try std.testing.expectEqualStrings("  ", &unfinished.flags());
     try std.testing.expectEqual(@as(usize, 0), unfinished.metadataSuffixWidth());
 }
 

@@ -17,7 +17,6 @@
         "build.zig",
         "build.zig.zon",
         "src",
-        "vendor",
         "shell",
         "skill",
         "contrib",

@@ -1,4 +1,4 @@
-//! Journal-local coordination between annotation writes and destructive work.
+//! Journal-local coordination between pin updates and destructive work.
 
 const std = @import("std");
 const Io = std.Io;
@@ -17,12 +17,6 @@ pub fn acquireNamespace(io: Io, root: Dir) !File {
 
 pub fn acquire(io: Io, root: Dir, journal: []const u8, mode: Mode) !File {
     return acquireNamed(io, root, journal, ".mutation", mode);
-}
-
-/// Serializes connection setup and first-time WAL/schema initialization. The
-/// handle is released before the caller begins its annotation transaction.
-pub fn acquireMetadataInit(io: Io, root: Dir, journal: []const u8) !File {
-    return acquireNamed(io, root, journal, ".metadata", .exclusive);
 }
 
 fn acquireNamed(io: Io, root: Dir, journal: []const u8, suffix: []const u8, mode: Mode) !File {
@@ -48,12 +42,6 @@ fn acquireNamed(io: Io, root: Dir, journal: []const u8, suffix: []const u8, mode
 pub fn removeFile(io: Io, root: Dir, journal: []const u8) void {
     var path_buf: [80]u8 = undefined;
     const path = std.fmt.bufPrint(&path_buf, ".locks/{s}.mutation", .{journal}) catch return;
-    root.deleteFile(io, path) catch {};
-}
-
-pub fn removeMetadataFile(io: Io, root: Dir, journal: []const u8) void {
-    var path_buf: [80]u8 = undefined;
-    const path = std.fmt.bufPrint(&path_buf, ".locks/{s}.metadata", .{journal}) catch return;
     root.deleteFile(io, path) catch {};
 }
 

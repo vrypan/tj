@@ -154,14 +154,6 @@ fn commandErrorMessage(which: cli.CommandName, err: anyerror) []const u8 {
         error.NoSuchResource => "tj: no such resource or file\n",
         error.InsideJournal => "tj: cannot replay inside a live journal writer, because it would record the replay; run it from a shell that is not under tj\n",
         error.CrossJournalMutation => "tj: writes and entry deletion are limited to the current journal\n",
-        error.InvalidName => "tj: invalid entry name\n",
-        error.InvalidTag => "tj: invalid tag\n",
-        error.NameTaken => "tj: that entry name is already in use\n",
-        error.LegacyAnnotationsUnsupported => "tj: legacy annotations.json is unsupported; remove the old journal before using this version\n",
-        error.InvalidAnnotationDatabase => "tj: invalid or incompatible journal.sqlite3; refusing to overwrite it\n",
-        error.AnnotationBusy => "tj: journal metadata remained busy for 5 seconds\n",
-        error.AnnotationConstraint => "tj: journal metadata violates its schema\n",
-        error.AnnotationDatabaseFailure => "tj: cannot access journal metadata\n",
         error.UnsupportedRemoval => "tj: only an entry or its out may be removed\n",
         error.InvalidRange => "tj: invalid entry range; use ascending numeric references such as @2..@10\n",
         error.CurrentInteraction => if (which == .cat)
@@ -197,11 +189,11 @@ test {
     _ = @import("commands/history.zig");
     _ = @import("commands/journal_report.zig");
     _ = @import("commands/reference.zig");
-    _ = @import("commands/annotate.zig");
+    _ = @import("commands/pin.zig");
     _ = @import("commands/remove.zig");
     _ = @import("commands/cat.zig");
     _ = @import("commands/replay.zig");
-    _ = @import("journal/sqlite.zig");
+    _ = @import("journal/pins.zig");
     _ = @import("journal/mutation_lock.zig");
     _ = @import("protocol/handoff.zig");
     _ = commands;

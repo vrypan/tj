@@ -51,7 +51,7 @@ test "application and every command expose generated help" {
         try std.testing.expect(std.mem.indexOf(u8, result.stdout, "source /path/to/tj.plugin.fish") != null);
     }
 
-    const command_names = [_][]const u8{ "tui", "filter", "hist", "last", "cat", "resolve", "complete", "name", "tag", "pin", "rm", "grep" };
+    const command_names = [_][]const u8{ "tui", "filter", "hist", "last", "cat", "resolve", "complete", "pin", "rm", "grep" };
     for (command_names) |name| {
         const result = try support.runNonTty(gpa, &.{ name, "--help" });
         defer gpa.free(result.stdout);
@@ -221,15 +221,14 @@ test "build-time completions expose cli grammar and journal references" {
     const bash = try support.Dir.cwd().readFileAlloc(io, options.bash_completion, gpa, .limited(1 << 20));
     defer gpa.free(bash);
     try std.testing.expect(std.mem.indexOf(u8, bash, "complete -F _tj tj") != null);
-    try std.testing.expect(std.mem.indexOf(u8, bash, "--tag") != null);
+    try std.testing.expect(std.mem.indexOf(u8, bash, "--pinned") != null);
     try std.testing.expect(std.mem.indexOf(u8, bash, "never\\nauto\\nalways") != null);
 
     const zsh = try support.Dir.cwd().readFileAlloc(io, options.zsh_completion, gpa, .limited(1 << 20));
     defer gpa.free(zsh);
     try std.testing.expect(std.mem.startsWith(u8, zsh, "#compdef tj\n"));
-    try std.testing.expect(std.mem.indexOf(u8, zsh, "'hist:List entries with annotations, size, and date'") != null);
-    try std.testing.expect(std.mem.indexOf(u8, zsh, "'tui:Browse, inspect, annotate, and delete entries'") != null);
-    try std.testing.expect(std.mem.indexOf(u8, zsh, "--tag=[") != null);
+    try std.testing.expect(std.mem.indexOf(u8, zsh, "'hist:List entries with pin status, size, and date'") != null);
+    try std.testing.expect(std.mem.indexOf(u8, zsh, "'tui:Browse, inspect, pin, and delete entries'") != null);
     try std.testing.expect(std.mem.indexOf(u8, zsh, "--pinned") != null);
     try std.testing.expect(std.mem.indexOf(u8, zsh, "--pin") != null);
     try std.testing.expect(std.mem.indexOf(u8, zsh, "WHEN:(never auto always)") != null);
@@ -237,7 +236,7 @@ test "build-time completions expose cli grammar and journal references" {
     const fish = try support.Dir.cwd().readFileAlloc(io, options.fish_completion, gpa, .limited(1 << 20));
     defer gpa.free(fish);
     try std.testing.expect(std.mem.startsWith(u8, fish, "# fish completion for tj\n"));
-    try std.testing.expect(std.mem.indexOf(u8, fish, "-a 'hist' -d 'List entries with annotations, size, and date'") != null);
+    try std.testing.expect(std.mem.indexOf(u8, fish, "-a 'hist' -d 'List entries with pin status, size, and date'") != null);
     for ([_][]const u8{ "echo 'never'", "echo 'auto'", "echo 'always'" }) |choice| {
         try std.testing.expect(std.mem.indexOf(u8, fish, choice) != null);
     }

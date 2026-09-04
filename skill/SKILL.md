@@ -37,13 +37,13 @@ tj hist @release-build.
 ```
 
 ```
-     1  23b Aug 29 10:10 git status
-*@#! 2 1.2k Aug 29 10:11 go test ./... @build-failure #bug #parser !1
-     3   0b Aug 29 10:12 vi parser.go
+   1  23b Aug 29 10:10 git status
+*! 2 1.2k Aug 29 10:11 go test ./... !1
+   3   0b Aug 29 10:12 vi parser.go
 ```
 
-Columns: positional annotation flags, entry reference, output size, UTC date, and the
-command followed by optional `@name`, `#tag`, and nonzero `!N` status. Long
+Columns: positional status flags, entry reference, output size, UTC date, and
+the command followed by an optional nonzero `!N` status. Long
 commands wrap under the command column on a terminal.
 The whole index is a few hundred tokens even for a long journal. The output
 of a single entry can be 50K. **Read the index first and fetch
@@ -54,13 +54,13 @@ references or inclusive numeric ranges to inspect exact entries. Use
 `@SUFFIX.` (including the trailing dot) to select an entire journal; bare
 journal suffixes are not accepted.
 
-The four flag cells are positional: `*` pinned, `@` named, `#` tagged, and `!`
-failed, with spaces for absent properties. It then shows the entry reference, human-readable `out` size,
-UTC start date, and the same command/name/tags/status payload as history.
+The two flag cells are positional: `*` pinned and `!` failed, with spaces for
+absent properties. It then shows the entry reference, human-readable `out`
+size, UTC start date, and the same command/status payload as history.
 Sizes use powers of 1024 with compact `b`, `k`, `M`, and `G` suffixes.
 Columns have single-space separators; terminal output keeps flags in the
-default foreground for `*@#`, renders a present `!` red, size plus `@name` and
-`#tag` metadata in green, dates in blue, entry references in yellow, and `!N` failures in red. Piped output
+default foreground for `*`, renders a present `!` red, dates in blue, entry
+references in yellow, and `!N` failures in red. Piped output
 stays plain.
 
 When the user gives a distinctive literal rather than an entry number,
@@ -71,9 +71,9 @@ tj grep --out 'connection refused'
 tj grep --cmd 'docker compose'
 ```
 
-Results use history-like rows: four annotation/status flags, entry reference,
-`>` for commands or `<` for output, the matching line, optional `@name` and
-`#tag` markers, and `!N` for failures. Terminal results keep the complete first
+Results use history-like rows: two status flags, entry reference, `>` for
+commands or `<` for output, the matching line, and `!N` for failures. Terminal
+results keep the complete first
 match and trim surrounding context to one line; redirected results are
 untrimmed and omit presentation color.
 Displayed matching lines collapse horizontal whitespace; use `tj cat` for the
@@ -178,18 +178,10 @@ name or an unambiguous suffix: `@release-build.42/out`. `tjctl ls` lists
 complete names in lexical order. Printed cross-journal results use those
 complete names.
 
-An entry may also have a journal-local name, such as
-`@build-failure/out`; `@release-build.build-failure/out` reads the same name from
-another journal. Names and numbers resolve through `tj cat` in the same way.
-An unresolved `@name` remains literal in an interactive command so it can
-still be an ordinary `@handle`.
+Words such as `@handle` are not entry references and remain literal in an
+interactive command.
 
-Names, tags, and pins are user annotations. Tags can be used to narrow the
-index with repeatable AND filters such as `tj hist --tag bug --tag parser`.
-To annotate several entries at once, put every target before the tags, for
-example `tj tag @2 @4 @6..@8 bug parser`; omit tags to query those targets.
-Use `tj hist --pinned` (or `--pin`) to show only pinned entries; pin and tag
-filters combine with AND semantics.
+Use `tj hist --pinned` (or `--pin`) to show only pinned entries.
 Direct terminal history is deliberately omitted from the entry recording with
 `<tj:noout>` so browsing the index does not duplicate it into the journal.
 Piped or redirected history remains ordinary output.
@@ -200,9 +192,8 @@ requires `--force` while any pins remain.
 `tj rm` accepts multiple entry, output, and range targets in one invocation;
 targets are processed from left to right and one `--force` applies to all.
 
-Do not add, remove, or change annotations unless the user asks. Annotation
-writes and entry/output deletion are current-journal-only; qualified
-references are read-only.
+Do not add or remove pins unless the user asks. Pin updates and entry/output
+deletion are current-journal-only; qualified references are read-only.
 
 ## Published resources
 

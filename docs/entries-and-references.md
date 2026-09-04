@@ -10,17 +10,15 @@ resource and remains in the journal.
 tj hist
 tj hist @42 @50..@60
 tj hist @release-build.
-tj hist --tag bug --tag parser
 tj hist --pinned
 ```
 
-A trailing dot selects a journal. Multiple tag filters use AND semantics.
+A trailing dot selects a journal.
 
-History shows four flag positions: `*` for pinned, `@` for named, `#` for
-tagged, and `!` for a nonzero exit status. It also shows the entry reference,
-output size, start date, command, name, tags, and nonzero status. Long commands
-wrap to the terminal width. Redirected output uses the same fields without
-color or wrapping.
+History shows two flag positions: `*` for pinned and `!` for a nonzero exit
+status. It also shows the entry reference, output size, start date, command,
+and nonzero status. Long commands wrap to the terminal width. Redirected
+output uses the same fields without color or wrapping.
 
 `tj last` prints the reference of the last entry that completed.
 
@@ -46,18 +44,15 @@ formatting; `--raw` always preserves recorded bytes.
 | Reference | Meaning |
 |---|---|
 | `@42` | Entry 42 in the current journal |
-| `@build-failure` | A named entry in the current journal |
 | `@-` | The last completed entry |
 | `@release-build.42` | Entry 42 in another journal |
-| `@release-build.build-failure` | A named entry in another journal |
 | `@40..@45` | An inclusive numeric range in the current journal |
 | `@release-build.` | The complete selected journal, where supported |
 
 Journal selectors use an exact name first, then an unambiguous suffix. Printed
 qualified references use the complete journal name.
 
-Unresolved names remain literal. This avoids conflicts with programs that use
-arguments such as `@username`.
+Words such as `@username` are not entry references and remain literal.
 
 ## Shell references
 
@@ -113,38 +108,6 @@ tjcd @42
 tjcd @release-build.42
 ```
 
-## Names
-
-```sh
-tj name @42 build-failure
-tj name @42
-tj name --remove build-failure
-tj name
-```
-
-An entry has at most one name. Assigning another name renames it. Names are
-unique within a journal and contain lowercase letters, digits, and internal
-hyphens; they must start with a letter. Names extend the reference namespace,
-for example `@build-failure/out`.
-
-## Tags
-
-Targets precede tags:
-
-```sh
-tj tag @42 bug parser
-tj tag @42 @47 @50..@55 bug
-tj tag --remove @42 @47 parser
-tj tag @42 @47
-tj tag
-```
-
-Tags are normalized to lowercase. They may contain letters, digits, `.`, `_`,
-and `-`. Adding an existing tag and removing a missing tag are harmless.
-
-Ranges are inclusive, apply only to the current journal, and skip numbering
-holes.
-
 ## Pins
 
 ```sh
@@ -156,6 +119,9 @@ tj pin
 
 Pinning and unpinning are idempotent. A pin protects an entry from ordinary
 removal. It does not currently define a retention policy.
+
+Ranges are inclusive, apply only to the current journal, and skip numbering
+holes.
 
 ## Remove data
 
@@ -171,9 +137,9 @@ Removal only changes the current journal. Targets are processed from left to
 right. Pinned entries are skipped unless `--force` is present. The currently
 running entry cannot be removed.
 
-Removing an entry also removes its name, tags, pin, output, resources, and
-metadata. Removing only `out` preserves the entry, command, exit status, and
-annotations, but also removes resources published from spans of that output.
+Removing an entry also removes its pin, output, resources, and metadata.
+Removing only `out` preserves the entry, command, exit status, and pin, but
+also removes resources published from spans of that output.
 Individual published resources cannot be removed separately.
 
 ## Interactive browser
@@ -190,15 +156,13 @@ Individual published resources cannot be removed separately.
 | `Shift+Up`, `Shift+Down` | Extend or shrink a range |
 | `Escape` | Clear the selection |
 | `p` | Pin or unpin |
-| `t`, `T` | Add or remove a tag |
-| `n` | Name or rename |
 | `d` | Delete |
 | `e` | Print selected entry IDs to standard output and quit |
 | `r` | Refresh |
 | `q` | Quit |
 
-Pin, tag, untag, and delete apply to every selected entry. With no selection,
-they apply to the focused entry. Naming and details use the focused entry.
+Pin and delete apply to every selected entry. With no selection, they apply to
+the focused entry. Details use the focused entry.
 
 `e` requires an explicit selection. It writes the selected entry IDs in
 ascending order as one space-separated line, followed by a newline. This makes

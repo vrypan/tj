@@ -94,7 +94,7 @@ test "tui exports an explicit selection as space-separated entry numbers" {
     try std.testing.expectEqual(@as(u8, 0), try terminal.finish());
 }
 
-test "tui shows details, confirms deletion, and shares annotation semantics" {
+test "tui shows details, confirms deletion, and shares pin semantics" {
     if (!support.haveZsh()) return error.SkipZigTest;
     const gpa = std.testing.allocator;
 
@@ -127,17 +127,14 @@ test "tui shows details, confirms deletion, and shares annotation semantics" {
     try terminal.expectFrom(from, "4 entries");
 
     // The browser starts on the newest completed entry, excluding its own
-    // running command. Select entries 3..4, then apply pin and tag once to
-    // the complete selection before accepting one collective pin override.
+    // running command. Select entries 3..4, pin the complete selection, then
+    // accept one collective pin override.
     from = transcript.items.len;
     try terminal.write(" ");
     try terminal.expectFrom(from, "1 selected");
     from = transcript.items.len;
     try terminal.write("\x1b[1;2Ap");
     try terminal.expectFrom(from, "entries pinned");
-    from = transcript.items.len;
-    try terminal.write("tParser\n");
-    try terminal.expectFrom(from, "tagged #Parser");
     from = transcript.items.len;
     try terminal.write("d");
     try terminal.expectFrom(from, "pinned entries too?");
@@ -152,19 +149,14 @@ test "tui shows details, confirms deletion, and shares annotation semantics" {
     try terminal.write("dp");
     try terminal.expectFrom(from, "pinned");
 
-    // Exercise every annotation mutation, including an untag, and open the
-    // selected entry's full detail view. Focus its first output line and
-    // extend the selection through the second; Enter restores the terminal,
-    // prints both selected lines, and exits the browser.
-    from = transcript.items.len;
-    try terminal.write("tBug\nTbug\ntParser\nntui-target\n");
-    try terminal.expectFrom(from, "named entry 1 @tui-target");
+    // Open the selected entry's full detail view. Focus its first output line,
+    // extend through the second, then print both and exit the browser.
     from = transcript.items.len;
     try terminal.write("\r");
     try terminal.expectFrom(from, "DETAIL_SECOND");
     try std.testing.expect(std.mem.indexOf(u8, transcript.items[from..], "cwd") != null);
     from = transcript.items.len;
-    try terminal.write("jjjjjjjjjjjjjjj\x1b[1;2B\r");
+    try terminal.write("jjjjjjjjjjjjj\x1b[1;2B\r");
     try terminal.expectPromptFrom(from);
     const printed = transcript.items[from..];
     const restored_at = std.mem.lastIndexOf(u8, printed, "\x1b[?1049l") orelse return error.TestUnexpectedResult;
@@ -184,16 +176,6 @@ test "tui shows details, confirms deletion, and shares annotation semantics" {
     defer gpa.free(pinned.stdout);
     defer gpa.free(pinned.stderr);
     try std.testing.expect(std.mem.indexOf(u8, pinned.stdout, "@1") != null);
-    const tagged = try support.runNonTtyInJournal(gpa, &.{ "--home", home, "tag", "@1" }, id, "");
-    defer gpa.free(tagged.stdout);
-    defer gpa.free(tagged.stderr);
-    try std.testing.expect(std.mem.indexOf(u8, tagged.stdout, "parser") != null);
-    try std.testing.expect(std.mem.indexOf(u8, tagged.stdout, "bug") == null);
-    const named = try support.runNonTtyInJournal(gpa, &.{ "--home", home, "name", "@1" }, id, "");
-    defer gpa.free(named.stdout);
-    defer gpa.free(named.stderr);
-    try std.testing.expect(std.mem.indexOf(u8, named.stdout, "tui-target") != null);
-
     try std.testing.expectError(error.FileNotFound, journal.read(gpa, "2/cmd"));
     try std.testing.expectError(error.FileNotFound, journal.read(gpa, "3/cmd"));
     try std.testing.expectError(error.FileNotFound, journal.read(gpa, "4/cmd"));
