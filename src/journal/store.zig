@@ -2288,8 +2288,10 @@ pub fn validResourcePath(path: []const u8) bool {
     if (path.len == 0 or path.len > 256) return false;
     if (path[0] == '/') return false;
 
+    const first_end = std.mem.indexOfScalar(u8, path, '/') orelse path.len;
+    const first = path[0..first_end];
     for (reserved_names) |name| {
-        if (std.mem.eql(u8, path, name)) return false;
+        if (std.ascii.eqlIgnoreCase(first, name)) return false;
     }
 
     var segments = std.mem.splitScalar(u8, path, '/');
@@ -2323,17 +2325,19 @@ test "resource paths that must be refused" {
         // Overwriting tj's own bookkeeping.
                             "cmd",         "cwd",
         "out",         "prompt",                 "rc",          "meta.json",
-        "out.removed", ".meta.tmp",              "log",
+        "out.removed", ".meta.tmp",              "log",         "CMD",
+        "Rc/child",    "meta.json/child",        "LOG/file",
         // Nothing, or control characters.
-                "",
+           "",
         "a\x00b",      "a\nb",
     }) |path| {
         try std.testing.expect(!validResourcePath(path));
     }
 }
 
-test "a reserved name is only reserved whole" {
-    // `cmd` is tj's; `files/cmd` and `cmd.txt` are the program's business.
+test "a reserved name is only reserved as the first component" {
+    // `cmd` is tj's; a nested `cmd` and names merely beginning with it are
+    // the program's business.
     try std.testing.expect(validResourcePath("files/cmd"));
     try std.testing.expect(validResourcePath("cmd.txt"));
 }
