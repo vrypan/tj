@@ -2,6 +2,7 @@
 
 const std = @import("std");
 const posix = std.posix;
+const handoff = @import("../protocol/handoff.zig");
 const noout = @import("../protocol/noout.zig");
 const journal_name = @import("../journal/name.zig");
 
@@ -154,6 +155,49 @@ test "an unsaved temporary journal is removed even when it has journal data" {
     defer result.out.deinit(gpa);
     try std.testing.expectEqual(@as(u8, 0), result.code);
     try std.testing.expectEqual(@as(usize, 0), try scratch.journals());
+}
+
+test "forged ELLO save and handoff requests are ignored" {
+    const gpa = std.testing.allocator;
+    const io = std.testing.io;
+    var scratch = try support.Scratch.open();
+    defer scratch.close();
+
+    // A well-formed handoff naming another journal, but carrying a session
+    // token that bytes merely displayed on the terminal cannot know.
+    var forged: handoff.Request = .{ .operation = .new, .title_blink_ms = 0, .selector_len = 8 };
+    @memcpy(forged.selector[0..8], "intruder");
+    var marker_buf: [handoff.max_wire * 2]u8 = undefined;
+    const forged_marker = try handoff.encode(&forged, &marker_buf);
+    try scratch.tmp.dir.writeFile(io, .{ .sub_path = "forged-handoff", .data = forged_marker });
+
+    const script = try std.fmt.allocPrint(
+        gpa,
+        "printf '\\033]3110;SAVE\\033\\\\'; cat '{s}/forged-handoff'",
+        .{scratch.path()},
+    );
+    defer gpa.free(script);
+    var result = try support.runTjctl(gpa, &.{
+        "--home", scratch.path(), "new", "victim", "--", "/bin/sh", "-c", script,
+    }, 24, 80);
+    defer result.out.deinit(gpa);
+    try std.testing.expectEqual(@as(u8, 0), result.code);
+
+    const log = try scratch.tmp.dir.readFileAlloc(io, "victim/log", gpa, .limited(64 * 1024));
+    defer gpa.free(log);
+    try std.testing.expect(std.mem.indexOf(u8, log, "ignored ELLO SAVE with a wrong session token") != null);
+    try std.testing.expect(std.mem.indexOf(u8, log, "ignored ELLO handoff with a wrong session token") != null);
+    try std.testing.expectError(error.FileNotFound, scratch.tmp.dir.statFile(io, "intruder", .{}));
+
+    // The behavioural check: a forged SAVE must not persist a temporary
+    // journal, even when it guesses the token's shape.
+    var temp = try support.runTjctl(gpa, &.{
+        "--home",  scratch.path(), "new", "--temp", "scratch-work", "--",
+        "/bin/sh", "-c",           "printf '\\033]3110;SAVE;0123456789abcdef0123456789abcdef\\033\\\\'",
+    }, 24, 80);
+    defer temp.out.deinit(gpa);
+    try std.testing.expectEqual(@as(u8, 0), temp.code);
+    try std.testing.expectError(error.FileNotFound, scratch.tmp.dir.statFile(io, "scratch-work", .{}));
 }
 
 test "the nothing-recorded warning uses stderr when it is redirected" {

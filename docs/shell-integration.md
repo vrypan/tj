@@ -228,6 +228,7 @@ The writer exports these variables to its child:
 | `TJ_TITLE_BLINK` | Title blink interval in milliseconds |
 | `TJ` | Path to the entry command, when discoverable |
 | `TJCTL` | Path to the journal command, when discoverable |
+| `TJ_SESSION_ID` | Random token authenticating `tjctl` control requests to the writer |
 
 They are unset outside a journal.
 

@@ -173,7 +173,12 @@ pub fn run(gpa: std.mem.Allocator, io: std.Io, opts: Options) !Result {
             blinker_storage.startJournal(store.journalId()) catch {};
         }
     }
-    exportEnvironment(&store, title_env, opts.title_blink_ms, handoff_fds[1]);
+    // A fresh random token per writer, exported so `tjctl` inside the session
+    // can authenticate SAVE and HANDOFF requests. Untrusted bytes that merely
+    // pass through the terminal - a hostile file, a compromised ssh peer -
+    // never learn it, so they cannot steer the proxy's own control protocol.
+    const session_token = generateSessionToken(io);
+    exportEnvironment(&store, title_env, opts.title_blink_ms, handoff_fds[1], &session_token);
 
     const pid = c.fork();
     if (pid < 0) {
@@ -196,7 +201,12 @@ pub fn run(gpa: std.mem.Allocator, io: std.Io, opts: Options) !Result {
         if (raw) |saved| tty.restore(saved);
     }
 
-    var recorder: Recorder = .{ .store = &store, .blinker = blinker, .handoff_reply_fd = handoff_fds[0] };
+    var recorder: Recorder = .{
+        .store = &store,
+        .blinker = blinker,
+        .handoff_reply_fd = handoff_fds[0],
+        .session_token = &session_token,
+    };
     var output: scanner.Scanner = .{ .keep_osc = opts.keep_osc };
     pump(gpa, io, opts.home, pty.master, sig_fds[0], pid, &recorder, &output) catch {};
     // Nothing may stay withheld inside the scanner once the stream is over.
@@ -301,8 +311,20 @@ fn installSignalHandlers() void {
     posix.sigaction(.PIPE, &ignore, null);
 }
 
+fn generateSessionToken(io: std.Io) [handoff.session_len]u8 {
+    var raw: [handoff.session_len / 2]u8 = undefined;
+    io.random(&raw);
+    var token: [handoff.session_len]u8 = undefined;
+    const digits = "0123456789abcdef";
+    for (raw, 0..) |byte, i| {
+        token[i * 2] = digits[byte >> 4];
+        token[i * 2 + 1] = digits[byte & 0xf];
+    }
+    return token;
+}
+
 /// Exported before the fork so the shell and its plugin inherit them.
-fn exportEnvironment(store: *Store, title: [:0]const u8, title_blink_ms: u32, handoff_fd: sys.Fd) void {
+fn exportEnvironment(store: *Store, title: [:0]const u8, title_blink_ms: u32, handoff_fd: sys.Fd, session_token: *const [handoff.session_len]u8) void {
     var journal: [journal_name.max_len + 1]u8 = undefined;
     @memcpy(journal[0..store.journal.len], store.journal);
     journal[store.journal.len] = 0;
@@ -322,6 +344,10 @@ fn exportEnvironment(store: *Store, title: [:0]const u8, title_blink_ms: u32, ha
     const handoff_fd_value = std.fmt.bufPrint(&handoff_fd_text, "{d}", .{handoff_fd}) catch unreachable;
     handoff_fd_text[handoff_fd_value.len] = 0;
     sys.setEnv("TJ_HANDOFF_FD", handoff_fd_text[0..handoff_fd_value.len :0]);
+    var session_env: [handoff.session_len + 1]u8 = undefined;
+    @memcpy(session_env[0..handoff.session_len], session_token);
+    session_env[handoff.session_len] = 0;
+    sys.setEnv("TJ_SESSION_ID", session_env[0..handoff.session_len :0]);
     if (store.temporary) {
         var temporary: [2:0]u8 = .{ '1', 0 };
         sys.setEnv("TJ_TEMPORARY", temporary[0..1 :0]);
@@ -399,6 +425,11 @@ const Recorder = struct {
     broken: bool = false,
     handoff: ?handoff.Request = null,
     handoff_reply_fd: ?sys.Fd = null,
+    /// Expected `TJ_SESSION_ID` value. SAVE and HANDOFF requests carrying a
+    /// different token are forgeries from displayed content and are dropped
+    /// without a reply: no legitimate `tjctl` is waiting on one, and a stray
+    /// reply byte would poison the acknowledgement of a later real request.
+    session_token: []const u8 = "",
 
     /// Bytes for the terminal that also belong in `out`.
     pub fn data(self: *Recorder, bytes: []const u8) void {
@@ -470,15 +501,24 @@ const Recorder = struct {
             .noout_begin => self.store.beginNoout(),
             .region_end => self.store.endRegion(),
             .handoff => |encoded| {
-                self.handoff = handoff.decode(encoded) catch {
+                const request = handoff.decode(encoded) catch {
                     self.store.warn("ignored invalid ELLO handoff request", .{});
                     return;
                 };
+                if (!std.mem.eql(u8, request.sessionSlice(), self.session_token)) {
+                    self.store.warn("ignored ELLO handoff with a wrong session token", .{});
+                    return;
+                }
+                self.handoff = request;
                 // The marker comes from the active `tjctl new/use` command.
                 // Close its interaction before terminating the source shell.
                 if (self.store.isRecording()) self.store.finish(0);
             },
-            .save => {
+            .save => |token| {
+                if (!std.mem.eql(u8, token, self.session_token)) {
+                    self.store.warn("ignored ELLO SAVE with a wrong session token", .{});
+                    return;
+                }
                 if (!self.store.saveTemporary()) {
                     self.store.warn("ignored ELLO SAVE outside a temporary journal", .{});
                     handoffReply(self, 1);

@@ -143,6 +143,10 @@ fn emitHandoff(
     preflight_open = false;
 
     if (title.len > handoff.max_field or selected.len > handoff.max_field) return error.RequestTooLarge;
+    // The proxy only honours requests carrying the writer's session token,
+    // which reaches `tjctl` through the inherited environment.
+    const session = sys.env("TJ_SESSION_ID") orelse return error.NotInJournal;
+    if (session.len != handoff.session_len) return error.NotInJournal;
     var request: handoff.Request = .{
         .operation = operation,
         .keep_osc = opts.keep_osc,
@@ -153,6 +157,7 @@ fn emitHandoff(
         .title_len = title.len,
         .selector_len = selected.len,
     };
+    @memcpy(&request.session, session);
     @memcpy(request.title[0..title.len], title);
     @memcpy(request.selector[0..selected.len], selected);
     var marker: [handoff.max_wire * 2]u8 = undefined;
@@ -187,10 +192,14 @@ fn emitHandoff(
 
 fn saveTemporary() !u8 {
     if (!insideWriter() or !sys.envPresent("TJ_TEMPORARY")) return error.NotTemporaryJournal;
+    const session = sys.env("TJ_SESSION_ID") orelse return error.NotTemporaryJournal;
+    if (session.len != handoff.session_len) return error.NotTemporaryJournal;
     const flags: posix.O = .{ .ACCMODE = .WRONLY, .CLOEXEC = true };
     const tty_fd = posix.openatZ(posix.AT.FDCWD, "/dev/tty", flags, 0) catch return error.NoControllingTerminal;
     defer sys.close(tty_fd);
-    try sys.writeAll(tty_fd, "\x1b]3110;SAVE\x1b\\");
+    var marker_buf: [handoff.session_len + 16]u8 = undefined;
+    const marker = std.fmt.bufPrint(&marker_buf, "\x1b]3110;SAVE;{s}\x1b\\", .{session}) catch unreachable;
+    try sys.writeAll(tty_fd, marker);
     var reply: [1]u8 = undefined;
     const fd_text = sys.env("TJ_HANDOFF_FD") orelse return error.NotTemporaryJournal;
     const fd: sys.Fd = std.fmt.parseInt(sys.Fd, fd_text, 10) catch return error.NotTemporaryJournal;

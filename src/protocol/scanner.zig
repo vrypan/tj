@@ -66,8 +66,10 @@ pub const Event = union(enum) {
     region_end,
     /// `OSC 3110;HANDOFF;BASE64` - replace the current journal writer.
     handoff: []const u8,
-    /// `OSC 3110;SAVE` - make the current temporary journal persistent.
-    save,
+    /// `OSC 3110;SAVE;TOKEN` - make the current temporary journal persistent.
+    /// Carries the session token for the consumer to validate; a bare `SAVE`
+    /// yields an empty token, which can never match.
+    save: []const u8,
     /// A malformed or unsupported ELLO sequence. Carries a bounded payload or
     /// diagnostic for the journal log; the sequence itself is dropped.
     protocol_error: []const u8,
@@ -423,7 +425,12 @@ pub const Scanner = struct {
         }
 
         if (std.mem.eql(u8, rest, "SAVE")) {
-            sink.event(.save);
+            sink.event(.{ .save = "" });
+            return;
+        }
+
+        if (std.mem.startsWith(u8, rest, "SAVE;")) {
+            sink.event(.{ .save = rest["SAVE;".len..] });
             return;
         }
 
@@ -560,7 +567,7 @@ const Recorder = struct {
 
     fn deinit(self: *Recorder) void {
         for (self.events.items) |recorded_event| switch (recorded_event) {
-            .command_line, .command_expanded, .working_directory, .handoff, .protocol_error => |text| self.gpa.free(text),
+            .command_line, .command_expanded, .working_directory, .handoff, .save, .protocol_error => |text| self.gpa.free(text),
             .resource_begin => |r| {
                 self.gpa.free(r.path);
                 self.gpa.free(r.mime);
@@ -588,6 +595,7 @@ const Recorder = struct {
             .command_expanded => |text| .{ .command_expanded = self.gpa.dupe(u8, text) catch unreachable },
             .working_directory => |text| .{ .working_directory = self.gpa.dupe(u8, text) catch unreachable },
             .handoff => |text| .{ .handoff = self.gpa.dupe(u8, text) catch unreachable },
+            .save => |text| .{ .save = self.gpa.dupe(u8, text) catch unreachable },
             .resource_begin => |r| .{ .resource_begin = .{
                 .path = self.gpa.dupe(u8, r.path) catch unreachable,
                 .mime = self.gpa.dupe(u8, r.mime) catch unreachable,
@@ -1057,10 +1065,18 @@ test "keep osc forwards handoff markers only as control" {
 
 test "save marker is stripped across reads" {
     const gpa = std.testing.allocator;
-    var r = run(gpa, "before\x1b]3110;SAVE\x1b\\after", 1, false);
+    var r = run(gpa, "before\x1b]3110;SAVE;sekret\x1b\\after", 1, false);
     defer r.deinit();
     try std.testing.expectEqualStrings("beforeafter", r.forwarded.items);
     try std.testing.expectEqualStrings("beforeafter", r.recorded.items);
     try std.testing.expectEqual(@as(usize, 1), r.events.items.len);
-    try std.testing.expect(r.events.items[0] == .save);
+    try std.testing.expectEqualStrings("sekret", r.events.items[0].save);
+}
+
+test "a save marker without a token carries an unmatchable empty one" {
+    const gpa = std.testing.allocator;
+    var r = run(gpa, "\x1b]3110;SAVE\x1b\\", 1, false);
+    defer r.deinit();
+    try std.testing.expectEqual(@as(usize, 1), r.events.items.len);
+    try std.testing.expectEqualStrings("", r.events.items[0].save);
 }
