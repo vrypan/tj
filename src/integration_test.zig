@@ -5,7 +5,9 @@ comptime {
     _ = @import("tests/it_harness.zig");
     _ = @import("tests/it_cli.zig");
     _ = @import("tests/it_recording.zig");
-    _ = @import("tests/it_namespace.zig");
+    _ = @import("tests/it_references.zig");
+    _ = @import("tests/it_history.zig");
+    _ = @import("tests/it_mutations.zig");
     _ = @import("tests/it_cat.zig");
     _ = @import("tests/it_journal.zig");
     _ = @import("tests/it_resources.zig");
