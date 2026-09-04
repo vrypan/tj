@@ -4,7 +4,32 @@
 const std = @import("std");
 const posix = std.posix;
 const c = std.c;
-const sys = @import("sys.zig");
+const sys = @import("../sys.zig");
+
+pub const Deadline = struct {
+    expires_ms: i64,
+
+    pub fn init(timeout_ms: i32) !Deadline {
+        return .{
+            .expires_ms = try monotonicMillis() +
+                @as(i64, @intCast(@max(timeout_ms, 0))),
+        };
+    }
+
+    /// Returns the next bounded poll interval, or null once time is up.
+    pub fn pollInterval(self: Deadline, maximum_ms: i32) !?i32 {
+        const remaining = self.expires_ms - try monotonicMillis();
+        if (remaining <= 0) return null;
+        return @intCast(@min(remaining, maximum_ms));
+    }
+};
+
+fn monotonicMillis() !i64 {
+    var now: c.timespec = undefined;
+    if (c.clock_gettime(.MONOTONIC, &now) != 0) return error.ClockFailed;
+    return @as(i64, @intCast(now.sec)) * std.time.ms_per_s +
+        @divTrunc(@as(i64, @intCast(now.nsec)), std.time.ns_per_ms);
+}
 
 pub const PtyChild = struct {
     master: sys.Fd,
@@ -29,22 +54,7 @@ pub const PtyChild = struct {
         marker: []const u8,
         timeout_ms: i32,
     ) !bool {
-        var remaining = timeout_ms;
-        var buf: [4096]u8 = undefined;
-        while (remaining > 0) {
-            if (std.mem.indexOf(u8, out.items, marker) != null) return true;
-            var fds = [_]posix.pollfd{.{ .fd = self.master, .events = posix.POLL.IN, .revents = 0 }};
-            const step: i32 = 100;
-            const ready = posix.poll(&fds, step) catch return false;
-            if (ready == 0) {
-                remaining -= step;
-                continue;
-            }
-            const n = sys.read(self.master, &buf) catch 0;
-            if (n == 0) break;
-            try out.appendSlice(gpa, buf[0..n]);
-        }
-        return std.mem.indexOf(u8, out.items, marker) != null;
+        return self.readUntilFrom(gpa, out, 0, marker, timeout_ms);
     }
 
     /// Like readUntil, but only accepts a marker received after `from`.
@@ -58,18 +68,15 @@ pub const PtyChild = struct {
         marker: []const u8,
         timeout_ms: i32,
     ) !bool {
-        var remaining = timeout_ms;
+        const deadline = try Deadline.init(timeout_ms);
         var buf: [4096]u8 = undefined;
-        while (remaining > 0) {
+        while (true) {
             if (std.mem.indexOf(u8, out.items[from..], marker) != null) return true;
+            const interval = try deadline.pollInterval(100) orelse break;
             var fds = [_]posix.pollfd{.{ .fd = self.master, .events = posix.POLL.IN, .revents = 0 }};
-            const step: i32 = 100;
-            const ready = posix.poll(&fds, step) catch return false;
-            if (ready == 0) {
-                remaining -= step;
-                continue;
-            }
-            const n = sys.read(self.master, &buf) catch 0;
+            const ready = try posix.poll(&fds, interval);
+            if (ready == 0) continue;
+            const n = try sys.read(self.master, &buf);
             if (n == 0) break;
             try out.appendSlice(gpa, buf[0..n]);
         }
@@ -78,22 +85,45 @@ pub const PtyChild = struct {
 
     /// Drains to end of output, then reaps the child.
     pub fn finish(self: PtyChild, gpa: std.mem.Allocator, out: *std.ArrayList(u8), timeout_ms: i32) !u8 {
-        var remaining = timeout_ms;
+        const drain_deadline = try Deadline.init(timeout_ms);
+        var closed = false;
+        var reaped = false;
+        errdefer {
+            if (!closed) sys.close(self.master);
+            if (!reaped) self.killAndReap();
+        }
+
         var buf: [4096]u8 = undefined;
-        while (remaining > 0) {
+        while (true) {
+            const interval = try drain_deadline.pollInterval(100) orelse break;
             var fds = [_]posix.pollfd{.{ .fd = self.master, .events = posix.POLL.IN, .revents = 0 }};
-            const step: i32 = 100;
-            const ready = posix.poll(&fds, step) catch break;
-            if (ready == 0) {
-                remaining -= step;
-                continue;
-            }
-            const n = sys.read(self.master, &buf) catch 0;
+            const ready = try posix.poll(&fds, interval);
+            if (ready == 0) continue;
+            const n = try sys.read(self.master, &buf);
             if (n == 0) break;
             try out.appendSlice(gpa, buf[0..n]);
         }
         sys.close(self.master);
-        return sys.waitFor(self.pid).code;
+        closed = true;
+
+        // Closing the terminal is part of the fixture's normal shutdown. It
+        // also gives a process group which left the slave open (for example an
+        // interrupted shell command) a chance to react to the hangup.
+        const reap_deadline = try Deadline.init(timeout_ms);
+        while (true) {
+            if (sys.tryWaitFor(self.pid)) |wait| {
+                reaped = true;
+                return wait.code;
+            }
+            const interval = try reap_deadline.pollInterval(10) orelse return error.PtyTimeout;
+            sys.sleepMs(@intCast(interval));
+        }
+    }
+
+    pub fn killAndReap(self: PtyChild) void {
+        sys.killGroup(self.pid, .KILL);
+        posix.kill(self.pid, .KILL) catch {};
+        _ = sys.waitFor(self.pid);
     }
 };
 

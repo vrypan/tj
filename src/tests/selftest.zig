@@ -8,7 +8,7 @@
 const std = @import("std");
 const posix = std.posix;
 const c = std.c;
-const sys = @import("sys.zig");
+const sys = @import("sys");
 
 const tjctl = std.fmt.comptimePrint("{s}", .{@import("build_options").tjctl_exe});
 

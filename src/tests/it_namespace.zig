@@ -2,7 +2,7 @@
 
 const std = @import("std");
 const posix = std.posix;
-const harness = @import("../harness.zig");
+const harness = @import("harness.zig");
 const noout = @import("../noout.zig");
 const plain = @import("../plain.zig");
 const report = @import("../report.zig");
@@ -11,6 +11,8 @@ const journal_name = @import("../journal_name.zig");
 const options = @import("build_options");
 const tj = options.tj_exe;
 const support = @import("it_support.zig");
+
+// Shell integration and basic reference parsing.
 
 test "the tj zle hooks preserve prompt and tui widgets when sourced again" {
     if (!support.haveZsh()) return error.SkipZigTest;
@@ -156,6 +158,8 @@ test "a malformed reference and a missing one are told apart" {
     try std.testing.expectEqual(@as(u8, 2), missing.code);
     try std.testing.expect(std.mem.indexOf(u8, missing.out.items, "tj: no such entry") != null);
 }
+
+// Annotations and history display.
 
 test "names tags pins and tagged history use journal-local annotations" {
     if (!support.haveZsh()) return error.SkipZigTest;
@@ -627,6 +631,8 @@ test "tag accepts leading target lists before multiple tags" {
     try std.testing.expect(std.mem.indexOf(u8, after.out.items, "@4  bug\r\n") != null);
 }
 
+// Entry and journal mutation semantics.
+
 test "entry mutations reject qualified journals while reads still work" {
     if (!support.haveZsh()) return error.SkipZigTest;
     const gpa = std.testing.allocator;
@@ -1072,6 +1078,8 @@ test "concurrent namespace operations leave one complete winner" {
         try std.testing.expectError(error.FileNotFound, scratch.tmp.dir.openDir(io, "new-source", .{}));
     }
 }
+
+// Reference expansion, validation, and completion.
 
 test "resolved bare references expand while unknown handles stay literal" {
     if (!support.haveZsh()) return error.SkipZigTest;

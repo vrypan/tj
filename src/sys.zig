@@ -175,6 +175,13 @@ pub const Wait = struct {
     code: u8,
 };
 
+fn decodeWaitStatus(status: c_int) Wait {
+    const raw: u32 = @bitCast(status);
+    if (raw & 0x7f == 0) return .{ .code = @truncate((raw >> 8) & 0xff) };
+    const sig: u8 = @truncate(raw & 0x7f);
+    return .{ .code = 128 +| sig };
+}
+
 pub fn waitFor(pid: c.pid_t) Wait {
     var status: c_int = 0;
     while (true) {
@@ -185,10 +192,21 @@ pub fn waitFor(pid: c.pid_t) Wait {
         }
         break;
     }
-    const raw: u32 = @bitCast(status);
-    if (raw & 0x7f == 0) return .{ .code = @truncate((raw >> 8) & 0xff) };
-    const sig: u8 = @truncate(raw & 0x7f);
-    return .{ .code = 128 +| sig };
+    return decodeWaitStatus(status);
+}
+
+/// Reaps `pid` if it has exited, without waiting for a live process.
+pub fn tryWaitFor(pid: c.pid_t) ?Wait {
+    var status: c_int = 0;
+    while (true) {
+        const r = c.waitpid(pid, &status, @intCast(c.W.NOHANG));
+        if (r == 0) return null;
+        if (r < 0) {
+            if (posix.errno(r) == .INTR) continue;
+            return .{ .code = 1 };
+        }
+        return decodeWaitStatus(status);
+    }
 }
 
 pub fn killGroup(pid: c.pid_t, sig: posix.SIG) void {

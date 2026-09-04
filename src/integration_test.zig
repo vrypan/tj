@@ -2,11 +2,12 @@
 //! the build runs them all from one test binary.
 
 comptime {
+    _ = @import("tests/it_harness.zig");
     _ = @import("tests/it_cli.zig");
     _ = @import("tests/it_recording.zig");
     _ = @import("tests/it_namespace.zig");
-    _ = @import("tests/it_fullscreen.zig");
-    _ = @import("tests/it_empty.zig");
+    _ = @import("tests/it_cat.zig");
+    _ = @import("tests/it_journal.zig");
     _ = @import("tests/it_resources.zig");
     _ = @import("tests/it_contrib.zig");
     _ = @import("tests/it_replay.zig");

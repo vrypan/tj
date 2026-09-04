@@ -3,7 +3,7 @@
 
 const std = @import("std");
 const posix = std.posix;
-const harness = @import("../harness.zig");
+const harness = @import("harness.zig");
 const plain = @import("../plain.zig");
 const journal_name = @import("../journal_name.zig");
 
@@ -53,6 +53,50 @@ pub fn leaveJournal() void {
     isolateJournal();
     sys.setEnv("TJ_JOURNAL", "");
 }
+
+/// Restores process environment variables when a fixture leaves scope. Zig's
+/// test runner executes many tests in one process, so a failed assertion must
+/// not silently configure whichever test happens to run next.
+pub const EnvGuard = struct {
+    const Saved = struct {
+        name: [*:0]const u8,
+        value: ?[:0]u8,
+        was_present: bool,
+    };
+
+    gpa: std.mem.Allocator,
+    saved: std.ArrayList(Saved),
+
+    pub fn init(gpa: std.mem.Allocator, names: []const [*:0]const u8) !EnvGuard {
+        var self: EnvGuard = .{ .gpa = gpa, .saved = .empty };
+        errdefer self.deinit();
+        for (names) |name| {
+            const present = sys.envPresent(name);
+            const value = if (present) try gpa.dupeZ(u8, sys.env(name) orelse "") else null;
+            try self.saved.append(gpa, .{
+                .name = name,
+                .value = value,
+                .was_present = present,
+            });
+        }
+        return self;
+    }
+
+    pub fn deinit(self: *EnvGuard) void {
+        var index = self.saved.items.len;
+        while (index > 0) {
+            index -= 1;
+            const saved = self.saved.items[index];
+            if (saved.was_present) {
+                sys.setEnv(saved.name, saved.value.?.ptr);
+            } else {
+                sys.unsetEnv(saved.name);
+            }
+            if (saved.value) |value| self.gpa.free(value);
+        }
+        self.saved.deinit(self.gpa);
+    }
+};
 
 const Program = enum {
     tj,
@@ -267,18 +311,21 @@ pub fn finishKeepingTail(
     var tail: std.ArrayList(u8) = .empty;
     errdefer tail.deinit(gpa);
     var total: u64 = 0;
-    var remaining = timeout;
+    const deadline = try harness.Deadline.init(timeout);
+    var completed = false;
+    var master_closed = false;
+    defer if (!completed) {
+        if (!master_closed) sys.close(child.master);
+        child.killAndReap();
+    };
     var buf: [64 * 1024]u8 = undefined;
 
-    while (remaining > 0) {
+    while (true) {
+        const interval = try deadline.pollInterval(100) orelse return error.PtyTimeout;
         var fds = [_]posix.pollfd{.{ .fd = child.master, .events = posix.POLL.IN, .revents = 0 }};
-        const step: i32 = 100;
-        const ready = posix.poll(&fds, step) catch break;
-        if (ready == 0) {
-            remaining -= step;
-            continue;
-        }
-        const n = sys.read(child.master, &buf) catch 0;
+        const ready = try posix.poll(&fds, interval);
+        if (ready == 0) continue;
+        const n = try sys.read(child.master, &buf);
         if (n == 0) break;
         total += @intCast(n);
 
@@ -298,7 +345,15 @@ pub fn finishKeepingTail(
     }
 
     sys.close(child.master);
-    return .{ .tail = tail, .total = total, .code = sys.waitFor(child.pid).code };
+    master_closed = true;
+    while (true) {
+        if (sys.tryWaitFor(child.pid)) |wait| {
+            completed = true;
+            return .{ .tail = tail, .total = total, .code = wait.code };
+        }
+        const interval = try deadline.pollInterval(10) orelse return error.PtyTimeout;
+        sys.sleepMs(@intCast(interval));
+    }
 }
 
 pub const Io = std.Io;
@@ -314,6 +369,7 @@ pub const Journal = struct {
     // its own buffer would point at the caller's dead stack frame.
     path_len: usize,
     path_buf: [std.fs.max_path_bytes]u8,
+    env_guard: ?EnvGuard,
 
     pub fn path(self: *const Journal) []const u8 {
         return self.path_buf[0..self.path_len];
@@ -324,6 +380,7 @@ pub const Journal = struct {
             .tmp = std.testing.tmpDir(.{}),
             .path_len = 0,
             .path_buf = undefined,
+            .env_guard = null,
         };
         const io = std.testing.io;
 
@@ -346,6 +403,7 @@ pub const Journal = struct {
     }
 
     pub fn close(self: *Journal) void {
+        if (self.env_guard) |*guard| guard.deinit();
         self.tmp.cleanup();
     }
 
@@ -363,6 +421,9 @@ pub const Journal = struct {
 
     /// Makes `@N` and `@-` resolve against this journal.
     pub fn enter(self: *Journal, gpa: std.mem.Allocator) !void {
+        if (self.env_guard == null) {
+            self.env_guard = try EnvGuard.init(gpa, &.{ "TJ_JOURNAL", "TJ_NEXT" });
+        }
         const name = try self.journalName(gpa);
         defer gpa.free(name);
         var buf: [64]u8 = undefined;
@@ -411,14 +472,8 @@ pub fn spawnContinuedJournalZsh(
     // The parent test may use TJ_JOURNAL for direct `tj` invocations after
     // this child returns. Do not leak that synthetic state into a fresh
     // `tjctl use`, where it would correctly be interpreted as a nested writer.
-    const prior_journal = if (sys.env("TJ_JOURNAL")) |value| try gpa.dupe(u8, value) else null;
-    defer if (prior_journal) |value| gpa.free(value);
-    defer if (prior_journal) |value| {
-        var saved: [journal_name.max_len + 1]u8 = undefined;
-        @memcpy(saved[0..value.len], value);
-        saved[value.len] = 0;
-        sys.setEnv("TJ_JOURNAL", saved[0..value.len :0]);
-    } else sys.setEnv("TJ_JOURNAL", "");
+    var environment = try EnvGuard.init(gpa, &.{"TJ_JOURNAL"});
+    defer environment.deinit();
     sys.setEnv("TJ_JOURNAL", "");
     const home = try journal.homeArg(gpa);
     defer gpa.free(home);
@@ -436,6 +491,59 @@ pub fn appendShellQuoted(gpa: std.mem.Allocator, out: *std.ArrayList(u8), text: 
     }
     try out.append(gpa, '\'');
 }
+
+/// Owns a PTY child and its transcript. Tests can still use the lower-level
+/// harness for signal and resize assertions, while ordinary interactive tests
+/// get consistent prompt waits, diagnostics, and failure cleanup.
+pub const TerminalSession = struct {
+    gpa: std.mem.Allocator,
+    child: harness.PtyChild,
+    transcript: std.ArrayList(u8) = .empty,
+    finished: bool = false,
+
+    pub fn init(gpa: std.mem.Allocator, child: harness.PtyChild) TerminalSession {
+        return .{ .gpa = gpa, .child = child };
+    }
+
+    pub fn deinit(self: *TerminalSession) void {
+        if (!self.finished) {
+            sys.close(self.child.master);
+            self.child.killAndReap();
+        }
+        self.transcript.deinit(self.gpa);
+    }
+
+    pub fn mark(self: *const TerminalSession) usize {
+        return self.transcript.items.len;
+    }
+
+    pub fn write(self: *TerminalSession, bytes: []const u8) !void {
+        try self.child.write(bytes);
+    }
+
+    pub fn expectFrom(self: *TerminalSession, from: usize, marker: []const u8) !void {
+        if (try self.child.readUntilFrom(self.gpa, &self.transcript, from, marker, timeout_ms)) return;
+        std.debug.print("terminal did not produce {s}; transcript follows:\n{s}\n", .{ marker, self.transcript.items[from..] });
+        return error.TerminalMarkerMissing;
+    }
+
+    pub fn command(self: *TerminalSession, line: []const u8) !void {
+        const from = self.mark();
+        try self.write(line);
+        try self.write("\n");
+        try self.expectFrom(from, test_prompt);
+    }
+
+    pub fn finish(self: *TerminalSession) !u8 {
+        const code = self.child.finish(self.gpa, &self.transcript, timeout_ms) catch |err| {
+            // PtyChild.finish closes and reaps on every error path.
+            self.finished = true;
+            return err;
+        };
+        self.finished = true;
+        return code;
+    }
+};
 
 pub fn setupJournalZshWithPrefix(
     gpa: std.mem.Allocator,
@@ -556,20 +664,15 @@ pub fn setupJournalFish(gpa: std.mem.Allocator, child: harness.PtyChild, out: *s
 /// Runs `script` line by line in an interactive zsh under tj, then exits.
 pub fn recordJournal(gpa: std.mem.Allocator, journal: *Journal, script: []const []const u8) !void {
     const child = try spawnJournalZsh(gpa, journal);
-    var out: std.ArrayList(u8) = .empty;
-    defer out.deinit(gpa);
+    var terminal = TerminalSession.init(gpa, child);
+    defer terminal.deinit();
 
-    try setupJournalZsh(gpa, child, &out);
-    for (script) |line| {
-        const from = out.items.len;
-        try child.write(line);
-        try child.write("\n");
-        if (!try child.readUntilFrom(gpa, &out, from, test_prompt, timeout_ms)) return error.CommandDidNotFinish;
-    }
-    try child.write("exit 0\n");
-    try std.testing.expectEqual(@as(u8, 0), try child.finish(gpa, &out, timeout_ms));
+    try setupJournalZsh(gpa, child, &terminal.transcript);
+    for (script) |line| try terminal.command(line);
+    try terminal.write("exit 0\n");
+    try std.testing.expectEqual(@as(u8, 0), try terminal.finish());
     const recorded = journal.journalName(gpa) catch |err| {
-        std.debug.print("journal was not retained; transcript follows:\n{s}\n", .{out.items});
+        std.debug.print("journal was not retained; transcript follows:\n{s}\n", .{terminal.transcript.items});
         return err;
     };
     gpa.free(recorded);

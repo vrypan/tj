@@ -85,12 +85,18 @@ pub fn build(b: *std.Build) void {
     selftest_options.addOptionPath("tjctl_exe", tjctl_exe.getEmittedBin());
 
     const selftest_mod = b.createModule(.{
-        .root_source_file = b.path("src/selftest.zig"),
+        .root_source_file = b.path("src/tests/selftest.zig"),
         .target = target,
         .optimize = optimize,
         .link_libc = true,
     });
     selftest_mod.addOptions("build_options", selftest_options);
+    selftest_mod.addImport("sys", b.createModule(.{
+        .root_source_file = b.path("src/sys.zig"),
+        .target = target,
+        .optimize = optimize,
+        .link_libc = true,
+    }));
     const selftest = b.addExecutable(.{ .name = "tj-selftest", .root_module = selftest_mod });
 
     const integration_options = b.addOptions();

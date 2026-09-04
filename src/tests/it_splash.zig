@@ -8,6 +8,8 @@ const support = @import("it_support.zig");
 
 test "journal writers show a restorable splash unless disabled" {
     const gpa = std.testing.allocator;
+    var environment = try support.EnvGuard.init(gpa, &.{ "TJ_TITLE", "TJ_TITLE_BLINK", "TJ_NO_SPLASH" });
+    defer environment.deinit();
     support.sys.setEnv("TJ_TITLE", "TJ | %3~");
     support.sys.setEnv("TJ_TITLE_BLINK", "1500");
     support.sys.setEnv("TJ_NO_SPLASH", "false");
@@ -78,6 +80,8 @@ test "journal writers show a restorable splash unless disabled" {
 test "journal writers manage terminal titles without changing recorded bytes" {
     const gpa = std.testing.allocator;
     const io = std.testing.io;
+    var environment = try support.EnvGuard.init(gpa, &.{ "TJ_TITLE", "TJ_TITLE_BLINK", "TJ_NO_SPLASH" });
+    defer environment.deinit();
     support.sys.setEnv("TJ_TITLE", "TJ | %3~");
     support.sys.setEnv("TJ_TITLE_BLINK", "1500");
     support.sys.setEnv("TJ_NO_SPLASH", "false");

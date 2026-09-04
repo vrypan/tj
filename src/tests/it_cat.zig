@@ -1,4 +1,4 @@
-//! Full-screen programs and reading recorded resources back.
+//! Recorded-output rendering, resource selection, and streaming behavior.
 
 const std = @import("std");
 const posix = std.posix;

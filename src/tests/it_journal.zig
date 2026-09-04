@@ -1,4 +1,4 @@
-//! Journals that recorded nothing, and the errors that say so.
+//! Journal lifecycle and management commands that do not require shell integration.
 
 const std = @import("std");
 const posix = std.posix;
