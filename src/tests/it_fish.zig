@@ -47,6 +47,30 @@ test "fish records UTF-8 commands and resolves canonical path substitutions" {
     try std.testing.expectEqualStrings("complete -C 'cat (tj @1/'", third);
 }
 
+test "fish handoff refreshes its journal reference" {
+    if (!support.fishSupportsNativeMarkers()) return error.SkipZigTest;
+    const gpa = std.testing.allocator;
+
+    var journal = try support.Journal.open(gpa);
+    defer journal.close();
+    const child = try support.spawnJournalFish(gpa, &journal);
+    var terminal = support.TerminalSession.init(gpa, child);
+    defer terminal.deinit();
+    try terminal.setupFish();
+
+    var from = terminal.mark();
+    try terminal.write("tj-new fish-target\n");
+    try terminal.expectPromptFrom(from);
+
+    from = terminal.mark();
+    try terminal.write("printf 'FISH_HANDOFF=%s:%s\\n' \"$TJ_JOURNAL\" \"$TJ_REF\"\n");
+    try terminal.expectFrom(from, "FISH_HANDOFF=fish-target:@fish-target.2");
+    try terminal.expectPromptFrom(from);
+
+    try terminal.write("exit 0\n");
+    try std.testing.expectEqual(@as(u8, 0), try terminal.finish());
+}
+
 test "fish key binding keeps the tui attached to its terminal" {
     if (!support.fishSupportsNativeMarkers()) return error.SkipZigTest;
     const gpa = std.testing.allocator;

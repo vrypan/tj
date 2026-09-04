@@ -35,9 +35,10 @@ function _tj_handoff
         return
     end
 
-    set -l setup (env TJ_SHELL_HANDOFF=fish command $tjctl_bin $operation $argv | string collect)
+    set -l setup (env TJ_SHELL_HANDOFF=fish $tjctl_bin $operation $argv | string collect)
     or return
     eval $setup
+    _tj_publish_ref
 end
 
 function tj-new
@@ -90,10 +91,16 @@ if test (count $_tj_fish_version) -eq 0; or test $_tj_fish_version[1] -lt 4
     return
 end
 
-function _tj_publish_next
-    set -gx TJ_NEXT (math "$TJ_NEXT + 1")
+function _tj_publish_ref
     set -gx TJ_REF (string join '' @ "$TJ_JOURNAL" . "$TJ_NEXT")
 end
+
+function _tj_publish_next
+    set -gx TJ_NEXT (math "$TJ_NEXT + 1")
+    _tj_publish_ref
+end
+
+_tj_publish_ref
 
 function _tj_preexec --on-event fish_preexec
     # Fish 4 emits OSC 133 command boundaries and OSC 7 working-directory
