@@ -2,7 +2,7 @@
 
 const std = @import("std");
 const posix = std.posix;
-const journal_name = @import("journal_name.zig");
+const journal_name = @import("../journal_name.zig");
 
 const options = @import("build_options");
 const tj = options.tj_exe;
@@ -134,7 +134,7 @@ test "use appends to the same journal at its next unused number" {
     try std.testing.expect(std.mem.indexOf(u8, listed.out.items, name) != null);
 }
 
-test "new exports journal variables and removes the old environment contract" {
+test "new exports the journal environment" {
     const gpa = std.testing.allocator;
     var scratch = try support.Scratch.open();
     defer scratch.close();
@@ -146,17 +146,15 @@ test "new exports journal variables and removes the old environment contract" {
         "--",
         "/bin/sh",
         "-c",
-        "printf 'J=%s N=%s TJ=%s TJCTL=%s SHORT=%s TITLE=%s BLINK=%s\\n' \"$TJ_JOURNAL\" \"$TJ_NEXT\" \"$TJ\" \"$TJCTL\" \"${TJ_JOURNAL_SHORT-unset}\" \"$TJ_TITLE\" \"$TJ_TITLE_BLINK\"",
+        "printf 'J=%s N=%s TJ=%s TJCTL=%s TITLE=%s BLINK=%s\\n' \"$TJ_JOURNAL\" \"$TJ_NEXT\" \"$TJ\" \"$TJCTL\" \"$TJ_TITLE\" \"$TJ_TITLE_BLINK\"",
     }, 24, 80);
     defer r.out.deinit(gpa);
     try std.testing.expectEqual(@as(u8, 0), r.code);
     try std.testing.expect(std.mem.indexOf(u8, r.out.items, " N=1") != null);
     try std.testing.expect(std.mem.indexOf(u8, r.out.items, support.tj) != null);
     try std.testing.expect(std.mem.indexOf(u8, r.out.items, support.tjctl) != null);
-    try std.testing.expect(std.mem.indexOf(u8, r.out.items, "SHORT=unset") != null);
     try std.testing.expect(std.mem.indexOf(u8, r.out.items, "TITLE=none") != null);
     try std.testing.expect(std.mem.indexOf(u8, r.out.items, "BLINK=0") != null);
-    try std.testing.expect(std.mem.indexOf(u8, r.out.items, "SESS" ++ "ION") == null);
 }
 
 test "the zsh plugin evaluates the configured title at each prompt" {

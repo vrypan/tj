@@ -125,7 +125,7 @@ pub fn run(gpa: std.mem.Allocator, io: std.Io, opts: Options) !Result {
         var root = try journal_store.openRoot(io, opts.home);
         defer root.close(io);
         var stdout_buffer: [io_buf_size]u8 = undefined;
-        var stdout_file: std.Io.File.Writer = .init(.stdout(), io, &stdout_buffer);
+        var stdout_file: std.Io.File.Writer = .initStreaming(.stdout(), io, &stdout_buffer);
         try replay.play(gpa, io, root, store.journalId(), .{
             .typing_ms = 0,
             .max_pause_ms = 0,
@@ -575,7 +575,7 @@ fn applyHandoff(gpa: std.mem.Allocator, io: std.Io, home: ?[]const u8, recorder:
     };
     if (request.replay_before_start) {
         var stdout_buffer: [io_buf_size]u8 = undefined;
-        var stdout_file: std.Io.File.Writer = .init(.stdout(), io, &stdout_buffer);
+        var stdout_file: std.Io.File.Writer = .initStreaming(.stdout(), io, &stdout_buffer);
         replay.play(gpa, io, target.root, target.journalId(), .{
             .typing_ms = 0,
             .max_pause_ms = 0,

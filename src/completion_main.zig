@@ -15,8 +15,8 @@ pub fn main(init: std.process.Init) !u8 {
 
     var stdout_buf: [4096]u8 = undefined;
     var stderr_buf: [512]u8 = undefined;
-    var stdout_file: Io.File.Writer = .init(.stdout(), init.io, &stdout_buf);
-    var stderr_file: Io.File.Writer = .init(.stderr(), init.io, &stderr_buf);
+    var stdout_file: Io.File.Writer = .initStreaming(.stdout(), init.io, &stdout_buf);
+    var stderr_file: Io.File.Writer = .initStreaming(.stderr(), init.io, &stderr_buf);
     const stdout = &stdout_file.interface;
     const stderr = &stderr_file.interface;
 

@@ -74,13 +74,13 @@ trap cleanup EXIT
 
 for id in "${ids[@]}"; do
     if $show_prompt; then
-        command "$tj_bin" cat --plain "@$id/prompt" | command cat >>"$transcript"
+        command "$tj_bin" cat --plain "@$id/prompt" >>"$transcript"
     else
         printf '$ ' >>"$transcript"
     fi
-    command "$tj_bin" cat --plain "@$id/cmd" | command cat >>"$transcript"
+    command "$tj_bin" cat --plain "@$id/cmd" >>"$transcript"
     printf '\n\n' >>"$transcript"
-    command "$tj_bin" cat --plain "@$id/out" | command cat >>"$transcript"
+    command "$tj_bin" cat --plain "@$id/out" >>"$transcript"
     printf '\n\n' >>"$transcript"
 done
 

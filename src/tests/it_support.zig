@@ -3,9 +3,9 @@
 
 const std = @import("std");
 const posix = std.posix;
-const harness = @import("harness.zig");
-const plain = @import("plain.zig");
-const journal_name = @import("journal_name.zig");
+const harness = @import("../harness.zig");
+const plain = @import("../plain.zig");
+const journal_name = @import("../journal_name.zig");
 
 const options = @import("build_options");
 pub const tj = options.tj_exe;
@@ -307,7 +307,7 @@ pub const Io = std.Io;
 
 pub const Dir = std.Io.Dir;
 
-pub const sys = @import("sys.zig");
+pub const sys = @import("../sys.zig");
 
 /// A zsh child process under tj, with the plugin loaded.
 pub const Journal = struct {

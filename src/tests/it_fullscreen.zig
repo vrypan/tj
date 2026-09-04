@@ -2,42 +2,13 @@
 
 const std = @import("std");
 const posix = std.posix;
-const plain = @import("plain.zig");
+const plain = @import("../plain.zig");
 
 const options = @import("build_options");
 const tj = options.tj_exe;
 const support = @import("it_support.zig");
 
-test "a full-screen program leaves nothing in the journal" {
-    if (!support.haveZsh()) return error.SkipZigTest;
-    const gpa = std.testing.allocator;
-
-    var journal = try support.Journal.open(gpa);
-    defer journal.close();
-
-    // The sequences a pager or editor sends, without the unpredictability of
-    // driving a real one.
-    try support.recordJournal(gpa, &journal, &.{
-        "printf 'BEFORE\\n\\033[?1049hHIDDEN-PAINTING\\033[?1049lAFTER\\n'",
-    });
-
-    const out = try journal.read(gpa, "1/out");
-    defer gpa.free(out);
-
-    // What the terminal keeps in scrollback is kept; the rest is not.
-    try std.testing.expect(std.mem.indexOf(u8, out, "BEFORE") != null);
-    try std.testing.expect(std.mem.indexOf(u8, out, "AFTER") != null);
-    try std.testing.expect(std.mem.indexOf(u8, out, "HIDDEN-PAINTING") == null);
-    try std.testing.expect(std.mem.indexOf(u8, out, "1049") == null);
-
-    // A near-empty `out` should be explainable from the metadata alone.
-    const meta = try journal.read(gpa, "1/meta.json");
-    defer gpa.free(meta);
-    try std.testing.expect(std.mem.indexOf(u8, meta, "\"fullscreen\"") != null);
-    try std.testing.expect(std.mem.indexOf(u8, meta, "\"regions\":1") != null);
-}
-
-test "the terminal still sees the full-screen program" {
+test "full-screen output reaches the terminal but not the journal" {
     if (!support.haveZsh()) return error.SkipZigTest;
     const gpa = std.testing.allocator;
 
@@ -50,7 +21,7 @@ test "the terminal still sees the full-screen program" {
 
     try support.setupJournalZsh(gpa, child, &out);
     const from = out.items.len;
-    try child.write("printf '\\033[?1049hHIDDEN-PAINTING\\033[?1049l'\n");
+    try child.write("printf 'BEFORE\\n\\033[?1049hHIDDEN-PAINTING\\033[?1049lAFTER\\n'\n");
     try std.testing.expect(try child.readUntilFrom(gpa, &out, from, support.test_prompt, support.timeout_ms));
     try child.write("exit\n");
     try std.testing.expectEqual(@as(u8, 0), try child.finish(gpa, &out, support.timeout_ms));
@@ -59,6 +30,18 @@ test "the terminal still sees the full-screen program" {
     // as it would without support.tj.
     try std.testing.expect(std.mem.indexOf(u8, out.items, "HIDDEN-PAINTING") != null);
     try std.testing.expect(std.mem.indexOf(u8, out.items, "\x1b[?1049h") != null);
+
+    const recorded = try journal.read(gpa, "1/out");
+    defer gpa.free(recorded);
+    try std.testing.expect(std.mem.indexOf(u8, recorded, "BEFORE") != null);
+    try std.testing.expect(std.mem.indexOf(u8, recorded, "AFTER") != null);
+    try std.testing.expect(std.mem.indexOf(u8, recorded, "HIDDEN-PAINTING") == null);
+    try std.testing.expect(std.mem.indexOf(u8, recorded, "1049") == null);
+
+    const meta = try journal.read(gpa, "1/meta.json");
+    defer gpa.free(meta);
+    try std.testing.expect(std.mem.indexOf(u8, meta, "\"fullscreen\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, meta, "\"regions\":1") != null);
 }
 
 test "tj cat renders recorded output as readable text" {

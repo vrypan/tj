@@ -2,11 +2,11 @@
 
 const std = @import("std");
 const posix = std.posix;
-const harness = @import("harness.zig");
-const noout = @import("noout.zig");
-const plain = @import("plain.zig");
-const report = @import("report.zig");
-const journal_name = @import("journal_name.zig");
+const harness = @import("../harness.zig");
+const noout = @import("../noout.zig");
+const plain = @import("../plain.zig");
+const report = @import("../report.zig");
+const journal_name = @import("../journal_name.zig");
 
 const options = @import("build_options");
 const tj = options.tj_exe;
@@ -145,15 +145,16 @@ test "a malformed reference and a missing one are told apart" {
     const home = try journal.homeArg(gpa);
     defer gpa.free(home);
 
-    // A valid interaction name that has not been assigned.
-    var bad = try support.run(gpa, &.{ "--home", home, "resolve", "@nope" }, 24, 80);
+    var bad = try support.run(gpa, &.{ "--home", home, "resolve", "@0" }, 24, 80);
     defer bad.out.deinit(gpa);
-    try std.testing.expectEqual(@as(u8, 2), bad.code);
+    try std.testing.expectEqual(@as(u8, 1), bad.code);
+    try std.testing.expect(std.mem.indexOf(u8, bad.out.items, "tj: not a journal reference") != null);
 
     // Well formed, but there is no interaction 999.
     var missing = try support.run(gpa, &.{ "--home", home, "resolve", "@999/out" }, 24, 80);
     defer missing.out.deinit(gpa);
     try std.testing.expectEqual(@as(u8, 2), missing.code);
+    try std.testing.expect(std.mem.indexOf(u8, missing.out.items, "tj: no such entry") != null);
 }
 
 test "names tags pins and tagged history use journal-local annotations" {
@@ -1157,7 +1158,6 @@ test "command substitutions resolve entry paths" {
     try support.recordJournal(gpa, &journal, &.{
         "printf 'alpha-marker\\n'",
         "cat \"$(tj @1/out)\"",
-        "cat \"$(tj @1/out)\"",
         "cat \"$(tj @-/out)\"",
         "test -d \"$(tj @1)\" && printf 'directory-marker\\n'",
         "grep alpha-marker < \"$(tj @1/out)\" | cat",
@@ -1171,27 +1171,23 @@ test "command substitutions resolve entry paths" {
     defer gpa.free(second_out);
     try std.testing.expect(std.mem.indexOf(u8, second_out, "alpha-marker") != null);
 
-    const explicit_out = try journal.read(gpa, "3/out");
-    defer gpa.free(explicit_out);
-    try std.testing.expect(std.mem.indexOf(u8, explicit_out, "alpha-marker") != null);
-
-    const previous_out = try journal.read(gpa, "4/out");
+    const previous_out = try journal.read(gpa, "3/out");
     defer gpa.free(previous_out);
     try std.testing.expect(std.mem.indexOf(u8, previous_out, "alpha-marker") != null);
 
-    const directory_out = try journal.read(gpa, "5/out");
+    const directory_out = try journal.read(gpa, "4/out");
     defer gpa.free(directory_out);
     try std.testing.expect(std.mem.indexOf(u8, directory_out, "directory-marker") != null);
 
-    const pipeline_out = try journal.read(gpa, "6/out");
+    const pipeline_out = try journal.read(gpa, "5/out");
     defer gpa.free(pipeline_out);
     try std.testing.expect(std.mem.indexOf(u8, pipeline_out, "alpha-marker") != null);
 
-    const multiple_out = try journal.read(gpa, "7/out");
+    const multiple_out = try journal.read(gpa, "6/out");
     defer gpa.free(multiple_out);
     try std.testing.expect(std.mem.indexOf(u8, multiple_out, "multiple-marker") != null);
 
-    const alias_out = try journal.read(gpa, "9/out");
+    const alias_out = try journal.read(gpa, "8/out");
     defer gpa.free(alias_out);
     try std.testing.expect(std.mem.indexOf(u8, alias_out, "alpha-marker") != null);
 
@@ -1200,27 +1196,19 @@ test "command substitutions resolve entry paths" {
     defer gpa.free(second_cmd);
     try std.testing.expectEqualStrings("cat \"$(tj @1/out)\"", second_cmd);
 
-    const explicit_cmd = try journal.read(gpa, "3/cmd");
-    defer gpa.free(explicit_cmd);
-    try std.testing.expectEqualStrings("cat \"$(tj @1/out)\"", explicit_cmd);
-
     // Explicit command substitutions do not add expanded metadata.
     const meta = try journal.read(gpa, "2/meta.json");
     defer gpa.free(meta);
     try std.testing.expect(std.mem.indexOf(u8, meta, "expanded_cmd") == null);
 
-    const explicit_meta = try journal.read(gpa, "3/meta.json");
-    defer gpa.free(explicit_meta);
-    try std.testing.expect(std.mem.indexOf(u8, explicit_meta, "expanded_cmd") == null);
-
-    const alias_cmd = try journal.read(gpa, "9/cmd");
+    const alias_cmd = try journal.read(gpa, "8/cmd");
     defer gpa.free(alias_cmd);
     try std.testing.expectEqualStrings("tj_show \"$(tj @1/out)\"", alias_cmd);
-    const alias_meta = try journal.read(gpa, "9/meta.json");
+    const alias_meta = try journal.read(gpa, "8/meta.json");
     defer gpa.free(alias_meta);
     try std.testing.expect(std.mem.indexOf(u8, alias_meta, "cat ") != null);
 
-    const leading_zero_out = try journal.read(gpa, "10/out");
+    const leading_zero_out = try journal.read(gpa, "9/out");
     defer gpa.free(leading_zero_out);
     try std.testing.expect(std.mem.indexOf(u8, leading_zero_out, "alpha-marker") != null);
 }
@@ -1317,7 +1305,6 @@ test "quoted references and addresses are left alone" {
         "echo start",
         "echo 'literal @1/out here'",
         "echo user@host",
-        "echo 'literal @1/out here'",
         "echo \"literal @1/out here\"",
         "echo @0 @4294967296 @not-a-reference",
     });
@@ -1330,12 +1317,12 @@ test "quoted references and addresses are left alone" {
     defer gpa.free(address);
     try std.testing.expect(std.mem.indexOf(u8, address, "user@host") != null);
 
-    const malformed = try journal.read(gpa, "6/out");
+    const malformed = try journal.read(gpa, "5/out");
     defer gpa.free(malformed);
     try std.testing.expect(std.mem.indexOf(u8, malformed, "@0 @4294967296 @not-a-reference") != null);
 
     // None of these lines contains an eligible unquoted shell-word reference.
-    for ([_][]const u8{ "2/meta.json", "3/meta.json", "4/meta.json", "5/meta.json", "6/meta.json" }) |path| {
+    for ([_][]const u8{ "2/meta.json", "3/meta.json", "4/meta.json", "5/meta.json" }) |path| {
         const meta = try journal.read(gpa, path);
         defer gpa.free(meta);
         try std.testing.expect(std.mem.indexOf(u8, meta, "expanded_cmd") == null);

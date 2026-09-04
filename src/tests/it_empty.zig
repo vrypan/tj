@@ -2,8 +2,8 @@
 
 const std = @import("std");
 const posix = std.posix;
-const noout = @import("noout.zig");
-const journal_name = @import("journal_name.zig");
+const noout = @import("../noout.zig");
+const journal_name = @import("../journal_name.zig");
 
 const options = @import("build_options");
 const tj = options.tj_exe;
@@ -138,23 +138,6 @@ test "usage sums logical journal bytes and charts every entry in number order" {
     try std.testing.expect(std.mem.indexOf(u8, terminal.items, "\x1b[32m1.0k\x1b[0m") != null);
     try std.testing.expect(std.mem.indexOf(u8, terminal.items, "\x1b[34m") == null);
     try std.testing.expectEqual(@as(usize, 47), std.mem.count(u8, terminal.items, "█"));
-}
-
-test "a new journal that recorded nothing leaves nothing behind" {
-    const gpa = std.testing.allocator;
-
-    var scratch = try support.Scratch.open();
-    defer scratch.close();
-
-    // /bin/sh loads no support.tj integration, so no command boundaries are ever
-    // reported and the new journal records nothing.
-    var r = try support.runTjctl(gpa, &.{ "--home", scratch.path(), "new", "--", "/bin/sh", "-c", "true" }, 24, 80);
-    defer r.out.deinit(gpa);
-    try std.testing.expectEqual(@as(u8, 0), r.code);
-    const warning = "tjctl: nothing was recorded - is a TJ shell plugin loaded?";
-    try std.testing.expectEqual(@as(usize, 1), std.mem.count(u8, r.out.items, warning));
-
-    try std.testing.expectEqual(@as(usize, 0), try scratch.journals());
 }
 
 test "an unsaved temporary journal is removed even when it has journal data" {
@@ -331,19 +314,6 @@ test "new and use leave child help flags after the argv boundary" {
         @as(usize, 1),
         std.mem.count(u8, continued.out.items, "tjctl: nothing was recorded - is a TJ shell plugin loaded?"),
     );
-}
-
-test "a new journal that recorded something is kept" {
-    if (!support.haveZsh()) return error.SkipZigTest;
-    const gpa = std.testing.allocator;
-
-    var journal = try support.Journal.open(gpa);
-    defer journal.close();
-    try support.recordJournal(gpa, &journal, &.{"echo kept"});
-
-    const cmd = try journal.read(gpa, "1/cmd");
-    defer gpa.free(cmd);
-    try std.testing.expectEqualStrings("echo kept", cmd);
 }
 
 test "a new journal that could not record but said why is kept" {

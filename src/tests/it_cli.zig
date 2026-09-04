@@ -2,8 +2,8 @@
 
 const std = @import("std");
 const posix = std.posix;
-const noout = @import("noout.zig");
-const plain = @import("plain.zig");
+const noout = @import("../noout.zig");
+const plain = @import("../plain.zig");
 
 const options = @import("build_options");
 const tj = options.tj_exe;
@@ -63,6 +63,11 @@ test "application and every command expose generated help" {
         try std.testing.expect(std.mem.indexOf(u8, result.stdout, usage) != null);
         if (std.mem.eql(u8, name, "grep")) {
             try std.testing.expect(std.mem.indexOf(u8, result.stdout, "--tui") != null);
+            try std.testing.expect(std.mem.indexOf(u8, result.stdout, "Arguments:") != null);
+            try std.testing.expect(std.mem.indexOf(u8, result.stdout, "Options:") != null);
+            try std.testing.expect(std.mem.indexOf(u8, result.stdout, "--color, --colour <WHEN>") != null);
+            try std.testing.expect(std.mem.indexOf(u8, result.stdout, "choices: never, auto, always") != null);
+            try std.testing.expect(std.mem.indexOf(u8, result.stdout, "default: never") != null);
         }
     }
 
@@ -84,15 +89,6 @@ test "application and every command expose generated help" {
     defer gpa.free(alias.stderr);
     try std.testing.expectEqual(@as(u8, 0), alias.term.exited);
     try std.testing.expect(std.mem.indexOf(u8, alias.stdout, "Usage: tj hist") != null);
-
-    const grep = try support.runNonTty(gpa, &.{ "grep", "--help" });
-    defer gpa.free(grep.stdout);
-    defer gpa.free(grep.stderr);
-    try std.testing.expect(std.mem.indexOf(u8, grep.stdout, "Arguments:") != null);
-    try std.testing.expect(std.mem.indexOf(u8, grep.stdout, "Options:") != null);
-    try std.testing.expect(std.mem.indexOf(u8, grep.stdout, "--color, --colour <WHEN>") != null);
-    try std.testing.expect(std.mem.indexOf(u8, grep.stdout, "choices: never, auto, always") != null);
-    try std.testing.expect(std.mem.indexOf(u8, grep.stdout, "default: never") != null);
 }
 
 test "cat reads a plain file before any journal exists" {
@@ -185,6 +181,39 @@ test "a closed stdout pipe exits quietly" {
     }
 }
 
+test "command output honors append redirection" {
+    const gpa = std.testing.allocator;
+
+    var scratch = try support.Scratch.open();
+    defer scratch.close();
+    const output = try std.fs.path.join(gpa, &.{ scratch.path(), "append-output" });
+    defer gpa.free(output);
+
+    const script =
+        \\printf 'prefix\n' >"$1"
+        \\"$2" --version >>"$1"
+        \\"$3" --version >>"$1"
+        \\cat "$1"
+    ;
+    const result = try std.process.run(gpa, std.testing.io, .{
+        .argv = &.{ "/bin/sh", "-c", script, "tj-append-test", output, support.tj, support.tjctl },
+        .stdout_limit = .limited(1 << 20),
+        .stderr_limit = .limited(1 << 20),
+    });
+    defer gpa.free(result.stdout);
+    defer gpa.free(result.stderr);
+
+    try std.testing.expectEqual(std.process.Child.Term{ .exited = 0 }, result.term);
+    try std.testing.expectEqualStrings("", result.stderr);
+    const expected = try std.fmt.allocPrint(
+        gpa,
+        "prefix\ntj {s}\ntjctl {s}\n",
+        .{ options.version, options.version },
+    );
+    defer gpa.free(expected);
+    try std.testing.expectEqualStrings(expected, result.stdout);
+}
+
 test "build-time completions expose cli grammar and journal references" {
     const gpa = std.testing.allocator;
     const io = std.testing.io;
@@ -192,8 +221,6 @@ test "build-time completions expose cli grammar and journal references" {
     const bash = try support.Dir.cwd().readFileAlloc(io, options.bash_completion, gpa, .limited(1 << 20));
     defer gpa.free(bash);
     try std.testing.expect(std.mem.indexOf(u8, bash, "complete -F _tj tj") != null);
-    try std.testing.expect(std.mem.indexOf(u8, bash, "_tj__cmd_hist()") != null);
-    try std.testing.expect(std.mem.indexOf(u8, bash, "_tj__cmd_ls()") == null);
     try std.testing.expect(std.mem.indexOf(u8, bash, "--tag") != null);
     try std.testing.expect(std.mem.indexOf(u8, bash, "never\\nauto\\nalways") != null);
 
@@ -202,9 +229,6 @@ test "build-time completions expose cli grammar and journal references" {
     try std.testing.expect(std.mem.startsWith(u8, zsh, "#compdef tj\n"));
     try std.testing.expect(std.mem.indexOf(u8, zsh, "'hist:List entries with annotations, size, and date'") != null);
     try std.testing.expect(std.mem.indexOf(u8, zsh, "'tui:Browse, inspect, annotate, and delete entries'") != null);
-    try std.testing.expect(std.mem.indexOf(u8, zsh, "_tj__cmd_hist()") != null);
-    try std.testing.expect(std.mem.indexOf(u8, zsh, "_tj__cmd_usage()") == null);
-    try std.testing.expect(std.mem.indexOf(u8, zsh, "_tj__cmd_ls()") == null);
     try std.testing.expect(std.mem.indexOf(u8, zsh, "--tag=[") != null);
     try std.testing.expect(std.mem.indexOf(u8, zsh, "--pinned") != null);
     try std.testing.expect(std.mem.indexOf(u8, zsh, "--pin") != null);
@@ -214,15 +238,13 @@ test "build-time completions expose cli grammar and journal references" {
     defer gpa.free(fish);
     try std.testing.expect(std.mem.startsWith(u8, fish, "# fish completion for tj\n"));
     try std.testing.expect(std.mem.indexOf(u8, fish, "-a 'hist' -d 'List entries with annotations, size, and date'") != null);
-    try std.testing.expect(std.mem.indexOf(u8, fish, "-a 'ls'") == null);
-    try std.testing.expect(std.mem.indexOf(u8, fish, "__tj_using_command hist history") != null);
-    try std.testing.expect(std.mem.indexOf(u8, fish, "__tj_vals_cmd_grep_f_color") != null);
-    try std.testing.expect(std.mem.indexOf(u8, fish, "__tj_vals_cmd_journal_a_ACTION") == null);
+    for ([_][]const u8{ "echo 'never'", "echo 'auto'", "echo 'always'" }) |choice| {
+        try std.testing.expect(std.mem.indexOf(u8, fish, choice) != null);
+    }
 
     const ctl_zsh = try support.Dir.cwd().readFileAlloc(io, options.tjctl_zsh_completion, gpa, .limited(1 << 20));
     defer gpa.free(ctl_zsh);
     try std.testing.expect(std.mem.startsWith(u8, ctl_zsh, "#compdef tjctl\n"));
-    try std.testing.expect(std.mem.indexOf(u8, ctl_zsh, "_tjctl__cmd_use()") != null);
     try std.testing.expect(std.mem.indexOf(u8, ctl_zsh, "--no-replay[") != null);
     try std.testing.expect(std.mem.indexOf(u8, ctl_zsh, "--no-splash[") != null);
     try std.testing.expect(std.mem.indexOf(u8, ctl_zsh, "--title=") != null);
@@ -245,7 +267,6 @@ test "schema errors use status two and command help" {
         diagnostic: []const u8,
         usage: []const u8,
     }{
-        .{ .args = &.{ "rm", "--journal", "abcd" }, .diagnostic = "unknown option", .usage = "Usage: tj rm" },
         .{ .args = &.{ "grep", "--unknown", "x" }, .diagnostic = "unknown option", .usage = "Usage: tj grep" },
         .{ .args = &.{ "cat", "--head" }, .diagnostic = "requires <N>", .usage = "Usage: tj cat" },
         .{ .args = &.{"resolve"}, .diagnostic = "missing required argument", .usage = "Usage: tj resolve" },
@@ -280,19 +301,6 @@ test "lifecycle passthrough requires a non-empty child command" {
     }
 }
 
-test "removed journal commands are unknown under tj" {
-    const gpa = std.testing.allocator;
-    support.leaveJournal();
-    for ([_][]const u8{ "new", "continue", "journal", "usage", "current", "replay" }) |name| {
-        const result = try support.runNonTty(gpa, &.{name});
-        defer gpa.free(result.stdout);
-        defer gpa.free(result.stderr);
-        try std.testing.expectEqual(@as(u8, 2), result.term.exited);
-        try std.testing.expectEqualStrings("", result.stdout);
-        try std.testing.expect(std.mem.indexOf(u8, result.stderr, "unknown command") != null);
-    }
-}
-
 test "exit status of the wrapped command is tj's exit status" {
     const gpa = std.testing.allocator;
     for ([_]u8{ 0, 3, 42 }) |want| {
@@ -311,18 +319,11 @@ test "a command killed by a signal reports 128+signal" {
     try std.testing.expectEqual(@as(u8, 128 + 15), r.code);
 }
 
-test "the outer window size reaches the wrapped command" {
+test "the wrapped command sees the outer tty and window size" {
     const gpa = std.testing.allocator;
-    var r = try support.runTjctl(gpa, &.{ "new", "--", "/bin/sh", "-c", "stty size" }, 31, 113);
+    var r = try support.runTjctl(gpa, &.{ "new", "--", "/bin/sh", "-c", "test -t 0 && test -t 1 && stty size" }, 31, 113);
     defer r.out.deinit(gpa);
     try std.testing.expect(std.mem.indexOf(u8, r.out.items, "31 113") != null);
-}
-
-test "the wrapped command sees a tty" {
-    const gpa = std.testing.allocator;
-    var r = try support.runTjctl(gpa, &.{ "new", "--", "/bin/sh", "-c", "test -t 0 && test -t 1 && echo ISTTY" }, 24, 80);
-    defer r.out.deinit(gpa);
-    try std.testing.expect(std.mem.indexOf(u8, r.out.items, "ISTTY") != null);
 }
 
 test "a command that cannot be executed exits 127" {

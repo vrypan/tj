@@ -1,15 +1,15 @@
 //! Integration tests. Each suite lives in its own file; this root exists so
 //! the build runs them all from one test binary.
 
-test {
-    _ = @import("it_cli.zig");
-    _ = @import("it_recording.zig");
-    _ = @import("it_namespace.zig");
-    _ = @import("it_fullscreen.zig");
-    _ = @import("it_empty.zig");
-    _ = @import("it_resources.zig");
-    _ = @import("it_contrib.zig");
-    _ = @import("it_replay.zig");
-    _ = @import("it_tui.zig");
-    _ = @import("it_fish.zig");
+comptime {
+    _ = @import("tests/it_cli.zig");
+    _ = @import("tests/it_recording.zig");
+    _ = @import("tests/it_namespace.zig");
+    _ = @import("tests/it_fullscreen.zig");
+    _ = @import("tests/it_empty.zig");
+    _ = @import("tests/it_resources.zig");
+    _ = @import("tests/it_contrib.zig");
+    _ = @import("tests/it_replay.zig");
+    _ = @import("tests/it_tui.zig");
+    _ = @import("tests/it_fish.zig");
 }

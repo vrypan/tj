@@ -117,24 +117,31 @@ pub fn build(b: *std.Build) void {
     integration_mod.addImport("zooi", zooi.module("zooi"));
     integration_mod.addOptions("build_options", integration_options);
 
-    const unit_tests = b.addTest(.{ .root_module = exe_mod });
-    const title_test_mod = b.createModule(.{
-        .root_source_file = b.path("src/terminal_title.zig"),
-        .target = target,
-        .optimize = optimize,
-        .link_libc = true,
+    // Use one explicit root for both executables. This exercises every inline
+    // unit test once, including modules only reachable from tjctl.
+    const unit_test_mod = applicationModule(b, zecli, "src/unit_test.zig", target, optimize, false);
+    unit_test_mod.addImport("zooi", zooi.module("zooi"));
+    unit_test_mod.addOptions("build_options", version_options);
+    const unit_tests = b.addTest(.{ .root_module = unit_test_mod });
+
+    // Imported production modules contain inline unit tests. Filter the PTY
+    // binaries to their own filenames so those unit tests are not run again.
+    const integration_tests = b.addTest(.{
+        .root_module = integration_mod,
+        .filters = &.{"it_"},
     });
-    const title_unit_tests = b.addTest(.{ .root_module = title_test_mod });
-    const integration_tests = b.addTest(.{ .root_module = integration_mod });
 
     const splash_integration_mod = b.createModule(.{
-        .root_source_file = b.path("src/it_splash.zig"),
+        .root_source_file = b.path("src/splash_test.zig"),
         .target = target,
         .optimize = optimize,
         .link_libc = true,
     });
     splash_integration_mod.addOptions("build_options", integration_options);
-    const splash_integration_tests = b.addTest(.{ .root_module = splash_integration_mod });
+    const splash_integration_tests = b.addTest(.{
+        .root_module = splash_integration_mod,
+        .filters = &.{"it_splash"},
+    });
 
     // The integration fixture changes process-wide environment variables and
     // uses PTYs. Run its test binary directly so Zig's terminal runner invokes
@@ -153,7 +160,6 @@ pub fn build(b: *std.Build) void {
 
     const test_step = b.step("test", "Run tests");
     test_step.dependOn(&b.addRunArtifact(unit_tests).step);
-    test_step.dependOn(&b.addRunArtifact(title_unit_tests).step);
     test_step.dependOn(&run_integration_tests.step);
     test_step.dependOn(&run_splash_integration_tests.step);
     for (completion_runs) |generate| test_step.dependOn(&generate.step);
