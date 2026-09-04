@@ -144,6 +144,19 @@ test "journal writers manage terminal titles without changing recorded bytes" {
     try std.testing.expect(std.mem.indexOf(u8, blinking_out.items, "● blinking-title") != null);
     try std.testing.expect(std.mem.indexOf(u8, blinking_out.items, "○ blinking-title") != null);
 
+    const fragmented = try support.spawnTjctlWithSplash(gpa, &.{
+        support.tjctl,                                                            "--home", scratch.path(), "new", "fragmented-title", "--no-splash", "--title-blink=20", "--", "/bin/sh", "-c",
+        "printf '\\033]777;PART'; sleep 0.08; printf 'IAL\\033\\\\'; sleep 0.03",
+    }, 24, 80);
+    var fragmented_out: std.ArrayList(u8) = .empty;
+    defer fragmented_out.deinit(gpa);
+    try std.testing.expectEqual(@as(u8, 0), try fragmented.finish(gpa, &fragmented_out, support.timeout_ms));
+    const application_end = std.mem.indexOf(u8, fragmented_out.items, "\x1b]777;PARTIAL\x1b\\") orelse
+        return error.TestUnexpectedResult;
+    const deferred_blink = std.mem.indexOfPos(u8, fragmented_out.items, application_end, "○ fragmented-title") orelse
+        return error.TestUnexpectedResult;
+    try std.testing.expect(deferred_blink > application_end);
+
     const static = try support.spawnTjctlWithSplash(gpa, &.{
         support.tjctl, "--home", scratch.path(), "new", "static-title", "--no-splash", "--title-blink=0", "--", "/bin/sh", "-c", "printf '\\033]2;application title\\007'",
     }, 24, 80);

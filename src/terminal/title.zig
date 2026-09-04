@@ -43,6 +43,71 @@ pub fn writeFallback(fd: sys.Fd, journal: []const u8) void {
 const State = enum { ground, escape, probe, title, pass };
 pub const Mode = enum { pass, omit, capture };
 
+const BoundaryState = enum {
+    ground,
+    escape,
+    csi,
+    osc,
+    osc_escape,
+    control_string,
+    control_string_escape,
+};
+
+/// Tracks whether a complete title sequence can be inserted without splitting
+/// a control sequence emitted by the child across PTY reads.
+const ControlBoundary = struct {
+    state: BoundaryState = .ground,
+
+    fn safe(self: *const ControlBoundary) bool {
+        return self.state == .ground;
+    }
+
+    fn feed(self: *ControlBoundary, bytes: []const u8) void {
+        for (bytes) |byte| self.feedByte(byte);
+    }
+
+    fn feedByte(self: *ControlBoundary, byte: u8) void {
+        if (self.state != .ground and (byte == 0x18 or byte == 0x1a)) {
+            self.state = .ground;
+            return;
+        }
+        if (byte == 0x9c) {
+            self.state = .ground;
+            return;
+        }
+
+        self.state = switch (self.state) {
+            .ground => switch (byte) {
+                esc => .escape,
+                0x9b => .csi,
+                0x9d => .osc,
+                0x90, 0x98, 0x9e, 0x9f => .control_string,
+                else => .ground,
+            },
+            .escape => switch (byte) {
+                '[' => .csi,
+                ']' => .osc,
+                'P', 'X', '^', '_' => .control_string,
+                0x20...0x2f => .escape,
+                else => .ground,
+            },
+            .csi => switch (byte) {
+                esc => .escape,
+                0x40...0x7e => .ground,
+                else => .csi,
+            },
+            .osc => switch (byte) {
+                esc => .osc_escape,
+                bel => .ground,
+                else => .osc,
+            },
+            .osc_escape => if (byte == '\\') .ground else if (byte == esc) .osc_escape else .osc,
+            .control_string => if (byte == esc) .control_string_escape else .control_string,
+            .control_string_escape => if (byte == '\\') .ground else if (byte == esc) .control_string_escape else .control_string,
+        };
+    }
+};
+
 pub const Decorator = struct {
     mode: Mode = .pass,
     state: State = .ground,
@@ -232,6 +297,7 @@ pub const Blinker = struct {
     next_tick_ms: i64,
     filled: bool = true,
     parser: Decorator = .{ .mode = .capture },
+    boundary: ControlBoundary = .{},
     window: [max_title]u8 = undefined,
     window_len: usize = 0,
     icon: [max_title]u8 = undefined,
@@ -268,6 +334,7 @@ pub const Blinker = struct {
 
     /// Called by the capture parser for bytes that are not title sequences.
     pub fn emit(self: *Blinker, bytes: []const u8) !void {
+        self.boundary.feed(bytes);
         try sys.writeAll(self.fd, bytes);
     }
 
@@ -286,12 +353,16 @@ pub const Blinker = struct {
     }
 
     pub fn timeout(self: *const Blinker, now_ms: i64) c_int {
-        if (now_ms >= self.next_tick_ms) return 0;
+        if (now_ms >= self.next_tick_ms) {
+            if (!self.boundary.safe()) return @intCast(self.interval_ms);
+            return 0;
+        }
         return @intCast(self.next_tick_ms - now_ms);
     }
 
     pub fn tick(self: *Blinker, now_ms: i64) !void {
         if (now_ms < self.next_tick_ms) return;
+        if (!self.boundary.safe()) return;
         self.filled = !self.filled;
         self.next_tick_ms = now_ms + @as(i64, self.interval_ms);
 
@@ -323,6 +394,28 @@ pub const Blinker = struct {
 
 fn isTitleSelector(byte: u8) bool {
     return byte == '0' or byte == '1' or byte == '2';
+}
+
+test "title insertion waits for split terminal control sequences" {
+    var boundary: ControlBoundary = .{};
+    for ([_]struct { first: []const u8, second: []const u8 }{
+        .{ .first = "\x1b[31", .second = "m" },
+        .{ .first = "\x1b]777;partial", .second = "\x1b\\" },
+        .{ .first = "\x1bPpayload", .second = "\x1b\\" },
+        .{ .first = "\x9b31", .second = "m" },
+    }) |sequence| {
+        boundary.feed(sequence.first);
+        try std.testing.expect(!boundary.safe());
+        boundary.feed(sequence.second);
+        try std.testing.expect(boundary.safe());
+    }
+
+    boundary.feed("\x1b]777;partial");
+    var blinker = Blinker.init(-1, 100, 0);
+    blinker.boundary = boundary;
+    try std.testing.expectEqual(@as(c_int, 100), blinker.timeout(100));
+    try blinker.tick(100);
+    try std.testing.expectEqual(@as(i64, 100), blinker.next_tick_ms);
 }
 
 const TestSink = struct {
