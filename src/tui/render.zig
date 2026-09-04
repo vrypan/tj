@@ -38,8 +38,9 @@ pub fn draw(journal: []const u8, model: anytype, page: *const page_module.Page, 
 
     for (page.rows) |*row| {
         if (row.index < page.range.start or row.index >= page.range.end) continue;
-        const screen_row = row.index - page.range.start + 2;
-        if (screen_row > model.listRows()) continue;
+        const content_row = row.index - page.range.start;
+        if (content_row >= model.listRows()) continue;
+        const screen_row = content_row + 2;
         const focused = row.index == model.viewport.cursor;
         const picked = model.isSelected(row.index);
         const base_style: zooi.Style = if (focused and picked)
@@ -318,6 +319,33 @@ test "entry render leaves a blank row after the bold header" {
     try std.testing.expectEqualStrings(" ", zooi.testing.inspectCell(&screen_and_fd[0], 1, 0).?.text);
     try std.testing.expect(zooi.testing.inspectCell(&screen_and_fd[0], 2, 39).?.style.reverse);
     try std.testing.expectEqual(@as(?u8, 1), zooi.testing.inspectCell(&screen_and_fd[0], 3, 3).?.style.fg.?.ansi);
+}
+
+test "entry render includes the last row at minimum terminal height" {
+    const gpa = std.testing.allocator;
+    var selected = try std.DynamicBitSetUnmanaged.initEmpty(gpa, 1);
+    defer selected.deinit(gpa);
+    var model: TestModel = .{
+        .numbers = &.{42},
+        .count = 1,
+        .size = .{ .rows = 4, .cols = 32 },
+        .selected = selected,
+    };
+    var rows = [_]page_module.Row{.{
+        .index = 0,
+        .info = .{ .number = 42, .exit_code = 0, .command = "visible", .out_bytes = 0, .out_present = true },
+        .command = @constCast("visible"),
+        .annotation = null,
+    }};
+    const page: page_module.Page = .{ .range = .{ .start = 0, .end = 1 }, .rows = &rows, .valid = true };
+
+    var screen_and_fd = try testScreen(4, 32);
+    defer _ = std.posix.system.close(screen_and_fd[1]);
+    defer screen_and_fd[0].deinit();
+    try draw("work", &model, &page, &screen_and_fd[0]);
+
+    try std.testing.expectEqualStrings("4", zooi.testing.inspectCell(&screen_and_fd[0], 2, 5).?.text);
+    try std.testing.expect(zooi.testing.inspectCell(&screen_and_fd[0], 2, 31).?.style.reverse);
 }
 
 test "detail render leaves a blank row after the bold header" {
