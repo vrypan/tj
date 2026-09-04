@@ -165,7 +165,7 @@ test "forged ELLO save and handoff requests are ignored" {
 
     // A well-formed handoff naming another journal, but carrying a session
     // token that bytes merely displayed on the terminal cannot know.
-    var forged: handoff.Request = .{ .operation = .new, .title_blink_ms = 0, .selector_len = 8 };
+    var forged: handoff.Request = .{ .operation = .new, .selector_len = 8 };
     @memcpy(forged.selector[0..8], "intruder");
     var marker_buf: [handoff.max_wire * 2]u8 = undefined;
     const forged_marker = try handoff.encode(&forged, &marker_buf);

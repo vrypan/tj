@@ -51,7 +51,10 @@ pub fn run(
             };
             if (insideWriter()) {
                 if (!sys.envPresent("TJ_SHELL_HANDOFF")) return error.UseShellHandoff;
-                return emitHandoff(gpa, io, .new, parsed, root_home_explicit, child, title, title_blink_ms, opts, out);
+                return emitHandoff(gpa, io, .{
+                    .operation = .new,
+                    .temporary = parsed.enabled("temp"),
+                }, parsed, root_home_explicit, child, out);
             }
             return (try proxy.run(gpa, io, opts)).exit_code;
         },
@@ -69,7 +72,11 @@ pub fn run(
             };
             if (insideWriter()) {
                 if (!sys.envPresent("TJ_SHELL_HANDOFF")) return error.UseShellHandoff;
-                return emitHandoff(gpa, io, .use, parsed, root_home_explicit, child, title, title_blink_ms, opts, out);
+                return emitHandoff(gpa, io, .{
+                    .operation = .use,
+                    .selector = parsed.positionals.items[0],
+                    .replay_before_start = !parsed.enabled("no-replay"),
+                }, parsed, root_home_explicit, child, out);
             }
             return (try proxy.run(gpa, io, opts)).exit_code;
         },
@@ -100,37 +107,51 @@ fn insideWriter() bool {
     return sys.env("TJ_JOURNAL") != null;
 }
 
+/// A handoff switches which journal the running writer records into, and
+/// nothing else. It carries no proxy configuration, so `home`, the title
+/// lifecycle, and the scanner mode all stay as the live writer set them.
+const HandoffSpec = struct {
+    operation: handoff.Operation,
+    /// `use`: the required target selector. `new`: an optional requested name,
+    /// null for a generated one.
+    selector: ?[]const u8 = null,
+    temporary: bool = false,
+    replay_before_start: bool = false,
+};
+
 fn emitHandoff(
     gpa: std.mem.Allocator,
     io: Io,
-    operation: handoff.Operation,
+    spec: HandoffSpec,
     parsed: *const zecli.Parsed,
     root_home_explicit: bool,
     child: []const [:0]const u8,
-    title: []const u8,
-    title_blink_ms: u32,
-    opts: proxy.Options,
     out: *Io.Writer,
 ) !u8 {
     if (sys.env("TMUX") != null or sys.env("STY") != null) return error.InsideMultiplexer;
-    if (root_home_explicit or parsed.present("home")) return error.InsideJournalHandoffOptions;
-    if (child.len != 0) return error.InsideJournalHandoffOptions;
-    const requested_selector = switch (opts.journal) {
-        .new => |name| name orelse "",
-        .existing => |name| name,
-    };
-    if (operation == .use) if (sys.env("TJ_JOURNAL")) |current| {
+    // A handoff cannot reconfigure the writer, only move it. Options that
+    // would only take effect when starting a fresh writer are refused here
+    // rather than silently ignored.
+    if (root_home_explicit or parsed.present("home") or child.len != 0) return error.InsideJournalHandoffOptions;
+    for ([_][]const u8{ "keep-osc", "title", "title-blink", "no-splash" }) |flag| {
+        if (parsed.present(flag)) return error.InsideJournalHandoffOptions;
+    }
+    const requested_selector = spec.selector orelse "";
+    if (spec.operation == .use) if (sys.env("TJ_JOURNAL")) |current| {
         if (std.mem.eql(u8, requested_selector, current) or std.mem.endsWith(u8, current, requested_selector)) return error.CurrentJournal;
     };
+
+    // A handoff refuses an explicit `--home`, so the target resolves against
+    // the inherited root the live writer already uses (`TJ_HOME`, else ~/.tj).
     // Reject a bad, ambiguous, or locked target while the source shell is
     // still alive. The proxy repeats acquisition after it owns the handoff;
     // this short preflight keeps a failed request from terminating the source.
-    var target = switch (opts.journal) {
+    var target = switch (spec.operation) {
         // This is only name selection and lock validation. Do not mark the
         // short-lived preflight journal temporary: closing it must leave the
         // target directory available for the proxy that owns the handoff.
-        .new => |name| try store.Store.createNamedJournal(gpa, io, opts.home, name, false),
-        .existing => |selector| try store.Store.continueJournal(gpa, io, opts.home, selector),
+        .new => try store.Store.createNamedJournal(gpa, io, null, spec.selector, false),
+        .use => try store.Store.continueJournal(gpa, io, null, requested_selector),
     };
     var preflight_open = true;
     errdefer if (preflight_open) target.close();
@@ -142,23 +163,18 @@ fn emitHandoff(
     target.close();
     preflight_open = false;
 
-    if (title.len > handoff.max_field or selected.len > handoff.max_field) return error.RequestTooLarge;
+    if (selected.len > handoff.max_field) return error.RequestTooLarge;
     // The proxy only honours requests carrying the writer's session token,
     // which reaches `tjctl` through the inherited environment.
     const session = sys.env("TJ_SESSION_ID") orelse return error.NotInJournal;
     if (session.len != handoff.session_len) return error.NotInJournal;
     var request: handoff.Request = .{
-        .operation = operation,
-        .keep_osc = opts.keep_osc,
-        .replay_before_start = opts.replay_before_start,
-        .splash = opts.splash,
-        .temporary = opts.temporary,
-        .title_blink_ms = title_blink_ms,
-        .title_len = title.len,
+        .operation = spec.operation,
+        .temporary = spec.temporary,
+        .replay_before_start = spec.replay_before_start,
         .selector_len = selected.len,
     };
     @memcpy(&request.session, session);
-    @memcpy(request.title[0..title.len], title);
     @memcpy(request.selector[0..selected.len], selected);
     var marker: [handoff.max_wire * 2]u8 = undefined;
     const text = try handoff.encode(&request, &marker);
@@ -170,6 +186,8 @@ fn emitHandoff(
     const handoff_fd_text = sys.env("TJ_HANDOFF_FD") orelse return error.NotInJournal;
     const handoff_fd: sys.Fd = std.fmt.parseInt(sys.Fd, handoff_fd_text, 10) catch return error.NotInJournal;
     if (try sys.read(handoff_fd, &reply) != 1 or reply[0] != 0) return error.JournalLocked;
+    // Only the journal identity changed; the title lifecycle and every other
+    // proxy setting stay as the live writer established them.
     const fish_syntax = if (sys.env("TJ_SHELL_HANDOFF")) |shell|
         std.mem.eql(u8, shell, "fish")
     else
@@ -178,11 +196,7 @@ fn emitHandoff(
     var next: [16]u8 = undefined;
     const next_text = try std.fmt.bufPrint(&next, "{d}", .{selected_next});
     try writeShellExport(out, "TJ_NEXT", next_text, fish_syntax);
-    try writeShellExport(out, "TJ_TITLE", title, fish_syntax);
-    var blink: [16]u8 = undefined;
-    const blink_text = try std.fmt.bufPrint(&blink, "{d}", .{title_blink_ms});
-    try writeShellExport(out, "TJ_TITLE_BLINK", blink_text, fish_syntax);
-    if (opts.temporary) {
+    if (spec.temporary) {
         try writeShellExport(out, "TJ_TEMPORARY", "1", fish_syntax);
     } else {
         try out.writeAll(if (fish_syntax) "set -e TJ_TEMPORARY\n" else "unset TJ_TEMPORARY\n");
