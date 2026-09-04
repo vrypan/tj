@@ -462,15 +462,27 @@ pub const Store = struct {
     }
 
     fn openResource(self: *Store, current: *Interaction, path: []const u8, mime: []const u8) !void {
+        var already_published = false;
+        for (current.published[0..current.published_count]) |entry| {
+            if (std.mem.eql(u8, entry.path, path)) {
+                already_published = true;
+                break;
+            }
+        }
+        if (!already_published and current.published_count == current.published.len) {
+            return error.TooManyResources;
+        }
+
         if (std.mem.lastIndexOfScalar(u8, path, '/')) |cut| {
             try current.dir.createDirPath(self.io, path[0..cut]);
         }
         const file = try current.dir.createFile(self.io, path, .{ .permissions = file_permissions });
         errdefer file.close(self.io);
+        const entry = try self.recordPublished(current, path, mime);
 
         current.open_region = .{ .resource = .{
             .file = file,
-            .entry = try self.recordPublished(current, path, mime),
+            .entry = entry,
         } };
     }
 
@@ -2209,6 +2221,38 @@ test "region nesting is refused and the first open region wins" {
     var second = try store.journal_dir.openDir(io, "2", .{});
     defer second.close(io);
     try std.testing.expectError(error.FileNotFound, second.openFile(io, "refused", .{}));
+    store.close();
+}
+
+test "exceeding the resource limit leaves no open region or file" {
+    const io = std.testing.io;
+    const gpa = std.testing.allocator;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var root_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const root_len = try tmp.dir.realPath(io, &root_buf);
+
+    var store = try Store.createJournal(gpa, io, root_buf[0..root_len]);
+    store.begin("resource limit", null, null);
+    for (0..max_resources) |index| {
+        var name_buf: [32]u8 = undefined;
+        const name = try std.fmt.bufPrint(&name_buf, "resource-{d}", .{index});
+        store.beginResource(name, "text/plain");
+        store.append("kept");
+        store.endRegion();
+    }
+
+    store.beginResource("rejected", "text/plain");
+    store.append("ordinary output");
+    store.endRegion();
+    store.finish(0);
+
+    const out = try store.journal_dir.readFileAlloc(io, "1/out", gpa, .limited(4096));
+    defer gpa.free(out);
+    try std.testing.expectEqualStrings("kept" ** max_resources ++ "ordinary output", out);
+    var entry = try store.journal_dir.openDir(io, "1", .{});
+    defer entry.close(io);
+    try std.testing.expectError(error.FileNotFound, entry.openFile(io, "rejected", .{}));
     store.close();
 }
 
