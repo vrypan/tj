@@ -193,11 +193,20 @@ Individual published resources cannot be removed separately.
 | `t`, `T` | Add or remove a tag |
 | `n` | Name or rename |
 | `d` | Delete |
+| `e` | Print selected entry IDs to standard output and quit |
 | `r` | Refresh |
 | `q` | Quit |
 
 Pin, tag, untag, and delete apply to every selected entry. With no selection,
 they apply to the focused entry. Naming and details use the focused entry.
+
+`e` requires an explicit selection. It writes the selected entry IDs in
+ascending order as one space-separated line, followed by a newline. This makes
+it useful with another command:
+
+```sh
+tj tui | script
+```
 
 The detail view is a list of selectable logical lines, including its metadata,
 `cwd`, `cmd`, and every output line. Long lines are clipped on screen rather

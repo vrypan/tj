@@ -210,7 +210,7 @@ fn drawFooter(model: anytype, screen: *zooi.Screen) void {
             if (model.status_len != 0) {
                 screen.writeStyled(model.status(), .{ .fg = .{ .ansi = 3 } });
             } else {
-                screen.writeStyled("space toggle  shift+nav range  esc clear  ⏎ details  p pin  t/T tag  n name  d delete  q quit", footer_style);
+                screen.writeStyled("space toggle  shift+nav range  esc clear  ⏎ details  e export  p pin  t/T tag  n name  d delete  q quit", footer_style);
             }
         },
         .delete_confirm => {

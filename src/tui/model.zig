@@ -28,6 +28,7 @@ pub const Effect = enum {
     begin_delete,
     delete,
     delete_unpinned,
+    export_selection,
     open_detail,
     close_detail,
     choose_detail,
@@ -59,6 +60,7 @@ pub const Model = struct {
     detail_range_base: std.DynamicBitSetUnmanaged = .{},
     detail_range_anchor: ?usize = null,
     detail_chosen: bool = false,
+    selection_exported: bool = false,
     quit: bool = false,
 
     pub fn deinit(self: *Model, gpa: std.mem.Allocator) void {
@@ -353,6 +355,13 @@ fn normalKey(model: *Model, key: zooi.Key) Effect {
             },
             'n' => if (model.count != 0) return .begin_name,
             'd' => if (model.count != 0) return .begin_delete,
+            'e' => {
+                if (model.selectedCount() == 0) {
+                    model.setStatus("select entries first", .{});
+                } else {
+                    return .export_selection;
+                }
+            },
             else => {},
         },
         .enter => if (model.count != 0) return .open_detail,
@@ -574,6 +583,24 @@ test "browser selects individual entries and inclusive ranges" {
     const focused = try model.actionNumbers(gpa);
     defer gpa.free(focused);
     try std.testing.expectEqualSlices(u32, &.{10}, focused);
+}
+
+test "browser exports only an explicit selection" {
+    const gpa = std.testing.allocator;
+    var model: Model = .{
+        .numbers = try gpa.dupe(u32, &.{ 2, 4, 9 }),
+        .count = 3,
+        .selected = try std.DynamicBitSetUnmanaged.initEmpty(gpa, 3),
+        .range_base = try std.DynamicBitSetUnmanaged.initEmpty(gpa, 3),
+    };
+    defer model.deinit(gpa);
+
+    try std.testing.expectEqual(Effect.none, normalKey(&model, .{ .character = 'e' }));
+    try std.testing.expectEqualStrings("select entries first", model.status());
+
+    model.selected.set(0);
+    model.selected.set(2);
+    try std.testing.expectEqual(Effect.export_selection, normalKey(&model, .{ .character = 'e' }));
 }
 
 test "browser extends selections by pages and to boundaries" {

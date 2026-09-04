@@ -54,6 +54,44 @@ test "zsh widget keeps tui open and inserts its stdout" {
     try std.testing.expectEqual(@as(u8, 0), status);
 }
 
+test "tui exports an explicit selection as space-separated entry numbers" {
+    if (!support.haveZsh()) return error.SkipZigTest;
+    const gpa = std.testing.allocator;
+
+    var journal = try support.Journal.open(gpa);
+    defer journal.close();
+    const child = try support.spawnJournalZsh(gpa, &journal);
+    var transcript: std.ArrayList(u8) = .empty;
+    defer transcript.deinit(gpa);
+    try support.setupJournalZsh(gpa, child, &transcript);
+
+    var from = transcript.items.len;
+    try child.write("echo EXPORT_ONE\n");
+    try std.testing.expect(try child.readUntilFrom(gpa, &transcript, from, support.test_prompt, support.timeout_ms));
+    from = transcript.items.len;
+    try child.write("echo EXPORT_TWO\n");
+    try std.testing.expect(try child.readUntilFrom(gpa, &transcript, from, support.test_prompt, support.timeout_ms));
+    from = transcript.items.len;
+    try child.write("echo EXPORT_THREE\n");
+    try std.testing.expect(try child.readUntilFrom(gpa, &transcript, from, support.test_prompt, support.timeout_ms));
+
+    from = transcript.items.len;
+    try child.write("command \"$TJ\" tui | /bin/sh -c 'IFS= read -r entries; printf \"TUI_EXPORT=<%s>\\n\" \"$entries\"'\n");
+    try std.testing.expect(try child.readUntilFrom(gpa, &transcript, from, "3 entries", support.timeout_ms));
+
+    from = transcript.items.len;
+    try child.write(" \x1b[1;2Ae");
+    try std.testing.expect(try child.readUntilFrom(gpa, &transcript, from, "TUI_EXPORT=<2 3>", support.timeout_ms));
+    try std.testing.expect(try child.readUntilFrom(gpa, &transcript, from, support.test_prompt, support.timeout_ms));
+    const finished = transcript.items[from..];
+    const restored_at = std.mem.lastIndexOf(u8, finished, "\x1b[?1049l") orelse return error.TestUnexpectedResult;
+    const exported_at = std.mem.lastIndexOf(u8, finished, "TUI_EXPORT=<2 3>") orelse return error.TestUnexpectedResult;
+    try std.testing.expect(restored_at < exported_at);
+
+    try child.write("exit 0\n");
+    try std.testing.expectEqual(@as(u8, 0), try child.finish(gpa, &transcript, support.timeout_ms));
+}
+
 test "tui shows details, confirms deletion, and shares annotation semantics" {
     if (!support.haveZsh()) return error.SkipZigTest;
     const gpa = std.testing.allocator;

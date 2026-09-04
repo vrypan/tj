@@ -103,6 +103,19 @@ fn runWithFilter(gpa: std.mem.Allocator, io: Io, home: ?[]const u8, allowed_numb
             wrote = true;
         }
     }
+    if (model.selection_exported) try writeSelectedNumbers(&model);
+}
+
+fn writeSelectedNumbers(model: *const Model) !void {
+    var wrote = false;
+    for (model.visibleNumbers(), 0..) |number, index| {
+        if (!model.isSelected(index)) continue;
+        if (wrote) try sys.writeAll(1, " ");
+        var buffer: [24]u8 = undefined;
+        try sys.writeAll(1, try std.fmt.bufPrint(&buffer, "{d}", .{number}));
+        wrote = true;
+    }
+    if (wrote) try sys.writeAll(1, "\n");
 }
 
 fn ensurePage(
@@ -228,6 +241,10 @@ fn executeEffect(
         },
         .delete => try deleteTargets(gpa, io, home, journal, model, true),
         .delete_unpinned => try deleteTargets(gpa, io, home, journal, model, false),
+        .export_selection => {
+            model.selection_exported = true;
+            model.quit = true;
+        },
         .open_detail => {
             const number = model.currentNumber() orelse return;
             if (model.detail) |*detail| detail.deinit(gpa);
