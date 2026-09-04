@@ -4,13 +4,13 @@ const std = @import("std");
 const Io = std.Io;
 const zecli = @import("zecli");
 
-const store = @import("store.zig");
-const sys = @import("sys.zig");
-const journal_name = @import("journal_name.zig");
-const annotations = @import("annotations.zig");
-const report = @import("report.zig");
+const store = @import("../journal/store.zig");
+const sys = @import("../sys.zig");
+const journal_name = @import("../journal/name.zig");
+const annotations = @import("../journal/annotations.zig");
+const report = @import("../presentation/report.zig");
 const context = @import("context.zig");
-const presentation = @import("entry_presentation.zig");
+const presentation = @import("../presentation/entry.zig");
 
 pub const HistoryJournal = struct {
     name: []u8,

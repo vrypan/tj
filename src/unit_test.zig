@@ -4,5 +4,5 @@
 comptime {
     _ = @import("main.zig");
     _ = @import("tjctl_main.zig");
-    _ = @import("terminal_title.zig");
+    _ = @import("terminal/title.zig");
 }

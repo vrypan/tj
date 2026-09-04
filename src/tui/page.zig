@@ -4,9 +4,9 @@ const std = @import("std");
 const Io = std.Io;
 const zooi = @import("zooi");
 
-const annotations = @import("../annotations.zig");
-const presentation = @import("../entry_presentation.zig");
-const store = @import("../store.zig");
+const annotations = @import("../journal/annotations.zig");
+const presentation = @import("../presentation/entry.zig");
+const store = @import("../journal/store.zig");
 
 pub const Row = struct {
     index: usize,

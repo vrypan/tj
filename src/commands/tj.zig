@@ -7,16 +7,16 @@ const std = @import("std");
 const Io = std.Io;
 const zecli = @import("zecli");
 
-const cli = @import("cli.zig");
-const cmd_filter = @import("cmd_filter.zig");
+const cli = @import("../cli/tj.zig");
+const cmd_filter = @import("filter.zig");
 const context = @import("context.zig");
-const cmd_grep = @import("cmd_grep.zig");
-const cmd_history = @import("cmd_history.zig");
-const cmd_reference = @import("cmd_reference.zig");
-const cmd_annotate = @import("cmd_annotate.zig");
-const cmd_remove = @import("cmd_remove.zig");
-const cmd_cat = @import("cmd_cat.zig");
-const cmd_tui = @import("cmd_tui.zig");
+const cmd_grep = @import("grep.zig");
+const cmd_history = @import("history.zig");
+const cmd_reference = @import("reference.zig");
+const cmd_annotate = @import("annotate.zig");
+const cmd_remove = @import("remove.zig");
+const cmd_cat = @import("cat.zig");
+const cmd_tui = @import("tui.zig");
 
 pub const Error = context.Error;
 

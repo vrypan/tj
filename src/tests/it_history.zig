@@ -1,8 +1,8 @@
 //! Entry annotations, history presentation, filtering, and ranges.
 
 const std = @import("std");
-const noout = @import("../noout.zig");
-const report = @import("../report.zig");
+const noout = @import("../protocol/noout.zig");
+const report = @import("../presentation/report.zig");
 
 const support = @import("it_support.zig");
 

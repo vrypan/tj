@@ -3,9 +3,9 @@
 const std = @import("std");
 const zooi = @import("zooi");
 
-const presentation = @import("../entry_presentation.zig");
-const report = @import("../report.zig");
-const annotations = @import("../annotations.zig");
+const presentation = @import("../presentation/entry.zig");
+const report = @import("../presentation/report.zig");
+const annotations = @import("../journal/annotations.zig");
 const page_module = @import("page.zig");
 
 const header_style: zooi.Style = .{ .bold = true };

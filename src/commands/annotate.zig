@@ -4,9 +4,9 @@ const std = @import("std");
 const Io = std.Io;
 const zecli = @import("zecli");
 
-const store = @import("store.zig");
-const sys = @import("sys.zig");
-const annotations = @import("annotations.zig");
+const store = @import("../journal/store.zig");
+const sys = @import("../sys.zig");
+const annotations = @import("../journal/annotations.zig");
 const context = @import("context.zig");
 
 pub const NameRequest = union(enum) {

@@ -5,7 +5,7 @@
 
 const std = @import("std");
 const c = std.c;
-const sys = @import("sys.zig");
+const sys = @import("../sys.zig");
 
 const esc = 0x1b;
 const bel = 0x07;

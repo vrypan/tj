@@ -4,10 +4,10 @@ const std = @import("std");
 const Io = std.Io;
 const zecli = @import("zecli");
 
-const store = @import("store.zig");
-const sys = @import("sys.zig");
-const reference = @import("reference.zig");
-const plain = @import("plain.zig");
+const store = @import("../journal/store.zig");
+const sys = @import("../sys.zig");
+const reference = @import("../journal/reference.zig");
+const plain = @import("../presentation/plain.zig");
 const context = @import("context.zig");
 
 pub const read_chunk_size = 64 * 1024;

@@ -3,10 +3,10 @@
 const std = @import("std");
 const Io = std.Io;
 
-const annotations = @import("../annotations.zig");
-const plain = @import("../plain.zig");
-const report = @import("../report.zig");
-const store = @import("../store.zig");
+const annotations = @import("../journal/annotations.zig");
+const plain = @import("../presentation/plain.zig");
+const report = @import("../presentation/report.zig");
+const store = @import("../journal/store.zig");
 
 const output_limit = 2 * 1024 * 1024;
 

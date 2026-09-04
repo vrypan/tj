@@ -10,17 +10,17 @@ const posix = std.posix;
 const c = std.c;
 const zooi = @import("zooi");
 
-const annotations = @import("annotations.zig");
-const cmd_annotate = @import("cmd_annotate.zig");
-const cmd_remove = @import("cmd_remove.zig");
+const annotations = @import("../journal/annotations.zig");
+const cmd_annotate = @import("annotate.zig");
+const cmd_remove = @import("remove.zig");
 const context = @import("context.zig");
-const noout = @import("noout.zig");
-const store = @import("store.zig");
-const sys = @import("sys.zig");
-const tui_detail = @import("tui/detail.zig");
-const tui_model = @import("tui/model.zig");
-const tui_page = @import("tui/page.zig");
-const tui_render = @import("tui/render.zig");
+const noout = @import("../protocol/noout.zig");
+const store = @import("../journal/store.zig");
+const sys = @import("../sys.zig");
+const tui_detail = @import("../tui/detail.zig");
+const tui_model = @import("../tui/model.zig");
+const tui_page = @import("../tui/page.zig");
+const tui_render = @import("../tui/render.zig");
 
 const max_events_per_frame = 64;
 

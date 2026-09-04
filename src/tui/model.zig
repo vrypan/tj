@@ -4,8 +4,8 @@ const std = @import("std");
 const Io = std.Io;
 const zooi = @import("zooi");
 
-const context = @import("../context.zig");
-const store = @import("../store.zig");
+const context = @import("../commands/context.zig");
+const store = @import("../journal/store.zig");
 const tui_detail = @import("detail.zig");
 
 const max_input = 63;

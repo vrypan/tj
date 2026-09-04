@@ -4,7 +4,7 @@
 
 const std = @import("std");
 const posix = std.posix;
-const sys = @import("sys.zig");
+const sys = @import("../sys.zig");
 
 pub const Saved = struct {
     fd: sys.Fd,

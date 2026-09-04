@@ -5,9 +5,9 @@ const Io = std.Io;
 const zecli = @import("zecli");
 
 const context = @import("context.zig");
-const report = @import("report.zig");
-const store = @import("store.zig");
-const sys = @import("sys.zig");
+const report = @import("../presentation/report.zig");
+const store = @import("../journal/store.zig");
+const sys = @import("../sys.zig");
 
 pub fn listJournals(
     gpa: std.mem.Allocator,

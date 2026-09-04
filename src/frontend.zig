@@ -3,7 +3,7 @@
 const std = @import("std");
 const builtin = @import("builtin");
 const build_options = @import("build_options");
-const proxy = @import("proxy.zig");
+const proxy = @import("terminal/proxy.zig");
 
 pub const version = build_options.version;
 pub const panic = std.debug.FullPanic(onPanic);

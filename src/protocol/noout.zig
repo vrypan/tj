@@ -7,7 +7,7 @@
 const std = @import("std");
 const posix = std.posix;
 const c = std.c;
-const sys = @import("sys.zig");
+const sys = @import("../sys.zig");
 
 pub const begin_marker = "\x1b]3110;NOOUT\x1b\\";
 pub const end_marker = "\x1b]3110;END\x1b\\";

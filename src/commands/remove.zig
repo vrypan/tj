@@ -4,11 +4,11 @@ const std = @import("std");
 const Io = std.Io;
 const zecli = @import("zecli");
 
-const store = @import("store.zig");
-const sys = @import("sys.zig");
-const annotations = @import("annotations.zig");
+const store = @import("../journal/store.zig");
+const sys = @import("../sys.zig");
+const annotations = @import("../journal/annotations.zig");
 const context = @import("context.zig");
-const cmd_annotate = @import("cmd_annotate.zig");
+const cmd_annotate = @import("annotate.zig");
 
 pub const RemoveRequest = struct {
     targets: []const []const u8,

@@ -4,8 +4,8 @@
 const std = @import("std");
 const posix = std.posix;
 const harness = @import("harness.zig");
-const plain = @import("../plain.zig");
-const journal_name = @import("../journal_name.zig");
+const plain = @import("../presentation/plain.zig");
+const journal_name = @import("../journal/name.zig");
 
 const options = @import("build_options");
 pub const tj = options.tj_exe;

@@ -4,14 +4,14 @@ const std = @import("std");
 const Io = std.Io;
 const zecli = @import("zecli");
 
-const store = @import("store.zig");
-const sys = @import("sys.zig");
-const annotations = @import("annotations.zig");
-const search = @import("search.zig");
-const report = @import("report.zig");
+const store = @import("../journal/store.zig");
+const sys = @import("../sys.zig");
+const annotations = @import("../journal/annotations.zig");
+const search = @import("../journal/search.zig");
+const report = @import("../presentation/report.zig");
 const cmd_context = @import("context.zig");
-const cmd_tui = @import("cmd_tui.zig");
-const presentation = @import("entry_presentation.zig");
+const cmd_tui = @import("tui.zig");
+const presentation = @import("../presentation/entry.zig");
 
 pub fn grepRequestFromArgs(args: []const [:0]const u8) !GrepRequest {
     var parsed = try cmd_context.parseTestCommand(.grep, args);

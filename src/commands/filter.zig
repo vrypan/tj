@@ -4,9 +4,9 @@ const std = @import("std");
 const Io = std.Io;
 const c = std.c;
 
-const noout = @import("noout.zig");
-const fence = @import("fence.zig");
-const sys = @import("sys.zig");
+const noout = @import("../protocol/noout.zig");
+const fence = @import("../protocol/fence.zig");
+const sys = @import("../sys.zig");
 const zecli = @import("zecli");
 
 const Mode = enum { noout, fence };

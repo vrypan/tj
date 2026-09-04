@@ -2,7 +2,7 @@
 
 const std = @import("std");
 const posix = std.posix;
-const journal_name = @import("../journal_name.zig");
+const journal_name = @import("../journal/name.zig");
 
 const options = @import("build_options");
 const tj = options.tj_exe;

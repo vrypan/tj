@@ -5,14 +5,14 @@ const Io = std.Io;
 const zecli = @import("zecli");
 const posix = std.posix;
 
-const cli = @import("tjctl_cli.zig");
-const proxy = @import("proxy.zig");
-const store = @import("store.zig");
-const sys = @import("sys.zig");
-const cmd_journal_report = @import("cmd_journal_report.zig");
-const cmd_remove = @import("cmd_remove.zig");
-const cmd_replay = @import("cmd_replay.zig");
-const handoff = @import("handoff.zig");
+const cli = @import("../cli/tjctl.zig");
+const proxy = @import("../terminal/proxy.zig");
+const store = @import("../journal/store.zig");
+const sys = @import("../sys.zig");
+const cmd_journal_report = @import("journal_report.zig");
+const cmd_remove = @import("remove.zig");
+const cmd_replay = @import("replay.zig");
+const handoff = @import("../protocol/handoff.zig");
 
 pub fn run(
     gpa: std.mem.Allocator,

@@ -24,9 +24,9 @@ const Io = std.Io;
 pub const Dir = std.Io.Dir;
 const File = std.Io.File;
 
-const sys = @import("sys.zig");
-const journal_name = @import("journal_name.zig");
-const altscreen = @import("altscreen.zig");
+const sys = @import("../sys.zig");
+const journal_name = @import("name.zig");
+const altscreen = @import("../terminal/altscreen.zig");
 const annotations = @import("annotations.zig");
 const mutation_lock = @import("mutation_lock.zig");
 

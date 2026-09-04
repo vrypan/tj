@@ -3,10 +3,10 @@ const Io = std.Io;
 const zecli = @import("zecli");
 
 const frontend = @import("frontend.zig");
-const cli = @import("tjctl_cli.zig");
-const cli_spec = @import("tjctl_spec.zig");
-const commands = @import("journal_commands.zig");
-const proxy = @import("proxy.zig");
+const cli = @import("cli/tjctl.zig");
+const cli_spec = @import("cli/tjctl_spec.zig");
+const commands = @import("commands/tjctl.zig");
+const proxy = @import("terminal/proxy.zig");
 const zooi = @import("zooi");
 
 pub const panic = std.debug.FullPanic(struct {
@@ -148,7 +148,7 @@ fn commandErrorMessage(err: anyerror) []const u8 {
 }
 
 test {
-    _ = @import("journal_name.zig");
+    _ = @import("journal/name.zig");
     _ = cli;
     _ = cli_spec;
     _ = commands;

@@ -4,10 +4,10 @@ const std = @import("std");
 const Io = std.Io;
 const zecli = @import("zecli");
 
-const store = @import("store.zig");
-const sys = @import("sys.zig");
-const replay_engine = @import("replay.zig");
-const tjctl_spec = @import("tjctl_spec.zig");
+const store = @import("../journal/store.zig");
+const sys = @import("../sys.zig");
+const replay_engine = @import("../terminal/replay.zig");
+const tjctl_spec = @import("../cli/tjctl_spec.zig");
 
 pub const ReplayRequest = struct {
     replay: replay_engine.Options,

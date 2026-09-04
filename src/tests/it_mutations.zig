@@ -3,7 +3,7 @@
 const std = @import("std");
 const posix = std.posix;
 const harness = @import("harness.zig");
-const journal_name = @import("../journal_name.zig");
+const journal_name = @import("../journal/name.zig");
 
 const support = @import("it_support.zig");
 

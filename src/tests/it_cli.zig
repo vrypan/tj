@@ -2,8 +2,8 @@
 
 const std = @import("std");
 const posix = std.posix;
-const noout = @import("../noout.zig");
-const plain = @import("../plain.zig");
+const noout = @import("../protocol/noout.zig");
+const plain = @import("../presentation/plain.zig");
 
 const options = @import("build_options");
 const tj = options.tj_exe;

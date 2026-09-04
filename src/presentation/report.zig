@@ -9,9 +9,9 @@
 const std = @import("std");
 const Io = std.Io;
 
-const noout = @import("noout.zig");
-const store = @import("store.zig");
-const sys = @import("sys.zig");
+const noout = @import("../protocol/noout.zig");
+const store = @import("../journal/store.zig");
+const sys = @import("../sys.zig");
 
 /// Wraps a report in an OSC noout region so a journal writer records the
 /// command but not the listing it produced.

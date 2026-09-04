@@ -1,7 +1,7 @@
 //! Shell reference parsing, expansion, validation, and completion.
 
 const std = @import("std");
-const plain = @import("../plain.zig");
+const plain = @import("../presentation/plain.zig");
 
 const options = @import("build_options");
 const support = @import("it_support.zig");

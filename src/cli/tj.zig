@@ -2,8 +2,8 @@
 
 const std = @import("std");
 const zecli = @import("zecli");
-const cli_spec = @import("cli_spec.zig");
-const reference = @import("reference.zig");
+const cli_spec = @import("tj_spec.zig");
+const reference = @import("../journal/reference.zig");
 
 pub const CommandName = zecli.CommandEnum(cli_spec.application);
 

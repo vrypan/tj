@@ -6,13 +6,13 @@ const std = @import("std");
 const Io = std.Io;
 const zecli = @import("zecli");
 
-const cli = @import("cli.zig");
-const cli_spec = @import("cli_spec.zig");
-const store = @import("store.zig");
-const sys = @import("sys.zig");
-const reference = @import("reference.zig");
-const annotations = @import("annotations.zig");
-const mutation_lock = @import("mutation_lock.zig");
+const cli = @import("../cli/tj.zig");
+const cli_spec = @import("../cli/tj_spec.zig");
+const store = @import("../journal/store.zig");
+const sys = @import("../sys.zig");
+const reference = @import("../journal/reference.zig");
+const annotations = @import("../journal/annotations.zig");
+const mutation_lock = @import("../journal/mutation_lock.zig");
 
 pub const Error = error{
     NotInJournal,

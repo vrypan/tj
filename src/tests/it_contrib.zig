@@ -1,7 +1,7 @@
 //! Optional companion scripts run against a real journal writer.
 
 const std = @import("std");
-const store = @import("../store.zig");
+const store = @import("../journal/store.zig");
 const support = @import("it_support.zig");
 
 test "tj-md renders selected entries as a plain fenced transcript" {

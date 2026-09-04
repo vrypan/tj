@@ -11,6 +11,20 @@ zig build test    # unit and PTY-driven integration tests
 `make check` is the required local verification. PTY tests should run in a
 normal terminal environment.
 
+## Source layout
+
+- `src/cli/` defines the TJ and TJCTL command-line interfaces.
+- `src/commands/` implements command dispatch and command behavior.
+- `src/journal/` owns journal storage, references, metadata, and SQLite.
+- `src/protocol/` implements the OSC ELLO protocol and its emitters.
+- `src/terminal/` owns the PTY proxy and terminal state.
+- `src/presentation/` formats journal data for terminal and piped output.
+- `src/tui/` contains the entry browser model and rendering.
+- `src/tests/` contains PTY-driven integration tests and their fixtures.
+
+Executable and test roots remain directly under `src/`, alongside the shared
+frontend and system-call modules.
+
 ## Generated completion
 
 The build runs a host-only `tj-completion` helper. It generates ready-to-install

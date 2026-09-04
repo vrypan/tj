@@ -5,10 +5,10 @@ const std = @import("std");
 const Io = std.Io;
 const zecli = @import("zecli");
 
-const store = @import("store.zig");
-const sys = @import("sys.zig");
-const reference = @import("reference.zig");
-const annotations = @import("annotations.zig");
+const store = @import("../journal/store.zig");
+const sys = @import("../sys.zig");
+const reference = @import("../journal/reference.zig");
+const annotations = @import("../journal/annotations.zig");
 
 /// Prints the path a reference names. The shell integration calls this for
 /// every `@`-word on a command line, so it has to be quiet and quick.

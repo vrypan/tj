@@ -1,7 +1,7 @@
 //! Full-screen entry browser behavior through a real zsh and PTY proxy.
 
 const std = @import("std");
-const store = @import("../store.zig");
+const store = @import("../journal/store.zig");
 const support = @import("it_support.zig");
 
 test "zsh widget keeps tui open and inserts its stdout" {

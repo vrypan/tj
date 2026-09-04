@@ -7,8 +7,8 @@
 const std = @import("std");
 const Io = std.Io;
 const completion = @import("completion");
-const cli_spec = @import("cli_spec.zig");
-const tjctl_spec = @import("tjctl_spec.zig");
+const cli_spec = @import("cli/tj_spec.zig");
+const tjctl_spec = @import("cli/tjctl_spec.zig");
 
 pub fn main(init: std.process.Init) !u8 {
     const args = try init.minimal.args.toSlice(init.arena.allocator());

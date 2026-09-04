@@ -13,15 +13,15 @@
 const std = @import("std");
 const posix = std.posix;
 const c = std.c;
-const sys = @import("sys.zig");
+const sys = @import("../sys.zig");
 const tty = @import("tty.zig");
-const scanner = @import("scanner.zig");
-const journal_store = @import("store.zig");
+const scanner = @import("../protocol/scanner.zig");
+const journal_store = @import("../journal/store.zig");
 const Store = journal_store.Store;
 const replay = @import("replay.zig");
 const splash = @import("splash.zig");
-const terminal_title = @import("terminal_title.zig");
-const handoff = @import("handoff.zig");
+const terminal_title = @import("title.zig");
+const handoff = @import("../protocol/handoff.zig");
 
 const io_buf_size = 64 * 1024;
 const max_protocol_error_log_bytes = 384;
@@ -356,7 +356,7 @@ fn exportEnvironment(store: *Store, title: [:0]const u8, title_blink_ms: u32, ha
     sys.setEnv("TJ", fallback[0..2 :0]);
 }
 
-const journal_name = @import("journal_name.zig");
+const journal_name = @import("../journal/name.zig");
 
 fn siblingEntryPath(self_path: []const u8, buf: []u8) ?[]const u8 {
     if (!std.mem.eql(u8, std.fs.path.basename(self_path), "tjctl")) return null;

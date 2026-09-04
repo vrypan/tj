@@ -6,9 +6,9 @@
 const std = @import("std");
 const Io = std.Io;
 
-const store = @import("store.zig");
-const sys = @import("sys.zig");
-const terminal_title = @import("terminal_title.zig");
+const store = @import("../journal/store.zig");
+const sys = @import("../sys.zig");
+const terminal_title = @import("title.zig");
 
 const read_chunk_size = 64 * 1024;
 

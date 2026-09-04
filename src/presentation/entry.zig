@@ -5,8 +5,8 @@
 
 const std = @import("std");
 
-const annotations = @import("annotations.zig");
-const context = @import("context.zig");
+const annotations = @import("../journal/annotations.zig");
+const context = @import("../commands/context.zig");
 const report = @import("report.zig");
 
 pub const ColorRole = enum {
