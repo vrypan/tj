@@ -162,6 +162,10 @@ TJ does not accept pull requests. To report a specific bug or request a
 specific feature, open an issue and document it clearly. See
 [Contributing](CONTRIBUTING.md).
 
+## License
+
+TJ is released under the [MIT License](LICENSE).
+
 ## Documentation
 
 - [Installation](docs/installation.md)
