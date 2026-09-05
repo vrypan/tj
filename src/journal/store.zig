@@ -654,6 +654,8 @@ pub const Store = struct {
         if (code) |value| current.exit_code = value;
 
         self.closeOpenRegion(&current);
+        var output_sink: OutputSink = .{ .store = self, .interaction = &current };
+        current.fullscreen.finish(&output_sink);
         self.handleCompletedOutputFlush(current.writer.interface.flush());
         current.file.close(self.io);
 
@@ -2244,6 +2246,38 @@ test "a rendered prompt belongs to the next entry" {
     store.begin("echo no-prompt", null, null);
     store.finish(0);
     try std.testing.expectError(error.FileNotFound, store.journal_dir.openFile(io, "2/prompt", .{}));
+}
+
+test "entry completion preserves pending ordinary output filter bytes" {
+    const io = std.testing.io;
+    const gpa = std.testing.allocator;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var root_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const root_len = try tmp.dir.realPath(io, &root_buf);
+
+    var store = try Store.createNamedJournal(gpa, io, root_buf[0..root_len], "partial-output", false);
+    defer store.close();
+    const marker = "\x1b[?1049h";
+    for (1..marker.len) |length| {
+        store.begin("partial", null, null);
+        store.append(marker[0..length]);
+        store.finish(if (length % 2 == 0) 0 else null);
+
+        var path: [32]u8 = undefined;
+        const out_path = try std.fmt.bufPrint(&path, "{d}/out", .{length});
+        const out = try store.journal_dir.readFileAlloc(io, out_path, gpa, .limited(64));
+        defer gpa.free(out);
+        try std.testing.expectEqualSlices(u8, marker[0..length], out);
+    }
+
+    store.begin("inside", null, null);
+    store.append(marker);
+    store.append("hidden\x1b[?104");
+    store.finish(0);
+    const suppressed = try store.journal_dir.readFileAlloc(io, "8/out", gpa, .limited(64));
+    defer gpa.free(suppressed);
+    try std.testing.expectEqualStrings("", suppressed);
 }
 
 /// Receives the bytes that survive the full-screen filter and puts them on
