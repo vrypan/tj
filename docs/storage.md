@@ -66,5 +66,8 @@ inactive marker-bearing journal left by an unclean writer exit.
 
 The journal warning log is bounded. Recording failures are logged when
 possible while the PTY continues forwarding terminal traffic.
+An entry's `rc` is the command's real exit status; its presence does not prove
+that every buffered output byte reached storage. A failed final output flush
+disables further recording for that writer and is logged when possible.
 
 See the [OSC ELLO protocol](osc-3110.md) for TJ's in-band messages.

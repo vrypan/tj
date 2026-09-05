@@ -654,7 +654,7 @@ pub const Store = struct {
         if (code) |value| current.exit_code = value;
 
         self.closeOpenRegion(&current);
-        current.writer.interface.flush() catch {};
+        self.handleCompletedOutputFlush(current.writer.interface.flush());
         current.file.close(self.io);
 
         if (current.exit_code) |value| {
@@ -674,6 +674,13 @@ pub const Store = struct {
             self.gpa.free(entry.mime);
         }
         current.dir.close(self.io);
+    }
+
+    fn handleCompletedOutputFlush(self: *Store, result: anyerror!void) void {
+        result catch |err| {
+            self.warn("cannot flush completed output: {t}", .{err});
+            self.disabled = true;
+        };
     }
 
     fn writeMeta(self: *Store, current: *Interaction) !void {
@@ -1974,6 +1981,26 @@ test "temporary cleanup skips a live writer and removes a stale marker" {
     stale.close(io);
     try sweepTemporaryJournals(gpa, io, home);
     try std.testing.expectError(error.FileNotFound, root.statFile(io, "stale", .{}));
+}
+
+test "a completed output flush failure disables later recording" {
+    const io = std.testing.io;
+    const gpa = std.testing.allocator;
+    var tmp = std.testing.tmpDir(.{ .iterate = true });
+    defer tmp.cleanup();
+    var path_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const home = try testHome(&tmp, io, &path_buf);
+
+    var store = try Store.createNamedJournal(gpa, io, home, "flush-failure", false);
+    store.handleCompletedOutputFlush(error.WriteFailed);
+    try std.testing.expect(store.disabled);
+    store.begin("echo not-recorded", null, "/tmp");
+    try std.testing.expect(!store.isRecording());
+    store.close();
+
+    const log = try tmp.dir.readFileAlloc(io, "flush-failure/log", gpa, .limited(4096));
+    defer gpa.free(log);
+    try std.testing.expect(std.mem.indexOf(u8, log, "cannot flush completed output") != null);
 }
 
 test "temporary cleanup rechecks exact identity and saved state under locks" {
