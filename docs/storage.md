@@ -36,7 +36,8 @@ It moves or is deleted with the entry directory.
 
 `~/.tj/.locks/JOURNAL` contains the lifetime lock used to prevent concurrent
 writers. Activity is determined by the held advisory lock, not by whether the
-lock file exists.
+lock file exists. Lifetime lock files are stable and normally remain after a
+journal is removed; their presence does not mean a writer is active.
 
 Short mutation and namespace locks coordinate entry deletion, pin updates,
 journal creation, rename, and removal. Read-only commands remain

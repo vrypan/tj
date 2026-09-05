@@ -284,16 +284,13 @@ pub const Store = struct {
 
         // Only the invocation that created a journal may remove it as empty
         // noise. A continued journal is persistent even when it stays empty.
-        const removed = if (self.temporary and !self.saved_temporary) blk: {
-            self.root.deleteTree(self.io, self.journal) catch break :blk false;
-            break :blk true;
-        } else self.origin == .created and !self.saved_temporary and blk: {
-            self.root.deleteDir(self.io, self.journal) catch break :blk false;
-            break :blk true;
-        };
+        if (self.temporary and !self.saved_temporary) {
+            self.root.deleteTree(self.io, self.journal) catch {};
+        } else if (self.origin == .created and !self.saved_temporary) {
+            self.root.deleteDir(self.io, self.journal) catch {};
+        }
 
         self.lock_file.close(self.io);
-        if (removed) removeLockFile(self.io, self.root, self.journal);
 
         self.root.close(self.io);
         self.gpa.free(self.out_buffer);
@@ -1895,6 +1892,11 @@ test "temporary journals are removed unless saved" {
     var root = try openRoot(io, home);
     defer root.close(io);
     try std.testing.expectError(error.FileNotFound, root.statFile(io, "discarded", .{}));
+    _ = try root.statFile(io, ".locks/discarded", .{});
+
+    var replacement = try Store.createNamedJournal(gpa, io, home, "discarded", false);
+    defer replacement.close();
+    try std.testing.expectError(error.JournalLocked, Store.continueJournal(gpa, io, home, "discarded"));
 
     var retained = try Store.createNamedJournal(gpa, io, home, "retained", true);
     try std.testing.expect(retained.saveTemporary());
