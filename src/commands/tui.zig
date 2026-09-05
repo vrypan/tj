@@ -79,6 +79,7 @@ fn runWithFilter(gpa: std.mem.Allocator, io: Io, home: ?[]const u8, allowed_numb
             executeEffect(gpa, io, home, journal, &model, effect) catch |err| {
                 model.setStatus("{s}", .{friendlyError(err)});
             };
+            try model.reflowDetail(gpa);
             if (effectMutatesPage(effect)) page.invalidate();
             handled += 1;
             if (model.quit or handled == max_events_per_frame) break;
@@ -206,13 +207,22 @@ fn executeEffect(
         },
         .open_detail => {
             const number = model.currentNumber() orelse return;
+            var next_detail = try tui_detail.load(gpa, io, home, journal, number);
+            errdefer next_detail.deinit(gpa);
+            try next_detail.reflow(gpa, model.size.cols);
+            var next_selected = try std.DynamicBitSetUnmanaged.initEmpty(gpa, next_detail.items.len);
+            errdefer next_selected.deinit(gpa);
+            var next_range_base = try std.DynamicBitSetUnmanaged.initEmpty(gpa, next_detail.items.len);
+            errdefer next_range_base.deinit(gpa);
+
             if (model.detail) |*detail| detail.deinit(gpa);
-            model.detail = try tui_detail.load(gpa, io, home, journal, number);
+            model.detail = next_detail;
             model.detail_selected.deinit(gpa);
-            model.detail_selected = try std.DynamicBitSetUnmanaged.initEmpty(gpa, model.detail.?.items.len);
+            model.detail_selected = next_selected;
             model.detail_range_base.deinit(gpa);
-            model.detail_range_base = try std.DynamicBitSetUnmanaged.initEmpty(gpa, model.detail.?.items.len);
+            model.detail_range_base = next_range_base;
             model.detail_viewport = .{};
+            model.detail_viewport.normalize(model.detail.?.layout.index(), model.listRows());
             model.detail_range_anchor = null;
             model.mode = .detail;
         },

@@ -7,6 +7,7 @@ const pins = @import("../journal/pins.zig");
 const plain = @import("../presentation/plain.zig");
 const report = @import("../presentation/report.zig");
 const store = @import("../journal/store.zig");
+const detail_layout = @import("detail_layout.zig");
 
 const output_limit = 2 * 1024 * 1024;
 
@@ -17,6 +18,7 @@ pub const Item = struct {
     payload_end: usize,
     export_start: usize = 0,
     export_end: usize = 0,
+    kind: detail_layout.ItemKind = .field,
 };
 
 pub const Detail = struct {
@@ -24,16 +26,22 @@ pub const Detail = struct {
     document: []u8,
     exports: []u8,
     items: []Item,
+    layout: detail_layout.Layout = .{},
 
     pub fn deinit(self: *Detail, gpa: std.mem.Allocator) void {
         gpa.free(self.document);
         gpa.free(self.exports);
         gpa.free(self.items);
+        self.layout.deinit(gpa);
         self.* = undefined;
     }
 
     pub fn itemValue(self: *const Detail, item: Item) []const u8 {
         return self.exports[item.export_start..item.export_end];
+    }
+
+    pub fn reflow(self: *Detail, gpa: std.mem.Allocator, columns: usize) !void {
+        try self.layout.reflow(gpa, self.document, self.items, columns);
     }
 };
 
@@ -173,6 +181,7 @@ pub fn load(
         .payload_end = document.items.len,
         .export_start = exports.items.len,
         .export_end = exports.items.len,
+        .kind = .separator,
     });
     try document.append(gpa, '\n');
     if (!output.present or output.text.len == 0) {
@@ -185,6 +194,7 @@ pub fn load(
             .payload_end = item_start,
             .export_start = exports.items.len,
             .export_end = exports.items.len,
+            .kind = .output,
         });
     } else {
         var line_start: usize = 0;
@@ -205,6 +215,7 @@ pub fn load(
                 .payload_end = payload_end,
                 .export_start = raw_export.start,
                 .export_end = raw_export.end,
+                .kind = .output,
             });
             output_line_index += 1;
             if (relative_end == null) break;
@@ -224,8 +235,15 @@ pub fn load(
         const relative_end = std.mem.indexOfScalar(u8, document.items[line_start..], '\n');
         const line_end = if (relative_end) |offset| line_start + offset else document.items.len;
         if (special_index < special_items.items.len and special_items.items[special_index].section_start == line_start) {
-            try items.append(gpa, special_items.items[special_index]);
+            const special = special_items.items[special_index];
+            try items.append(gpa, special);
             special_index += 1;
+            if (special.section_end > line_end) {
+                line_start = special.section_end;
+                if (line_start < document.items.len and document.items[line_start] == '\n') line_start += 1;
+                if (line_start == document.items.len) break;
+                continue;
+            }
         } else {
             const text = document.items[line_start..line_end];
             const label_len = if (line_start < output_separator_start) fieldLabelLength(text) else null;
@@ -237,6 +255,7 @@ pub fn load(
                 .payload_end = line_end,
                 .export_start = export_range.start,
                 .export_end = export_range.end,
+                .kind = if (line_start > output_separator_start) .output else .field,
             });
         }
         if (relative_end == null) break;
@@ -403,12 +422,14 @@ test "detail exports original command cwd and output bytes" {
 
     var detail = try load(gpa, io, home, journal.journalId(), 1);
     defer detail.deinit(gpa);
+    try detail.reflow(gpa, 18);
     var command_found = false;
     var cwd_found = false;
     var first_output_found = false;
     var last_output_found = false;
     var structural_separator_found = false;
     var source_separator_found = false;
+    var duplicate_command_line_found = false;
     for (detail.items) |item| {
         const shown = detail.document[item.section_start..item.section_end];
         const value = detail.itemValue(item);
@@ -431,10 +452,23 @@ test "detail exports original command cwd and output bytes" {
         } else if (std.mem.indexOf(u8, shown, "last line") != null) {
             try std.testing.expectEqualStrings("\x1b]0;hidden\nstill hidden\x07last line", value);
             last_output_found = true;
+        } else if (std.mem.eql(u8, shown, "echo second")) {
+            duplicate_command_line_found = true;
         }
     }
     try std.testing.expect(command_found and cwd_found and first_output_found and last_output_found);
     try std.testing.expect(structural_separator_found and source_separator_found);
+    try std.testing.expect(!duplicate_command_line_found);
+    const narrow_rows = detail.layout.index().totalRows();
+    try detail.reflow(gpa, 80);
+    try std.testing.expect(detail.layout.index().totalRows() < narrow_rows);
+
+    for (detail.items) |item| {
+        const shown = detail.document[item.section_start..item.section_end];
+        if (std.mem.startsWith(u8, shown, "cmd       ")) {
+            try std.testing.expectEqualStrings("echo first\necho second", detail.itemValue(item));
+        }
+    }
 }
 
 test "detail identifies output truncated by the recorder" {

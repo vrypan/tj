@@ -5,6 +5,7 @@ const zooi = @import("zooi");
 
 const presentation = @import("../presentation/entry.zig");
 const report = @import("../presentation/report.zig");
+const detail_layout = @import("detail_layout.zig");
 const page_module = @import("page.zig");
 
 const header_style: zooi.Style = .{ .bold = true };
@@ -108,12 +109,11 @@ fn drawDetail(model: anytype, screen: *zooi.Screen) !void {
     screen.writeStyled(header, header_style);
     screen.fillToEndOfLine(header_style);
 
-    var row: usize = 0;
-    while (row < rows and model.detail_viewport.offset + row < detail.items.len) : (row += 1) {
-        const item_index = model.detail_viewport.offset + row;
+    var visible = model.detail_viewport.visibleItems(detail.layout.index(), rows);
+    while (visible.next()) |visible_item| {
+        const item_index = visible_item.item;
         const item = detail.items[item_index];
-        const text = detail.document[item.section_start..item.section_end];
-        const output_separator = std.mem.eql(u8, text, "=== out ===");
+        const output_separator = item.kind == .separator;
         const focused = item_index == model.detail_viewport.cursor;
         const selected = model.detail_selected.isSet(item_index);
         const style: zooi.Style = if (focused and selected)
@@ -126,29 +126,31 @@ fn drawDetail(model: anytype, screen: *zooi.Screen) !void {
             .{ .bold = true, .fg = .{ .ansi = 3 } }
         else
             .{};
-        screen.move(@intCast(row + 2), 0);
-        if (focused) screen.fillToEndOfLine(style);
-        screen.move(@intCast(row + 2), 0);
-        if (output_separator) {
-            const label = " out ";
-            const columns: usize = model.size.cols;
-            const padding = if (columns > label.len) columns - label.len else 0;
-            const left = padding / 2;
-            const right = padding - left;
-            for (0..left) |_| screen.writeStyled("=", style);
-            screen.writeStyled(label, style);
-            for (0..right) |_| screen.writeStyled("=", style);
-        } else {
-            // Detail loaders identify values separately from their labels.
-            // Outside a selection, yellow text makes those non-printable
-            // labels and placeholders visible without changing the compact
-            // layout. A focus or selection deliberately takes precedence.
-            const prefix_len = item.payload_start - item.section_start;
-            const payload_len = item.payload_end - item.payload_start;
-            const structural_style: zooi.Style = if (focused or selected) style else .{ .fg = .{ .ansi = 3 } };
-            screen.writeStyled(text[0..prefix_len], structural_style);
-            screen.writeStyled(text[prefix_len .. prefix_len + payload_len], style);
-            screen.writeStyled(text[prefix_len + payload_len ..], structural_style);
+        const structural_style: zooi.Style = if (focused or selected) style else .{ .fg = .{ .ansi = 3 } };
+        const fragments = detail.layout.itemFragments(item_index);
+        for (0..visible_item.row_count) |fragment_offset| {
+            const row = visible_item.screen_row + fragment_offset + 2;
+            const fragment = fragments[visible_item.first_row + fragment_offset];
+            screen.move(@intCast(row), 0);
+            if (focused) screen.fillToEndOfLine(style);
+            screen.move(@intCast(row), 0);
+            if (output_separator) {
+                drawOutputSeparator(screen, model.size.cols, style);
+                continue;
+            }
+            for (0..fragment.indent) |_| screen.writeStyled(" ", structural_style);
+            if (fragment.show_prefix) {
+                screen.writeStyled(detail.document[item.section_start..item.payload_start], structural_style);
+            }
+            if (fragment.replacement) {
+                const replacement_style = if (fragment.start >= item.payload_start and fragment.start < item.payload_end)
+                    style
+                else
+                    structural_style;
+                screen.writeStyled("?", replacement_style);
+            } else {
+                writeDetailRange(screen, detail.document, item, fragment.start, fragment.end, style, structural_style);
+            }
         }
     }
 
@@ -161,6 +163,28 @@ fn drawDetail(model: anytype, screen: *zooi.Screen) !void {
         screen.writeStyled(footer, footer_style);
     }
     try screen.present();
+}
+
+fn drawOutputSeparator(screen: *zooi.Screen, columns: usize, style: zooi.Style) void {
+    const label = " out ";
+    const padding = if (columns > label.len) columns - label.len else 0;
+    const left = padding / 2;
+    const right = padding - left;
+    for (0..left) |_| screen.writeStyled("=", style);
+    screen.writeStyled(label, style);
+    for (0..right) |_| screen.writeStyled("=", style);
+}
+
+fn writeDetailRange(screen: *zooi.Screen, document: []const u8, item: anytype, start: usize, end: usize, value_style: zooi.Style, structural_style: zooi.Style) void {
+    const before_end = @min(end, item.payload_start);
+    if (start < before_end) screen.writeStyled(document[start..before_end], structural_style);
+
+    const value_start = @max(start, item.payload_start);
+    const value_end = @min(end, item.payload_end);
+    if (value_start < value_end) screen.writeStyled(document[value_start..value_end], value_style);
+
+    const after_start = @max(start, item.payload_end);
+    if (after_start < end) screen.writeStyled(document[after_start..end], structural_style);
 }
 
 fn drawHeader(journal: []const u8, model: anytype, screen: *zooi.Screen) void {
@@ -199,8 +223,19 @@ fn drawFooter(model: anytype, screen: *zooi.Screen) void {
 }
 
 const TestMode = enum { normal, delete_confirm, detail };
-const TestDetailItem = struct { section_start: usize, section_end: usize };
-const TestDetail = struct { number: u32, document: []const u8, items: []const TestDetailItem };
+const TestDetailItem = struct {
+    section_start: usize,
+    section_end: usize,
+    payload_start: usize,
+    payload_end: usize,
+    kind: detail_layout.ItemKind = .field,
+};
+const TestDetail = struct {
+    number: u32,
+    document: []const u8,
+    items: []const TestDetailItem,
+    layout: detail_layout.Layout,
+};
 
 const TestModel = struct {
     numbers: []const u32,
@@ -215,7 +250,7 @@ const TestModel = struct {
     input: []const u8 = "",
     delete_pinned_count: usize = 0,
     detail: ?TestDetail = null,
-    detail_viewport: zooi.Viewport = .{},
+    detail_viewport: zooi.VariableViewport = .{},
     detail_selected: std.DynamicBitSetUnmanaged = .{},
 
     pub fn listRows(self: *const TestModel) usize {
@@ -283,9 +318,9 @@ test "entry render leaves a blank row after the bold header" {
     try std.testing.expectEqual(zooi.Size{ .rows = 5, .cols = 40 }, zooi.testing.presentedSize(&screen_and_fd[0]).?);
     try std.testing.expect(zooi.testing.inspectCell(&screen_and_fd[0], 0, 0).?.style.bold);
     try std.testing.expect(!zooi.testing.inspectCell(&screen_and_fd[0], 0, 39).?.style.reverse);
-    try std.testing.expectEqualStrings(" ", zooi.testing.inspectCell(&screen_and_fd[0], 1, 0).?.text);
+    try std.testing.expectEqualStrings("", zooi.testing.inspectCell(&screen_and_fd[0], 1, 0).?.text);
     try std.testing.expect(zooi.testing.inspectCell(&screen_and_fd[0], 2, 39).?.style.reverse);
-    try std.testing.expectEqual(@as(?u8, 1), zooi.testing.inspectCell(&screen_and_fd[0], 3, 3).?.style.fg.?.ansi);
+    try std.testing.expectEqual(@as(?u8, 1), zooi.testing.inspectCell(&screen_and_fd[0], 3, 1).?.style.fg.?.ansi);
 }
 
 test "entry render includes the last row at minimum terminal height" {
@@ -311,7 +346,7 @@ test "entry render includes the last row at minimum terminal height" {
     defer screen_and_fd[0].deinit();
     try draw("work", &model, &page, &screen_and_fd[0]);
 
-    try std.testing.expectEqualStrings("4", zooi.testing.inspectCell(&screen_and_fd[0], 2, 5).?.text);
+    try std.testing.expectEqualStrings("4", zooi.testing.inspectCell(&screen_and_fd[0], 2, 3).?.text);
     try std.testing.expect(zooi.testing.inspectCell(&screen_and_fd[0], 2, 31).?.style.reverse);
 }
 
@@ -322,16 +357,19 @@ test "detail render leaves a blank row after the bold header" {
     var detail_selected = try std.DynamicBitSetUnmanaged.initEmpty(gpa, 2);
     defer detail_selected.deinit(gpa);
     var items = [_]TestDetailItem{
-        .{ .section_start = 0, .section_end = 3 },
-        .{ .section_start = 4, .section_end = 15 },
+        .{ .section_start = 0, .section_end = 3, .payload_start = 0, .payload_end = 3 },
+        .{ .section_start = 4, .section_end = 15, .payload_start = 15, .payload_end = 15, .kind = .separator },
     };
+    var layout: detail_layout.Layout = .{};
+    defer layout.deinit(gpa);
+    try layout.reflow(gpa, "cmd\n=== out ===", &items, 32);
     var model: TestModel = .{
         .numbers = &.{1},
         .count = 1,
         .size = .{ .rows = 5, .cols = 32 },
         .mode = .detail,
         .selected = selected,
-        .detail = .{ .number = 1, .document = "cmd\n=== out ===", .items = &items },
+        .detail = .{ .number = 1, .document = "cmd\n=== out ===", .items = &items, .layout = layout },
         .detail_viewport = .{ .cursor = 1 },
         .detail_selected = detail_selected,
     };
@@ -344,7 +382,49 @@ test "detail render leaves a blank row after the bold header" {
 
     try std.testing.expect(zooi.testing.inspectCell(&screen_and_fd[0], 0, 0).?.style.bold);
     try std.testing.expect(!zooi.testing.inspectCell(&screen_and_fd[0], 0, 31).?.style.reverse);
-    try std.testing.expectEqualStrings(" ", zooi.testing.inspectCell(&screen_and_fd[0], 1, 0).?.text);
+    try std.testing.expectEqualStrings("", zooi.testing.inspectCell(&screen_and_fd[0], 1, 0).?.text);
     try std.testing.expect(zooi.testing.inspectCell(&screen_and_fd[0], 3, 31).?.style.reverse);
-    try std.testing.expectEqualStrings("o", zooi.testing.inspectCell(&screen_and_fd[0], 3, 0).?.text);
+    try std.testing.expectEqualStrings("=", zooi.testing.inspectCell(&screen_and_fd[0], 3, 0).?.text);
+    try std.testing.expectEqualStrings("o", zooi.testing.inspectCell(&screen_and_fd[0], 3, 14).?.text);
+}
+
+test "detail render draws every wrapped fragment of one logical item" {
+    const gpa = std.testing.allocator;
+    var selected = try std.DynamicBitSetUnmanaged.initEmpty(gpa, 1);
+    defer selected.deinit(gpa);
+    var detail_selected = try std.DynamicBitSetUnmanaged.initEmpty(gpa, 1);
+    defer detail_selected.deinit(gpa);
+    const document = "cmd       alpha beta gamma delta epsilon";
+    var items = [_]TestDetailItem{.{
+        .section_start = 0,
+        .section_end = document.len,
+        .payload_start = 10,
+        .payload_end = document.len,
+    }};
+    var layout: detail_layout.Layout = .{};
+    defer layout.deinit(gpa);
+    try layout.reflow(gpa, document, &items, 24);
+    try std.testing.expect(layout.heights.items[0] > 1);
+    var model: TestModel = .{
+        .numbers = &.{1},
+        .count = 1,
+        .size = .{ .rows = 7, .cols = 24 },
+        .mode = .detail,
+        .selected = selected,
+        .detail = .{ .number = 1, .document = document, .items = &items, .layout = layout },
+        .detail_selected = detail_selected,
+    };
+    const page: page_module.Page = .{};
+
+    var screen_and_fd = try testScreen(7, 24);
+    defer (std.Io.File{ .handle = screen_and_fd[1], .flags = .{ .nonblocking = false } }).close(std.testing.io);
+    defer screen_and_fd[0].deinit();
+    try draw("work", &model, &page, &screen_and_fd[0]);
+
+    const second_fragment = layout.itemFragments(0)[1];
+    try std.testing.expectEqualStrings("c", zooi.testing.inspectCell(&screen_and_fd[0], 2, 0).?.text);
+    try std.testing.expectEqualStrings("a", zooi.testing.inspectCell(&screen_and_fd[0], 2, 10).?.text);
+    try std.testing.expectEqualStrings(document[second_fragment.start..][0..1], zooi.testing.inspectCell(&screen_and_fd[0], 3, 10).?.text);
+    try std.testing.expect(zooi.testing.inspectCell(&screen_and_fd[0], 2, 23).?.style.reverse);
+    try std.testing.expect(zooi.testing.inspectCell(&screen_and_fd[0], 3, 23).?.style.reverse);
 }

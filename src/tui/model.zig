@@ -47,7 +47,7 @@ pub const Model = struct {
     status_len: usize = 0,
     delete_pinned_count: usize = 0,
     detail: ?Detail = null,
-    detail_viewport: zooi.Viewport = .{},
+    detail_viewport: zooi.VariableViewport = .{},
     detail_selected: std.DynamicBitSetUnmanaged = .{},
     detail_range_base: std.DynamicBitSetUnmanaged = .{},
     detail_range_anchor: ?usize = null,
@@ -154,9 +154,26 @@ pub const Model = struct {
         return self.detail_selected.count();
     }
 
+    pub fn reflowDetail(self: *Model, gpa: std.mem.Allocator) !void {
+        const detail = if (self.detail) |*value| value else return;
+        if (self.size.cols == 0) return;
+        try detail.reflow(gpa, self.size.cols);
+        self.detail_viewport.normalize(detail.layout.index(), self.listRows());
+    }
+
     pub fn detailMove(self: *Model, delta: isize) void {
-        const detail = self.detail orelse return;
-        self.detail_viewport.move(delta, detail.items.len, self.listRows());
+        const detail = if (self.detail) |*value| value else return;
+        self.detail_viewport.moveItems(delta, detail.layout.index(), self.listRows());
+    }
+
+    pub fn detailPage(self: *Model, direction: zooi.VariableViewport.Direction) void {
+        const detail = if (self.detail) |*value| value else return;
+        self.detail_viewport.page(direction, detail.layout.index(), self.listRows());
+    }
+
+    pub fn detailSetCursor(self: *Model, index: usize) void {
+        const detail = if (self.detail) |*value| value else return;
+        self.detail_viewport.setCursor(index, detail.layout.index(), self.listRows());
     }
 
     pub fn detailToggle(self: *Model) void {
@@ -176,6 +193,23 @@ pub const Model = struct {
         self.detail_selected.unsetAll();
         self.detail_selected.setUnion(self.detail_range_base);
         self.detailMove(delta);
+        const anchor = self.detail_range_anchor.?;
+        const first = @min(anchor, self.detail_viewport.cursor);
+        const last = @max(anchor, self.detail_viewport.cursor);
+        self.detail_selected.setRangeValue(.{ .start = first, .end = last + 1 }, true);
+    }
+
+    pub fn detailExtendPage(self: *Model, direction: zooi.VariableViewport.Direction) void {
+        const detail = self.detail orelse return;
+        if (detail.items.len == 0) return;
+        if (self.detail_range_anchor == null) {
+            self.detail_range_anchor = self.detail_viewport.cursor;
+            self.detail_range_base.unsetAll();
+            self.detail_range_base.setUnion(self.detail_selected);
+        }
+        self.detail_selected.unsetAll();
+        self.detail_selected.setUnion(self.detail_range_base);
+        self.detailPage(direction);
         const anchor = self.detail_range_anchor.?;
         const first = @min(anchor, self.detail_viewport.cursor);
         const last = @max(anchor, self.detail_viewport.cursor);
@@ -264,7 +298,6 @@ pub fn handleEvent(model: *Model, event: zooi.Event) Effect {
         .resize => |size| blk: {
             model.size = size;
             model.viewport.normalize(model.count, model.listRows());
-            if (model.detail) |detail| model.detail_viewport.normalize(detail.items.len, model.listRows());
             break :blk .none;
         },
         .key => |key| switch (model.mode) {
@@ -360,27 +393,25 @@ fn detailKey(model: *Model, key: zooi.Key) Effect {
         return .quit;
     }
     if (!isRangeExtensionKey(key)) model.detail_range_anchor = null;
-    const page = @max(model.listRows(), 1);
     switch (key) {
         .up => model.detailMove(-1),
         .down => model.detailMove(1),
         .shift_up => model.detailExtend(-1),
         .shift_down => model.detailExtend(1),
-        .shift_page_up => model.detailExtend(-@as(isize, @intCast(page))),
-        .shift_page_down => model.detailExtend(@intCast(page)),
-        .page_up => model.detailMove(-@as(isize, @intCast(page))),
-        .page_down => model.detailMove(@intCast(page)),
+        .shift_page_up => model.detailExtendPage(.up),
+        .shift_page_down => model.detailExtendPage(.down),
+        .page_up => model.detailPage(.up),
+        .page_down => model.detailPage(.down),
         .shift_home => model.detailExtend(-@as(isize, @intCast(model.detail_viewport.cursor))),
         .shift_end => if (model.detail) |detail| {
             if (detail.items.len != 0) model.detailExtend(@intCast(detail.items.len - 1 - model.detail_viewport.cursor));
         },
         .home => {
-            const count = if (model.detail) |detail| detail.items.len else 0;
-            model.detail_viewport.setCursor(0, count, model.listRows());
+            model.detailSetCursor(0);
         },
         .end => {
             if (model.detail) |detail| {
-                if (detail.items.len != 0) model.detail_viewport.setCursor(detail.items.len - 1, detail.items.len, model.listRows());
+                if (detail.items.len != 0) model.detailSetCursor(detail.items.len - 1);
             }
         },
         .escape => {
@@ -395,12 +426,11 @@ fn detailKey(model: *Model, key: zooi.Key) Effect {
             'k' => model.detailMove(-1),
             'j' => model.detailMove(1),
             'g' => {
-                const count = if (model.detail) |detail| detail.items.len else 0;
-                model.detail_viewport.setCursor(0, count, model.listRows());
+                model.detailSetCursor(0);
             },
             'G' => {
                 if (model.detail) |detail| {
-                    if (detail.items.len != 0) model.detail_viewport.setCursor(detail.items.len - 1, detail.items.len, model.listRows());
+                    if (detail.items.len != 0) model.detailSetCursor(detail.items.len - 1);
                 }
             },
             ' ' => model.detailToggle(),
@@ -430,10 +460,10 @@ test "browser navigation clamps and scrolls" {
 
     model.setCursor(3);
     try std.testing.expectEqual(@as(usize, 3), model.viewport.cursor);
-    try std.testing.expectEqual(@as(usize, 2), model.viewport.offset);
+    try std.testing.expectEqual(@as(usize, 3), model.viewport.offset);
     model.size.rows = 5;
     model.viewport.normalize(model.count, model.listRows());
-    try std.testing.expectEqual(@as(usize, 1), model.viewport.offset);
+    try std.testing.expectEqual(@as(usize, 2), model.viewport.offset);
     model.moveCursor(-20);
     try std.testing.expectEqual(@as(usize, 0), model.viewport.cursor);
     try std.testing.expectEqual(@as(usize, 0), model.viewport.offset);
@@ -491,7 +521,7 @@ test "browser selects individual entries and inclusive ranges" {
     try std.testing.expectEqual(@as(usize, 0), model.selectedCount());
     const focused = try model.actionNumbers(gpa);
     defer gpa.free(focused);
-    try std.testing.expectEqualSlices(u32, &.{10}, focused);
+    try std.testing.expectEqualSlices(u32, &.{9}, focused);
 }
 
 test "browser exports only an explicit selection" {
@@ -558,6 +588,8 @@ test "detail navigation selects values and inclusive ranges" {
     };
     defer model.detail_selected.deinit(gpa);
     defer model.detail_range_base.deinit(gpa);
+    try model.reflowDetail(gpa);
+    defer model.detail.?.layout.deinit(gpa);
 
     try std.testing.expectEqual(Effect.none, detailKey(&model, .down));
     try std.testing.expectEqual(@as(usize, 1), model.detail_viewport.cursor);
@@ -588,8 +620,10 @@ test "detail navigation extends selections by pages and to boundaries" {
     };
     defer model.detail_selected.deinit(gpa);
     defer model.detail_range_base.deinit(gpa);
+    try model.reflowDetail(gpa);
+    defer model.detail.?.layout.deinit(gpa);
 
-    model.detail_viewport.setCursor(1, items.len, model.listRows());
+    model.detailSetCursor(1);
     _ = detailKey(&model, .shift_page_down);
     try std.testing.expectEqual(@as(usize, 4), model.detail_viewport.cursor);
     try std.testing.expectEqual(@as(usize, 4), model.detailSelectedCount());
@@ -604,6 +638,7 @@ test "detail navigation extends selections by pages and to boundaries" {
 }
 
 test "detail scrolling moves only when focus crosses a viewport edge" {
+    const gpa = std.testing.allocator;
     var items = [_]DetailItem{
         .{ .section_start = 0, .section_end = 0, .payload_start = 0, .payload_end = 0 },
         .{ .section_start = 0, .section_end = 0, .payload_start = 0, .payload_end = 0 },
@@ -617,13 +652,54 @@ test "detail scrolling moves only when focus crosses a viewport edge" {
         .size = .{ .rows = 6, .cols = 80 },
         .detail = .{ .number = 1, .document = @constCast(""), .exports = @constCast(""), .items = &items },
     };
+    try model.reflowDetail(gpa);
+    defer model.detail.?.layout.deinit(gpa);
 
-    model.detail_viewport.setCursor(2, items.len, model.listRows());
+    model.detailSetCursor(2);
     try std.testing.expectEqual(@as(usize, 0), model.detail_viewport.offset);
-    model.detail_viewport.setCursor(4, items.len, model.listRows());
-    try std.testing.expectEqual(@as(usize, 1), model.detail_viewport.offset);
-    model.detail_viewport.setCursor(6, items.len, model.listRows());
-    try std.testing.expectEqual(@as(usize, 3), model.detail_viewport.offset);
-    model.detail_viewport.setCursor(0, items.len, model.listRows());
+    model.detailSetCursor(4);
+    try std.testing.expectEqual(@as(usize, 2), model.detail_viewport.offset);
+    model.detailSetCursor(6);
+    try std.testing.expectEqual(@as(usize, 4), model.detail_viewport.offset);
+    model.detailSetCursor(0);
     try std.testing.expectEqual(@as(usize, 0), model.detail_viewport.offset);
+}
+
+test "detail paging traverses visual rows while selection stays logical" {
+    const gpa = std.testing.allocator;
+    const document = "abcdefghijklmnopqrstuvwxyz1234\nnext";
+    var items = [_]DetailItem{
+        .{ .section_start = 0, .section_end = 30, .payload_start = 0, .payload_end = 30, .kind = .output },
+        .{ .section_start = 31, .section_end = document.len, .payload_start = 31, .payload_end = document.len, .kind = .output },
+    };
+    var model: Model = .{
+        .mode = .detail,
+        .size = .{ .rows = 6, .cols = 5 },
+        .detail = .{ .number = 1, .document = @constCast(document), .exports = @constCast(document), .items = &items },
+        .detail_selected = try std.DynamicBitSetUnmanaged.initEmpty(gpa, items.len),
+        .detail_range_base = try std.DynamicBitSetUnmanaged.initEmpty(gpa, items.len),
+    };
+    defer model.detail_selected.deinit(gpa);
+    defer model.detail_range_base.deinit(gpa);
+    try model.reflowDetail(gpa);
+    defer model.detail.?.layout.deinit(gpa);
+
+    model.detailPage(.down);
+    try std.testing.expectEqual(@as(usize, 0), model.detail_viewport.cursor);
+    try std.testing.expectEqual(@as(usize, 3), model.detail_viewport.row_in_item);
+    model.detailPage(.down);
+    try std.testing.expectEqual(@as(usize, 1), model.detail_viewport.cursor);
+
+    model.detailSetCursor(0);
+    model.detailMove(1);
+    try std.testing.expectEqual(@as(usize, 1), model.detail_viewport.cursor);
+    model.detailSetCursor(0);
+    model.detailExtendPage(.down);
+    try std.testing.expectEqual(@as(usize, 1), model.detailSelectedCount());
+    try std.testing.expect(model.detail_selected.isSet(0));
+
+    model.size.cols = 10;
+    try model.reflowDetail(gpa);
+    try std.testing.expectEqual(@as(usize, 0), model.detail_viewport.cursor);
+    try std.testing.expect(model.detail_selected.isSet(0));
 }

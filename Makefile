@@ -72,10 +72,10 @@ test-integration:
 	$(ZIG) build test-integration
 
 fmt:
-	$(ZIG) fmt .
+	$(ZIG) fmt src build.zig build.zig.zon
 
 fmt-check:
-	$(ZIG) fmt --check .
+	$(ZIG) fmt --check src build.zig build.zig.zon
 
 # The gates every change has to pass.
 check: fmt-check test

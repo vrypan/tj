@@ -121,6 +121,42 @@ test "tui exports output that matches its structural separator" {
     try std.testing.expectEqual(@as(u8, 0), try terminal.finish());
 }
 
+test "tui wraps one long output line without splitting its export" {
+    if (!support.haveZsh()) return error.SkipZigTest;
+    const gpa = std.testing.allocator;
+    const output = "WRAPPED_OUTPUT_abcdefghijklmnopqrstuvwxyz_ABCDEFGHIJKLMNOPQRSTUVWXYZ_0123456789_abcdefghijklmnopqrstuvwxyz";
+
+    var journal = try support.Journal.open(gpa);
+    defer journal.close();
+    const child = try support.spawnJournalZsh(gpa, &journal);
+    var terminal = support.TerminalSession.init(gpa, child);
+    defer terminal.deinit();
+    const transcript = &terminal.transcript;
+    try terminal.setupZsh("");
+
+    var command_buf: [256]u8 = undefined;
+    const command = try std.fmt.bufPrint(&command_buf, "printf '%s\\n' '{s}'\n", .{output});
+    var from = transcript.items.len;
+    try terminal.write(command);
+    try terminal.expectPromptFrom(from);
+
+    from = transcript.items.len;
+    try terminal.write("command \"$TJ\" tui | wc -c | tr -d ' '; print\n");
+    try terminal.expectFrom(from, "1 entries");
+    try terminal.write("\rjjjjjjjjjjjjj");
+    try terminal.expectFrom(from, output[output.len - 20 ..]);
+
+    from = transcript.items.len;
+    try terminal.write("\r");
+    var length_buf: [32]u8 = undefined;
+    const expected_length = try std.fmt.bufPrint(&length_buf, "{d}", .{output.len + 2});
+    try terminal.expectFrom(from, expected_length);
+    try terminal.expectPromptFrom(from);
+
+    try terminal.write("exit 0\n");
+    try std.testing.expectEqual(@as(u8, 0), try terminal.finish());
+}
+
 test "tui shows details, confirms deletion, and shares pin semantics" {
     if (!support.haveZsh()) return error.SkipZigTest;
     const gpa = std.testing.allocator;
