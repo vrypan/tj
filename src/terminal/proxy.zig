@@ -34,6 +34,34 @@ const stdin_fd: sys.Fd = 0;
 const stdout_fd: sys.Fd = 1;
 const stderr_fd: sys.Fd = 2;
 
+const FlushSchedule = struct {
+    deadline_ms: ?i64 = null,
+
+    fn timeout(self: *FlushSchedule, recording: bool, now_ms: i64) c_int {
+        if (!recording) {
+            self.deadline_ms = null;
+            return -1;
+        }
+        if (self.deadline_ms == null) self.deadline_ms = now_ms + flush_interval_ms;
+        const remaining = @max(self.deadline_ms.? - now_ms, 0);
+        return @intCast(@min(remaining, std.math.maxInt(c_int)));
+    }
+
+    fn consume(self: *FlushSchedule, recording: bool, now_ms: i64) bool {
+        if (!recording) {
+            self.deadline_ms = null;
+            return false;
+        }
+        if (self.deadline_ms == null) {
+            self.deadline_ms = now_ms + flush_interval_ms;
+            return false;
+        }
+        if (now_ms < self.deadline_ms.?) return false;
+        self.deadline_ms = now_ms + flush_interval_ms;
+        return true;
+    }
+};
+
 /// Write end of the self-pipe, read by the poll loop. Signal handlers may only
 /// touch async-signal-safe state, so this is the one thing they write to.
 var sig_pipe_w: std.atomic.Value(c_int) = .init(-1);
@@ -500,13 +528,14 @@ fn pump(gpa: std.mem.Allocator, io: std.Io, home: ?[]const u8, master: sys.Fd, s
     const in = &fds[0];
     const out = &fds[1];
     const sig = &fds[2];
+    var flush_schedule: FlushSchedule = .{};
 
     while (true) {
         // While a command is running, wake up regularly to flush its output to
         // disk, so `tail -f` on `@N/out` shows progress.
         const recording = recorder.store.isRecording();
         const before_poll_ms = std.Io.Clock.now(.awake, io).toMilliseconds();
-        var timeout: c_int = if (recording) flush_interval_ms else -1;
+        var timeout = flush_schedule.timeout(recording, before_poll_ms);
         if (recorder.blinker) |active| {
             const title_timeout = active.timeout(before_poll_ms);
             if (timeout < 0 or title_timeout < timeout) timeout = title_timeout;
@@ -523,9 +552,10 @@ fn pump(gpa: std.mem.Allocator, io: std.Io, home: ?[]const u8, master: sys.Fd, s
             output.feed(out_buf[0..n], recorder);
             if (recorder.broken) return;
             applyHandoff(gpa, io, home, recorder);
-        } else {
-            recorder.store.tick();
         }
+
+        const after_output_ms = std.Io.Clock.now(.awake, io).toMilliseconds();
+        if (flush_schedule.consume(recorder.store.isRecording(), after_output_ms)) recorder.store.tick();
 
         if (recorder.blinker) |active| {
             const now_ms = std.Io.Clock.now(.awake, io).toMilliseconds();
@@ -548,6 +578,18 @@ fn pump(gpa: std.mem.Allocator, io: std.Io, home: ?[]const u8, master: sys.Fd, s
         if (in.fd >= 0 and in.revents & (posix.POLL.ERR | posix.POLL.NVAL) != 0) in.fd = -1;
         if (out.revents & (posix.POLL.ERR | posix.POLL.NVAL) != 0) return;
     }
+}
+
+test "output flush scheduling uses an elapsed deadline" {
+    var schedule: FlushSchedule = .{};
+    try std.testing.expectEqual(@as(c_int, -1), schedule.timeout(false, 1000));
+    try std.testing.expectEqual(@as(c_int, flush_interval_ms), schedule.timeout(true, 1000));
+    try std.testing.expectEqual(@as(c_int, 50), schedule.timeout(true, 1150));
+    try std.testing.expect(!schedule.consume(true, 1199));
+    try std.testing.expect(schedule.consume(true, 1200));
+    try std.testing.expectEqual(@as(c_int, flush_interval_ms), schedule.timeout(true, 1200));
+    try std.testing.expect(!schedule.consume(false, 1300));
+    try std.testing.expectEqual(@as(?i64, null), schedule.deadline_ms);
 }
 
 fn applyHandoff(gpa: std.mem.Allocator, io: std.Io, home: ?[]const u8, recorder: *Recorder) void {

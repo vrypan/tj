@@ -288,6 +288,33 @@ test "an interrupted writer leaves the entry without an rc" {
     try std.testing.expectError(error.FileNotFound, dir.openFile(std.testing.io, "1/rc", .{}));
 }
 
+test "continuous small output is flushed while the command is running" {
+    if (!support.haveZsh()) return error.SkipZigTest;
+    const gpa = std.testing.allocator;
+    const io = std.testing.io;
+
+    var journal = try support.Journal.open(gpa);
+    defer journal.close();
+    const child = try support.spawnJournalZsh(gpa, &journal);
+    var terminal = support.TerminalSession.init(gpa, child);
+    defer terminal.deinit();
+
+    try terminal.setupZsh("");
+    const from = terminal.transcript.items.len;
+    try terminal.write("repeat 40; do printf x; sleep 0.05; done; sleep 30\n");
+    try terminal.expectFrom(from, "133;C");
+    support.sys.sleepMs(io, 500);
+
+    var dir = try journal.journalDir();
+    defer dir.close(io);
+    const stat = try dir.statFile(io, "1/out", .{});
+    try std.testing.expect(stat.size > 0);
+    try std.testing.expect(stat.size < 64 * 1024);
+
+    posix.kill(terminal.child.pid, posix.SIG.TERM) catch {};
+    _ = try terminal.finish();
+}
+
 test "entries record cwd and tjcd changes zsh without expanding its reference" {
     if (!support.haveZsh()) return error.SkipZigTest;
     const gpa = std.testing.allocator;
