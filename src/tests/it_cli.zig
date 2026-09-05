@@ -289,6 +289,25 @@ test "schema errors use status two and command help" {
     }
 }
 
+test "grep operational failures are distinct from no matches" {
+    const gpa = std.testing.allocator;
+    var scratch = try support.Scratch.open();
+    defer scratch.close();
+    try scratch.tmp.dir.writeFile(std.testing.io, .{
+        .sub_path = "not-a-directory",
+        .data = "plain file",
+    });
+    const invalid_home = try std.fmt.allocPrint(gpa, "{s}/not-a-directory", .{scratch.path()});
+    defer gpa.free(invalid_home);
+
+    const result = try support.runNonTty(gpa, &.{ "--home", invalid_home, "grep", "--all", "needle" });
+    defer gpa.free(result.stdout);
+    defer gpa.free(result.stderr);
+    try std.testing.expectEqual(@as(u8, 2), result.term.exited);
+    try std.testing.expectEqualStrings("", result.stdout);
+    try std.testing.expect(result.stderr.len != 0);
+}
+
 test "lifecycle passthrough requires a non-empty child command" {
     const gpa = std.testing.allocator;
     for ([_][]const []const u8{ &.{ "new", "--" }, &.{ "use", "journal", "--" } }) |args| {

@@ -107,6 +107,7 @@ pub fn main(init: std.process.Init) !u8 {
         }
         try stderr.flush();
         if (isUsageError(err) or err == error.NoSuchInteraction) return 2;
+        if (which == .grep) return 2;
         return 1;
     };
     return frontend.flushStdout(&stdout_file, status);
