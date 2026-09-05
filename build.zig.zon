@@ -10,7 +10,7 @@
         },
         .zooi = .{
             .url = "git+https://github.com/vrypan/zooi.git?ref=v0.3.1#e541c626ab2796923626117318a97686a3c7d8c5",
-            .hash = "zooi-0.3.1-c99W4GqQ7QIlIbQWFLn5RYOmBciMUnMI7KAH5KgMbPgq",
+            .hash = "zooi-0.3.1-c99W4DTgAwCI0ebDV-qc6hcLTF6M1oduua25UO-WuUA9",
         },
     },
     .paths = .{
