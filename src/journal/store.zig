@@ -885,14 +885,7 @@ pub fn sweepTemporaryJournals(gpa: std.mem.Allocator, io: Io, home_override: ?[]
         gpa.free(journals);
     }
     for (journals) |journal| {
-        var dir = root.openDir(io, journal, .{ .follow_symlinks = false }) catch continue;
-        const marked = blk: {
-            _ = dir.statFile(io, temporary_marker, .{ .follow_symlinks = false }) catch break :blk false;
-            break :blk true;
-        };
-        dir.close(io);
-        if (!marked) continue;
-        removeJournal(gpa, io, root, journal, true) catch |err| switch (err) {
+        removeTemporaryJournalExact(gpa, io, root, journal) catch |err| switch (err) {
             error.ActiveJournal => {},
             else => return err,
         };
@@ -1683,6 +1676,27 @@ pub fn removeJournal(gpa: std.mem.Allocator, io: Io, root: Dir, journal: []const
     defer namespace.close(io);
     const selected = try findUniqueJournal(gpa, io, root, journal);
     defer gpa.free(selected);
+    _ = try removeSelectedJournal(gpa, io, root, selected, force, false);
+}
+
+/// Removes an enumerated cleanup candidate only if the exact journal is still
+/// marked temporary after its writer lock has been acquired.
+fn removeTemporaryJournalExact(gpa: std.mem.Allocator, io: Io, root: Dir, journal: []const u8) !void {
+    const namespace = try mutation_lock.acquireNamespace(io, root);
+    defer namespace.close(io);
+    _ = try removeSelectedJournal(gpa, io, root, journal, true, true);
+}
+
+/// The caller owns namespace coordination. A false result means an exact
+/// cleanup candidate vanished or was saved before its locks were acquired.
+fn removeSelectedJournal(
+    gpa: std.mem.Allocator,
+    io: Io,
+    root: Dir,
+    selected: []const u8,
+    force: bool,
+    require_temporary: bool,
+) !bool {
     const lock = acquireJournalLock(io, root, selected) catch |err| switch (err) {
         error.JournalLocked => return error.ActiveJournal,
         else => return err,
@@ -1693,6 +1707,20 @@ pub fn removeJournal(gpa: std.mem.Allocator, io: Io, root: Dir, journal: []const
     var mutation_lock_open = true;
     defer if (mutation_lock_open) mutation_guard.close(io);
 
+    {
+        var journal_dir = root.openDir(io, selected, .{ .follow_symlinks = false }) catch |err| switch (err) {
+            error.FileNotFound => return false,
+            else => return err,
+        };
+        defer journal_dir.close(io);
+        if (require_temporary) {
+            _ = journal_dir.statFile(io, temporary_marker, .{ .follow_symlinks = false }) catch |err| switch (err) {
+                error.FileNotFound => return false,
+                else => return err,
+            };
+        }
+    }
+
     if (!force) {
         const numbers = try listNumbers(gpa, io, root, selected);
         defer gpa.free(numbers);
@@ -1701,8 +1729,6 @@ pub fn removeJournal(gpa: std.mem.Allocator, io: Io, root: Dir, journal: []const
         }
     }
 
-    var journal_dir = try root.openDir(io, selected, .{ .follow_symlinks = false });
-    journal_dir.close(io);
     _ = root.createDir(io, ".trash", dir_permissions) catch |err| switch (err) {
         error.PathAlreadyExists => {},
         else => return err,
@@ -1720,6 +1746,7 @@ pub fn removeJournal(gpa: std.mem.Allocator, io: Io, root: Dir, journal: []const
     lock_open = false;
     mutation_lock.removeFile(io, root, selected);
     removeLockFile(io, root, selected);
+    return true;
 }
 
 /// Atomically changes an inactive journal's canonical directory identity.
@@ -1900,6 +1927,32 @@ test "temporary cleanup skips a live writer and removes a stale marker" {
     stale.close(io);
     try sweepTemporaryJournals(gpa, io, home);
     try std.testing.expectError(error.FileNotFound, root.statFile(io, "stale", .{}));
+}
+
+test "temporary cleanup rechecks exact identity and saved state under locks" {
+    const io = std.testing.io;
+    const gpa = std.testing.allocator;
+    var tmp = std.testing.tmpDir(.{ .iterate = true });
+    defer tmp.cleanup();
+    var path_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const home = try testHome(&tmp, io, &path_buf);
+
+    var saved = try Store.createNamedJournal(gpa, io, home, "saved-work", true);
+    saved.begin("echo retained", null, "/tmp");
+    saved.append("retained output\n");
+    saved.finish(0);
+    try std.testing.expect(saved.saveTemporary());
+    saved.close();
+
+    var root = try openRoot(io, home);
+    defer root.close(io);
+    try removeTemporaryJournalExact(gpa, io, root, "saved-work");
+    _ = try root.statFile(io, "saved-work/1/cmd", .{});
+    _ = try root.statFile(io, "saved-work/1/out", .{});
+
+    try root.createDir(io, "only-saved-work", dir_permissions);
+    try removeTemporaryJournalExact(gpa, io, root, "work");
+    _ = try root.statFile(io, "only-saved-work", .{});
 }
 
 test "rename changes identity atomically and preserves journal bytes" {
