@@ -94,6 +94,33 @@ test "tui exports an explicit selection as space-separated entry numbers" {
     try std.testing.expectEqual(@as(u8, 0), try terminal.finish());
 }
 
+test "tui exports output that matches its structural separator" {
+    if (!support.haveZsh()) return error.SkipZigTest;
+    const gpa = std.testing.allocator;
+
+    var journal = try support.Journal.open(gpa);
+    defer journal.close();
+    const child = try support.spawnJournalZsh(gpa, &journal);
+    var terminal = support.TerminalSession.init(gpa, child);
+    defer terminal.deinit();
+    const transcript = &terminal.transcript;
+    try terminal.setupZsh("");
+
+    var from = transcript.items.len;
+    try terminal.write("printf '%s\\n' '=== out ==='\n");
+    try terminal.expectPromptFrom(from);
+
+    from = transcript.items.len;
+    try terminal.write("command \"$TJ\" tui | od -An -tx1 | tr -d '[:space:]'; print\n");
+    try terminal.expectFrom(from, "1 entries");
+    try terminal.write("\rjjjjjjjjjjjjj\r");
+    try terminal.expectFrom(from, "3d3d3d206f7574203d3d3d0d0a");
+    try terminal.expectPromptFrom(from);
+
+    try terminal.write("exit 0\n");
+    try std.testing.expectEqual(@as(u8, 0), try terminal.finish());
+}
+
 test "tui shows details, confirms deletion, and shares pin semantics" {
     if (!support.haveZsh()) return error.SkipZigTest;
     const gpa = std.testing.allocator;

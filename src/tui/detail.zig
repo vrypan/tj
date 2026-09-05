@@ -388,7 +388,7 @@ test "detail exports original command cwd and output bytes" {
     var journal = try store.Store.createJournal(gpa, io, home);
     defer journal.close();
     journal.begin("echo first\necho second", null, "/tmp/two  spaces");
-    journal.append("  indented\t\x1b[31mred\x1b[0m\n\x1b]0;hidden\nstill hidden\x07last line");
+    journal.append("=== out ===\n  indented\t\x1b[31mred\x1b[0m\n\x1b]0;hidden\nstill hidden\x07last line");
     journal.finish(0);
 
     var detail = try load(gpa, io, home, journal.journalId(), 1);
@@ -397,6 +397,8 @@ test "detail exports original command cwd and output bytes" {
     var cwd_found = false;
     var first_output_found = false;
     var last_output_found = false;
+    var structural_separator_found = false;
+    var source_separator_found = false;
     for (detail.items) |item| {
         const shown = detail.document[item.section_start..item.section_end];
         const value = detail.itemValue(item);
@@ -406,6 +408,13 @@ test "detail exports original command cwd and output bytes" {
         } else if (std.mem.startsWith(u8, shown, "cwd       ")) {
             try std.testing.expectEqualStrings("/tmp/two  spaces", value);
             cwd_found = true;
+        } else if (std.mem.eql(u8, shown, "=== out ===")) {
+            if (value.len == 0) {
+                structural_separator_found = true;
+            } else {
+                try std.testing.expectEqualStrings("=== out ===\n", value);
+                source_separator_found = true;
+            }
         } else if (std.mem.indexOf(u8, shown, "indented") != null) {
             try std.testing.expectEqualStrings("  indented\t\x1b[31mred\x1b[0m\n", value);
             first_output_found = true;
@@ -415,4 +424,5 @@ test "detail exports original command cwd and output bytes" {
         }
     }
     try std.testing.expect(command_found and cwd_found and first_output_found and last_output_found);
+    try std.testing.expect(structural_separator_found and source_separator_found);
 }

@@ -94,8 +94,6 @@ fn runWithFilter(gpa: std.mem.Allocator, io: Io, home: ?[]const u8, allowed_numb
             if (selected_count == 0) {
                 if (index != model.detail_viewport.cursor) continue;
             } else if (!model.detail_selected.isSet(index)) continue;
-            const section = detail.document[item.section_start..item.section_end];
-            if (std.mem.eql(u8, section, "=== out ===")) continue;
             try sys.writeAll(io, 1, detail.itemValue(item));
         }
     }
