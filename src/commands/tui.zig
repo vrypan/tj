@@ -27,6 +27,7 @@ const Effect = tui_model.Effect;
 const Model = tui_model.Model;
 
 var region_active: std.atomic.Value(bool) = .init(false);
+var region_fd: std.atomic.Value(c_int) = .init(-1);
 
 pub fn run(gpa: std.mem.Allocator, io: Io, home: ?[]const u8) !void {
     return runWithFilter(gpa, io, home, null);
@@ -51,10 +52,13 @@ fn runWithFilter(gpa: std.mem.Allocator, io: Io, home: ?[]const u8, allowed_numb
     defer page.deinit(gpa);
 
     try sys.writeAll(io, terminal_output, noout.begin_marker);
+    region_fd.store(terminal_output, .release);
     region_active.store(true, .release);
     defer {
-        sys.writeAll(io, terminal_output, noout.end_marker) catch {};
-        region_active.store(false, .release);
+        if (region_active.swap(false, .acq_rel)) {
+            sys.writeAll(io, terminal_output, noout.end_marker) catch {};
+        }
+        region_fd.store(-1, .release);
     }
 
     installSignalHandlers();
@@ -144,8 +148,9 @@ fn installSignalHandlers() void {
 
 fn onFatalSignal(signal: posix.SIG) callconv(.c) void {
     zooi.restore();
-    if (region_active.load(.acquire)) {
-        _ = c.write(1, noout.end_marker.ptr, noout.end_marker.len);
+    if (region_active.swap(false, .acq_rel)) {
+        const fd = region_fd.load(.acquire);
+        if (fd >= 0) _ = c.write(fd, noout.end_marker.ptr, noout.end_marker.len);
     }
     c._exit(@intCast(128 + @intFromEnum(signal)));
 }
