@@ -1686,15 +1686,37 @@ fn writeJsonAtomic(
     try allocating.writer.writeAll("\n");
 
     dir.deleteFile(io, temp_name) catch {};
-    const file = try dir.createFile(io, temp_name, .{ .permissions = file_permissions });
     var renamed = false;
     defer if (!renamed) dir.deleteFile(io, temp_name) catch {};
-    errdefer file.close(io);
-    try file.writePositionalAll(io, allocating.writer.buffered(), 0);
-    try file.sync(io);
-    file.close(io);
+    {
+        const file = try dir.createFile(io, temp_name, .{ .permissions = file_permissions });
+        defer file.close(io);
+        try file.writePositionalAll(io, allocating.writer.buffered(), 0);
+        try file.sync(io);
+    }
     try dir.rename(temp_name, dir, final_name, io);
     renamed = true;
+}
+
+test "atomic JSON rename failures close and clean the temporary file" {
+    const io = std.testing.io;
+    const gpa = std.testing.allocator;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+
+    try tmp.dir.createDir(io, "meta.json", dir_permissions);
+    var destination = try tmp.dir.openDir(io, "meta.json", .{});
+    try destination.writeFile(io, .{ .sub_path = "kept", .data = "original" });
+    destination.close(io);
+
+    var parsed = try std.json.parseFromSlice(std.json.Value, gpa, "{\"v\":1}", .{});
+    defer parsed.deinit();
+    if (writeJsonAtomic(gpa, io, tmp.dir, "meta.json", ".meta.tmp", parsed.value)) |_| {
+        return error.TestUnexpectedResult;
+    } else |_| {}
+
+    _ = try tmp.dir.statFile(io, "meta.json/kept", .{});
+    try std.testing.expectError(error.FileNotFound, tmp.dir.statFile(io, ".meta.tmp", .{}));
 }
 
 pub fn removeJournal(gpa: std.mem.Allocator, io: Io, root: Dir, journal: []const u8, force: bool) !void {
