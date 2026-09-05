@@ -175,8 +175,6 @@ TJ is released under the [MIT License](LICENSE).
 - [Journal storage](docs/storage.md)
 - [OSC ELLO protocol](docs/osc-3110.md)
 - [Development](docs/development.md)
-- [TJ specification](TJ-spec.md)
-- [Open work](TODO.md)
 
 ## Current limits
 

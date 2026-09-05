@@ -372,7 +372,7 @@ _tj_transform_reference_word() {
   suffix=${word#$head}
   [[ $head == @* ]] && _tj_valid_reference_head "$head" || return 0
 
-  # The resolver remains authoritative for both named references and resource
+  # The resolver remains authoritative for both reference heads and resource
   # suffixes. Unknown handles and missing paths stay literal.
   command "$(_tj_bin)" resolve "$word" >/dev/null 2>&1 || return 0
   _tj_scan_word="\"\$(tj ${(q)word})\""

@@ -6,8 +6,8 @@
 brew install vrypan/tap/tj
 ```
 
-The formula builds TJ from source and installs both binaries, the zsh and Fish plugins,
-shell completions, and helper programs.
+The formula builds TJ from source and installs both binaries, the zsh and Fish
+plugins, and shell completions. Optional scripts in `contrib/` are not installed.
 
 ## Release archive
 

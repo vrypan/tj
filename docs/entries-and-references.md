@@ -35,9 +35,9 @@ tj cat --head 20 @42/out
 tj cat --tail 20 @42/out
 ```
 
-When output goes to a terminal, `cat` renders terminal control sequences. When
-it is redirected or piped, raw bytes are the default. `--plain` removes terminal
-formatting; `--raw` always preserves recorded bytes.
+When output goes to a terminal, `cat` passes recorded bytes to the terminal for
+rendering. When redirected or piped, plain rendered text is the default.
+`--plain` removes terminal formatting; `--raw` always preserves recorded bytes.
 
 ## Reference forms
 

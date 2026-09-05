@@ -17,6 +17,3 @@
 - [OSC ELLO protocol](osc-3110.md) — command context, published resources,
   and noout regions
 - [Development](development.md) — builds, tests, dependencies, and releases
-
-The normative behavior is defined in the [TJ specification](../TJ-spec.md).
-Known unfinished work is listed in [TODO.md](../TODO.md).

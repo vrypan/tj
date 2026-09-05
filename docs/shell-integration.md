@@ -235,6 +235,7 @@ They are unset outside a journal.
 Plain zsh example:
 
 ```zsh
+setopt promptsubst
 PROMPT='${TJ_NEXT:+[$TJ_NEXT] }%~ %# '
 ```
 

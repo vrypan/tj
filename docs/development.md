@@ -15,7 +15,7 @@ normal terminal environment.
 
 - `src/cli/` defines the TJ and TJCTL command-line interfaces.
 - `src/commands/` implements command dispatch and command behavior.
-- `src/journal/` owns journal storage, references, metadata, and SQLite.
+- `src/journal/` owns journal storage, references, metadata, and pin markers.
 - `src/protocol/` implements the OSC ELLO protocol and its emitters.
 - `src/terminal/` owns the PTY proxy and terminal state.
 - `src/presentation/` formats journal data for terminal and piped output.
@@ -37,10 +37,9 @@ Dependencies are pinned in `build.zig.zon`:
 
 - Zecli 0.3.2 supplies command parsing, help, environment mapping, and command
   completion generation.
-- Zooi 0.1.3 supplies terminal mechanics for `tj tui` and the startup splash.
+- Zooi 0.2.1 supplies terminal mechanics for `tj tui` and the startup splash.
 
-Both are source dependencies and add no runtime package dependency. TJ embeds
-SQLite through its C source.
+Both are source dependencies and add no runtime package dependency.
 
 ## Build release packages
 
