@@ -1021,11 +1021,10 @@ pub fn readInteraction(
     };
     defer interaction.close(io);
 
-    const command = if (command_limit == 0)
-        try gpa.dupe(u8, "")
-    else
-        interaction.readFileAlloc(io, "cmd", gpa, .limited(command_limit)) catch
-            try gpa.dupe(u8, "");
+    const command = readFilePrefixAlloc(gpa, io, interaction, "cmd", command_limit) catch |err| switch (err) {
+        error.FileNotFound => try gpa.dupe(u8, ""),
+        else => |other| return other,
+    };
     errdefer gpa.free(command);
 
     var out_bytes: u64 = 0;
@@ -1043,6 +1042,27 @@ pub fn readInteraction(
         .out_bytes = out_bytes,
         .out_present = out_present,
     };
+}
+
+/// Reads at most `limit` bytes without treating a longer file as an error.
+/// The returned slice owns only the bytes that were actually read.
+fn readFilePrefixAlloc(gpa: std.mem.Allocator, io: Io, dir: Dir, path: []const u8, limit: usize) ![]u8 {
+    if (limit == 0) return gpa.dupe(u8, "");
+
+    const file = try dir.openFile(io, path, .{});
+    defer file.close(io);
+
+    const length: usize = @intCast(@min(try file.length(io), limit));
+    var bytes = try gpa.alloc(u8, length);
+    errdefer gpa.free(bytes);
+
+    var offset: usize = 0;
+    while (offset < bytes.len) {
+        const count = try file.readPositional(io, &.{bytes[offset..]}, offset);
+        if (count == 0) break;
+        offset += count;
+    }
+    return gpa.realloc(bytes, offset);
 }
 
 /// The whole command, for callers that render more than a listing line.
@@ -1862,6 +1882,31 @@ test "journal listing is lexical and accepts the full name bound" {
     const selected = try findUniqueJournal(gpa, io, root, longest);
     defer gpa.free(selected);
     try std.testing.expectEqualStrings(longest, selected);
+}
+
+test "entry listings retain a bounded prefix of long commands" {
+    const io = std.testing.io;
+    const gpa = std.testing.allocator;
+    var tmp = std.testing.tmpDir(.{ .iterate = true });
+    defer tmp.cleanup();
+
+    try tmp.dir.createDir(io, "work", dir_permissions);
+    var journal = try tmp.dir.openDir(io, "work", .{});
+    defer journal.close(io);
+    try journal.createDir(io, "1", dir_permissions);
+    var entry = try journal.openDir(io, "1", .{});
+    defer entry.close(io);
+    try entry.writeFile(io, .{
+        .sub_path = "cmd",
+        .data = "x" ** (listing_command_limit + 17),
+    });
+
+    var root = try tmp.dir.openDir(io, ".", .{ .iterate = true });
+    defer root.close(io);
+    const info = (try readInteraction(gpa, io, root, "work", 1, listing_command_limit)).?;
+    defer info.deinit(gpa);
+    try std.testing.expectEqual(@as(usize, listing_command_limit), info.command.len);
+    try std.testing.expectEqualSlices(u8, "x" ** listing_command_limit, info.command);
 }
 
 test "explicit journal creation validates names and rejects collisions" {
