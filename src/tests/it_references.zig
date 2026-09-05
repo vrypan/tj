@@ -368,6 +368,7 @@ test "quoted references and addresses are left alone" {
         "echo user@host",
         "echo \"literal @1/out here\"",
         "echo @0 @4294967296 @not-a-reference @someone",
+        "printf '<%s>\\n' escaped\\ @1 escaped\\|@1 \"quoted\\\"@1\"",
     });
 
     const quoted = try journal.read(gpa, "2/out");
@@ -382,8 +383,14 @@ test "quoted references and addresses are left alone" {
     defer gpa.free(malformed);
     try std.testing.expect(std.mem.indexOf(u8, malformed, "@0 @4294967296 @not-a-reference @someone") != null);
 
+    const escaped = try journal.read(gpa, "6/out");
+    defer gpa.free(escaped);
+    try std.testing.expect(std.mem.indexOf(u8, escaped, "<escaped @1>") != null);
+    try std.testing.expect(std.mem.indexOf(u8, escaped, "<escaped|@1>") != null);
+    try std.testing.expect(std.mem.indexOf(u8, escaped, "<quoted\"@1>") != null);
+
     // None of these lines contains an eligible unquoted shell-word reference.
-    for ([_][]const u8{ "2/meta.json", "3/meta.json", "4/meta.json", "5/meta.json" }) |path| {
+    for ([_][]const u8{ "2/meta.json", "3/meta.json", "4/meta.json", "5/meta.json", "6/meta.json" }) |path| {
         const meta = try journal.read(gpa, path);
         defer gpa.free(meta);
         try std.testing.expect(std.mem.indexOf(u8, meta, "expanded_cmd") == null);

@@ -330,7 +330,7 @@ _tj_transform_command_line() {
       '"')
         out+=$ch; (( i++ ))
         while (( i <= n )) && [[ ${buf[i]} != '"' ]]; do
-          if [[ ${buf[i]} == '\\' ]] && (( i < n )); then out+=${buf[i]}; (( i++ )); fi
+          if [[ ${buf[i]} == '\' ]] && (( i < n )); then out+=${buf[i]}; (( i++ )); fi
           out+=${buf[i]}; (( i++ ))
         done
         (( i <= n )) && { out+=${buf[i]}; (( i++ )); }
@@ -342,7 +342,7 @@ _tj_transform_command_line() {
       *)
         word=''
         while (( i <= n )); do
-          if [[ ${buf[i]} == '\\' ]] && (( i < n )); then
+          if [[ ${buf[i]} == '\' ]] && (( i < n )); then
             word+=${buf[i]}; (( i++ ))
             word+=${buf[i]}; (( i++ ))
             continue
