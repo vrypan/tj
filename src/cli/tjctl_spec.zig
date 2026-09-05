@@ -29,8 +29,15 @@ const title_blink = zecli.FlagSpec{
     .description = "Alternate the title recording marker every MS (0 disables)",
     .default_value = "1500",
 };
-const new_flags = [_]zecli.FlagSpec{ home_flag, keep_osc, no_splash, title, title_blink, .{ .name = "temp", .description = "Remove the journal unless it is saved before exit" } };
-const use_flags = [_]zecli.FlagSpec{ home_flag, keep_osc, no_splash, title, title_blink, .{ .name = "no-replay", .description = "Start without replaying the journal" } };
+const out_limit = zecli.FlagSpec{
+    .name = "out-limit",
+    .value = .string,
+    .value_name = "SIZE",
+    .description = "Maximum recorded output per entry (0 disables the limit)",
+    .default_value = "1G",
+};
+const new_flags = [_]zecli.FlagSpec{ home_flag, keep_osc, no_splash, title, title_blink, out_limit, .{ .name = "temp", .description = "Remove the journal unless it is saved before exit" } };
+const use_flags = [_]zecli.FlagSpec{ home_flag, keep_osc, no_splash, title, title_blink, out_limit, .{ .name = "no-replay", .description = "Start without replaying the journal" } };
 const force_flags = [_]zecli.FlagSpec{.{ .name = "force", .description = "Skip confirmation or override pin protection" }};
 const ls_flags = [_]zecli.FlagSpec{
     .{ .name = "long", .short = 'l', .description = "Show activity details" },

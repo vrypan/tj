@@ -110,7 +110,7 @@ fn rootErrorMessage(err: anyerror) []const u8 {
 
 fn isUsageError(err: anyerror) bool {
     return switch (err) {
-        error.MissingArgument, error.BadReplayOption, error.BadTitleBlink, error.BadListNumber, error.BadArguments, error.InsideJournalHandoffOptions => true,
+        error.MissingArgument, error.BadReplayOption, error.BadTitleBlink, error.BadOutLimit, error.BadListNumber, error.BadArguments, error.InsideJournalHandoffOptions => true,
         else => false,
     };
 }
@@ -140,6 +140,7 @@ fn commandErrorMessage(err: anyerror) []const u8 {
         error.MissingArgument => "tjctl: this subcommand needs an argument\n",
         error.BadReplayOption => "tjctl: invalid replay numeric option\n",
         error.BadTitleBlink => "tjctl: --title-blink needs milliseconds from 0 through 2147483647\n",
+        error.BadOutLimit => "tjctl: --out-limit needs bytes or a K, M, or G suffix\n",
         error.BadListNumber => "tjctl: --number needs a non-negative integer\n",
         error.JournalFull => "tjctl: journal has no entry numbers left\n",
         error.ForkFailed => "tjctl: cannot fork\n",

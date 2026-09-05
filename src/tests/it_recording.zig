@@ -148,7 +148,7 @@ test "new exports the journal environment" {
         "--",
         "/bin/sh",
         "-c",
-        "printf 'J=%s N=%s TJ=%s TJCTL=%s TITLE=%s BLINK=%s\\n' \"$TJ_JOURNAL\" \"$TJ_NEXT\" \"$TJ\" \"$TJCTL\" \"$TJ_TITLE\" \"$TJ_TITLE_BLINK\"",
+        "printf 'J=%s N=%s TJ=%s TJCTL=%s TITLE=%s BLINK=%s LIMIT=%s\\n' \"$TJ_JOURNAL\" \"$TJ_NEXT\" \"$TJ\" \"$TJCTL\" \"$TJ_TITLE\" \"$TJ_TITLE_BLINK\" \"$TJ_OUT_LIMIT\"",
     }, 24, 80);
     defer r.out.deinit(gpa);
     try std.testing.expectEqual(@as(u8, 0), r.code);
@@ -157,6 +157,44 @@ test "new exports the journal environment" {
     try std.testing.expect(std.mem.indexOf(u8, r.out.items, support.tjctl) != null);
     try std.testing.expect(std.mem.indexOf(u8, r.out.items, "TITLE=none") != null);
     try std.testing.expect(std.mem.indexOf(u8, r.out.items, "BLINK=0") != null);
+    try std.testing.expect(std.mem.indexOf(u8, r.out.items, "LIMIT=1073741824") != null);
+}
+
+test "an output limit truncates storage but not the terminal" {
+    if (!support.haveZsh()) return error.SkipZigTest;
+    const gpa = std.testing.allocator;
+
+    var journal = try support.Journal.open(gpa);
+    defer journal.close();
+    const home = try journal.homeArg(gpa);
+    defer gpa.free(home);
+    const child = try support.spawnTjctl(gpa, &.{
+        support.tjctl, "--home", home, "new", "--out-limit", "12", "--",
+        "/bin/zsh",    "-f",     "-i",
+    }, 24, 80);
+    var terminal = support.TerminalSession.init(gpa, child);
+    defer terminal.deinit();
+    try terminal.setupZsh("");
+
+    const full = "LIMIT_BODY_abcdefghijklmnopqrstuvwxyz";
+    const from = terminal.transcript.items.len;
+    try terminal.write("printf '%s\\n' LIMIT_BODY_abcdefghijklmnopqrstuvwxyz\n");
+    try terminal.expectFrom(from, "tj: @1 output recording stopped at 12b");
+    try terminal.expectPromptFrom(from);
+    const visible = terminal.transcript.items[from..];
+    const output_at = std.mem.lastIndexOf(u8, visible, full ++ "\r\n") orelse return error.TestUnexpectedResult;
+    const notice_at = std.mem.lastIndexOf(u8, visible, "tj: @1 output recording stopped") orelse return error.TestUnexpectedResult;
+    try std.testing.expect(output_at < notice_at);
+
+    try terminal.write("exit 0\n");
+    try std.testing.expectEqual(@as(u8, 0), try terminal.finish());
+    const out = try journal.read(gpa, "1/out");
+    defer gpa.free(out);
+    try std.testing.expectEqualStrings("LIMIT_BODY_a", out);
+    const meta = try journal.read(gpa, "1/meta.json");
+    defer gpa.free(meta);
+    try std.testing.expect(std.mem.indexOf(u8, meta, "\"out_truncated\":true") != null);
+    try std.testing.expect(std.mem.indexOf(u8, meta, "\"out_limit_bytes\":12") != null);
 }
 
 test "the zsh plugin evaluates the configured title at each prompt" {

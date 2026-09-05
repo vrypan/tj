@@ -138,7 +138,7 @@ tj rm @15..@18
 Every entry has core resources:
 
 - `cmd` — the command as typed
-- `out` — recorded terminal output
+- `out` — recorded terminal output, capped at 1 GiB per entry by default
 - `cwd` — the working directory
 - `prompt` — the rendered prompt
 - `rc` — the exit status, when the command finished

@@ -22,6 +22,7 @@ const replay = @import("replay.zig");
 const splash = @import("splash.zig");
 const terminal_title = @import("title.zig");
 const handoff = @import("../protocol/handoff.zig");
+const report = @import("../presentation/report.zig");
 
 const io_buf_size = 64 * 1024;
 const max_protocol_error_log_bytes = 384;
@@ -107,6 +108,7 @@ pub const Options = struct {
     title_blink_ms: u32 = 1500,
     home: ?[]const u8 = null,
     temporary: bool = false,
+    out_limit_bytes: u64 = journal_store.default_out_limit,
 };
 
 pub fn run(gpa: std.mem.Allocator, io: std.Io, opts: Options) !Result {
@@ -116,6 +118,7 @@ pub fn run(gpa: std.mem.Allocator, io: std.Io, opts: Options) !Result {
         .new => |name| try Store.createNamedJournal(gpa, io, opts.home, name, opts.temporary),
         .existing => |selector| try Store.continueJournal(gpa, io, opts.home, selector),
     };
+    store.setOutputLimit(opts.out_limit_bytes);
     defer {
         const saved_temporary = store.saved_temporary;
         const journal = store.journalId();
@@ -216,7 +219,7 @@ pub fn run(gpa: std.mem.Allocator, io: std.Io, opts: Options) !Result {
     const session_token = generateSessionToken(io);
     var child_environment = try sys.environMap().clone(gpa);
     defer child_environment.deinit();
-    try exportEnvironment(&child_environment, &store, opts.title, opts.title_blink_ms, handoff_fds[1], &session_token);
+    try exportEnvironment(&child_environment, &store, opts.title, opts.title_blink_ms, opts.out_limit_bytes, handoff_fds[1], &session_token);
     const default_argv = [_][]const u8{sys.env("SHELL") orelse "/bin/zsh"};
     var executable = try sys.Exec.init(gpa, if (opts.argv.len == 0) &default_argv else opts.argv, &child_environment);
     defer executable.deinit();
@@ -330,12 +333,13 @@ fn generateSessionToken(io: std.Io) [handoff.session_len]u8 {
 }
 
 /// Build the shell's environment without changing the proxy's own snapshot.
-fn exportEnvironment(environment: *std.process.Environ.Map, store: *Store, title: []const u8, title_blink_ms: u32, handoff_fd: sys.Fd, session_token: *const [handoff.session_len]u8) !void {
+fn exportEnvironment(environment: *std.process.Environ.Map, store: *Store, title: []const u8, title_blink_ms: u32, out_limit_bytes: u64, handoff_fd: sys.Fd, session_token: *const [handoff.session_len]u8) !void {
     try environment.put("TJ_JOURNAL", store.journal);
     var number: [32]u8 = undefined;
     try environment.put("TJ_NEXT", try std.fmt.bufPrint(&number, "{d}", .{store.next_number.?}));
     try environment.put("TJ_TITLE", title);
     try environment.put("TJ_TITLE_BLINK", try std.fmt.bufPrint(&number, "{d}", .{title_blink_ms}));
+    try environment.put("TJ_OUT_LIMIT", try std.fmt.bufPrint(&number, "{d}", .{out_limit_bytes}));
     try environment.put("TJ_HANDOFF_FD", try std.fmt.bufPrint(&number, "{d}", .{handoff_fd}));
     try environment.put("TJ_SESSION_ID", session_token);
     if (store.temporary) {
@@ -470,7 +474,18 @@ const Recorder = struct {
                 self.cwd_len = 0;
                 self.has_cwd = false;
             },
-            .command_end => |code| self.store.finish(code),
+            .command_end => |code| {
+                if (self.store.finishReporting(code)) |notice| {
+                    var size_buf: [24]u8 = undefined;
+                    var message_buf: [128]u8 = undefined;
+                    const message = std.fmt.bufPrint(
+                        &message_buf,
+                        "tj: @{d} output recording stopped at {s}\r\n",
+                        .{ notice.number, report.formatHumanSize(notice.limit_bytes, &size_buf) },
+                    ) catch return;
+                    self.forward(message);
+                }
+            },
             // Ends whatever is still open, then captures the prompt which
             // will belong to the next command that actually runs.
             .prompt_start => self.store.promptStart(),
@@ -596,7 +611,7 @@ fn applyHandoff(gpa: std.mem.Allocator, io: std.Io, home: ?[]const u8, recorder:
     const request = recorder.handoff orelse return;
     // Acquire the target before giving up the source lock. If it cannot be
     // acquired, the source writer remains active.
-    const target = switch (request.operation) {
+    var target = switch (request.operation) {
         .new => Store.createNamedJournal(gpa, io, home, if (request.selector_len == 0) null else request.selectorSlice(), request.temporary),
         .use => Store.continueJournal(gpa, io, home, request.selectorSlice()),
     } catch {
@@ -605,6 +620,7 @@ fn applyHandoff(gpa: std.mem.Allocator, io: std.Io, home: ?[]const u8, recorder:
         handoffReply(recorder, 1);
         return;
     };
+    target.setOutputLimit(recorder.store.out_limit_bytes);
     if (request.replay_before_start) {
         var stdout_buffer: [io_buf_size]u8 = undefined;
         var stdout_file: std.Io.File.Writer = .initStreaming(.stdout(), io, &stdout_buffer);

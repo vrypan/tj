@@ -36,6 +36,7 @@ const dir_permissions: File.Permissions = @enumFromInt(0o700);
 const file_permissions: File.Permissions = @enumFromInt(0o600);
 
 const out_buffer_size = 64 * 1024;
+pub const default_out_limit: u64 = 1024 * 1024 * 1024;
 
 /// Past this a resource stops growing and is flagged truncated. `out` itself
 /// is uncapped: a program can only publish what it also printed.
@@ -91,6 +92,8 @@ pub const Store = struct {
     prompt_state: PromptState = .idle,
     /// Set after the first write failure; recording stops, forwarding does not.
     disabled: bool = false,
+    /// Maximum bytes retained in each `out`; zero is explicitly unlimited.
+    out_limit_bytes: u64 = default_out_limit,
 
     const Origin = enum { created, existing };
 
@@ -106,6 +109,8 @@ pub const Store = struct {
         /// Keeps full-screen programs out of `out`, the way the alternate
         /// screen keeps them out of the terminal's scrollback.
         fullscreen: altscreen.Filter = .{},
+        out_bytes_written: u64 = 0,
+        out_truncated: bool = false,
 
         /// OSC ELLO permits one non-nesting resource or noout region.
         open_region: ?OpenRegion = null,
@@ -312,6 +317,10 @@ pub const Store = struct {
     /// The exact journal selected and locked by this writer.
     pub fn journalId(self: *const Store) []const u8 {
         return self.journal;
+    }
+
+    pub fn setOutputLimit(self: *Store, bytes: u64) void {
+        self.out_limit_bytes = bytes;
     }
 
     /// Makes this temporary journal persistent. Only the active proxy calls
@@ -595,11 +604,9 @@ pub const Store = struct {
             self.warn("noout region opened while another region is open", .{});
             return;
         }
-        current.writer.interface.writeAll(noout_placeholder) catch |err| {
-            self.warn("cannot write noout placeholder: {t}", .{err});
-            self.disable();
-            return;
-        };
+        var sink: OutputSink = .{ .store = self, .interaction = current };
+        sink.keep(noout_placeholder);
+        if (self.disabled) return;
         current.open_region = .noout;
     }
 
@@ -648,8 +655,17 @@ pub const Store = struct {
     /// Closes the interaction. Without an exit code the interaction stays
     /// incomplete on disk - readers must treat a missing `rc` as "aborted",
     /// never as success.
+    pub const OutputLimitNotice = struct {
+        number: u32,
+        limit_bytes: u64,
+    };
+
     pub fn finish(self: *Store, code: ?u8) void {
-        var current = self.current orelse return;
+        _ = self.finishReporting(code);
+    }
+
+    pub fn finishReporting(self: *Store, code: ?u8) ?OutputLimitNotice {
+        var current = self.current orelse return null;
         self.current = null;
         if (code) |value| current.exit_code = value;
 
@@ -676,6 +692,10 @@ pub const Store = struct {
             self.gpa.free(entry.mime);
         }
         current.dir.close(self.io);
+        return if (current.out_truncated) .{
+            .number = current.number,
+            .limit_bytes = self.out_limit_bytes,
+        } else null;
     }
 
     fn handleCompletedOutputFlush(self: *Store, result: anyerror!void) void {
@@ -711,6 +731,9 @@ pub const Store = struct {
                 current.fullscreen.regions,
                 current.fullscreen.suppressed,
             });
+        }
+        if (current.out_truncated) {
+            try writer.writer.print(",\"out_truncated\":true,\"out_limit_bytes\":{d}", .{self.out_limit_bytes});
         }
         if (current.published_count > 0) {
             try writer.writer.writeAll(",\"resources\":{");
@@ -2027,6 +2050,48 @@ test "a completed output flush failure disables later recording" {
     try std.testing.expect(std.mem.indexOf(u8, log, "cannot flush completed output") != null);
 }
 
+test "entry output limits retain a prefix and report only omitted bytes" {
+    const io = std.testing.io;
+    const gpa = std.testing.allocator;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var root_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const root_len = try tmp.dir.realPath(io, &root_buf);
+
+    var store = try Store.createNamedJournal(gpa, io, root_buf[0..root_len], "limited", false);
+    defer store.close();
+    store.setOutputLimit(5);
+
+    store.begin("overflow", null, null);
+    store.append("abc");
+    store.append("defghi");
+    const notice = store.finishReporting(0).?;
+    try std.testing.expectEqual(@as(u32, 1), notice.number);
+    try std.testing.expectEqual(@as(u64, 5), notice.limit_bytes);
+    const limited = try store.journal_dir.readFileAlloc(io, "1/out", gpa, .limited(64));
+    defer gpa.free(limited);
+    try std.testing.expectEqualStrings("abcde", limited);
+    const meta = try store.journal_dir.readFileAlloc(io, "1/meta.json", gpa, .limited(4096));
+    defer gpa.free(meta);
+    try std.testing.expect(std.mem.indexOf(u8, meta, "\"out_truncated\":true") != null);
+    try std.testing.expect(std.mem.indexOf(u8, meta, "\"out_limit_bytes\":5") != null);
+
+    store.begin("exact", null, null);
+    store.append("12345");
+    try std.testing.expect(store.finishReporting(0) == null);
+    const exact_meta = try store.journal_dir.readFileAlloc(io, "2/meta.json", gpa, .limited(4096));
+    defer gpa.free(exact_meta);
+    try std.testing.expect(std.mem.indexOf(u8, exact_meta, "out_truncated") == null);
+
+    store.setOutputLimit(0);
+    store.begin("unlimited", null, null);
+    store.append("longer than five bytes");
+    try std.testing.expect(store.finishReporting(0) == null);
+    const unlimited = try store.journal_dir.readFileAlloc(io, "3/out", gpa, .limited(64));
+    defer gpa.free(unlimited);
+    try std.testing.expectEqualStrings("longer than five bytes", unlimited);
+}
+
 test "temporary cleanup rechecks exact identity and saved state under locks" {
     const io = std.testing.io;
     const gpa = std.testing.allocator;
@@ -2310,10 +2375,19 @@ const OutputSink = struct {
     interaction: *Store.Interaction,
 
     pub fn keep(self: *OutputSink, bytes: []const u8) void {
-        self.interaction.writer.interface.writeAll(bytes) catch |err| {
+        const limit = self.store.out_limit_bytes;
+        const room = if (limit == 0)
+            bytes.len
+        else
+            @min(bytes.len, limit -| @min(self.interaction.out_bytes_written, limit));
+        if (room < bytes.len) self.interaction.out_truncated = true;
+        if (room == 0) return;
+        self.interaction.writer.interface.writeAll(bytes[0..room]) catch |err| {
             self.store.warn("cannot write output: {t}", .{err});
             self.store.disable();
+            return;
         };
+        self.interaction.out_bytes_written +|= room;
     }
 };
 
@@ -2832,6 +2906,29 @@ pub const Timing = struct {
         return @max(0, self.ended - self.started);
     }
 };
+
+pub const OutputRecordingState = struct {
+    truncated: bool = false,
+    limit_bytes: u64 = 0,
+};
+
+pub fn readOutputRecordingState(gpa: std.mem.Allocator, io: Io, root: Dir, journal: []const u8, number: u32) OutputRecordingState {
+    var path_buf: [journal_name.max_len + 32]u8 = undefined;
+    const sub = std.fmt.bufPrint(&path_buf, "{s}/{d}/meta.json", .{ journal, number }) catch return .{};
+    const text = root.readFileAlloc(io, sub, gpa, .limited(64 * 1024)) catch return .{};
+    defer gpa.free(text);
+
+    const Meta = struct {
+        out_truncated: bool = false,
+        out_limit_bytes: u64 = 0,
+    };
+    const parsed = std.json.parseFromSlice(Meta, gpa, text, .{ .ignore_unknown_fields = true }) catch return .{};
+    defer parsed.deinit();
+    return .{
+        .truncated = parsed.value.out_truncated,
+        .limit_bytes = parsed.value.out_limit_bytes,
+    };
+}
 
 /// Reads the timings an interaction recorded. Absent or unparseable metadata
 /// is not an error: replaying without pacing is better than not replaying.

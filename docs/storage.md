@@ -70,4 +70,9 @@ An entry's `rc` is the command's real exit status; its presence does not prove
 that every buffered output byte reached storage. A failed final output flush
 disables further recording for that writer and is logged when possible.
 
+An entry's `out` is capped at 1 GiB by default. Once a byte would exceed the
+configured limit, TJ stops writing that entry's output while continuing to
+forward terminal bytes. `meta.json` records `out_truncated` and
+`out_limit_bytes`; a limit of zero is the explicit unlimited mode.
+
 See the [OSC ELLO protocol](osc-3110.md) for TJ's in-band messages.

@@ -82,6 +82,9 @@ test "application and every command expose generated help" {
         try std.testing.expect(std.mem.indexOf(u8, result.stdout, usage) != null);
         if (std.mem.eql(u8, name, "new")) try std.testing.expect(std.mem.indexOf(u8, result.stdout, "--temp") != null);
         if (std.mem.eql(u8, name, "use")) try std.testing.expect(std.mem.indexOf(u8, result.stdout, "--temp") == null);
+        if (std.mem.eql(u8, name, "new") or std.mem.eql(u8, name, "use")) {
+            try std.testing.expect(std.mem.indexOf(u8, result.stdout, "--out-limit <SIZE>") != null);
+        }
     }
 
     const alias = try support.runNonTty(gpa, &.{ "history", "--help" });

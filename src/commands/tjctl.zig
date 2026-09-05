@@ -27,6 +27,10 @@ pub fn run(
     const home = if (parsed.present("home")) parsed.last("home") else root_home orelse parsed.last("home");
     const title = parsed.last("title") orelse "TJ | %3~";
     const splash_enabled = !parsed.enabled("no-splash");
+    const out_limit_bytes = if (which == .new or which == .use)
+        try parseOutLimit(parsed.last("out-limit").?)
+    else
+        0;
     const title_blink_ms = if (which == .new or which == .use) blk: {
         const configured = try parseTitleBlink(parsed.last("title-blink").?);
         if (std.mem.eql(u8, title, "none")) {
@@ -48,6 +52,7 @@ pub fn run(
                 .title_blink_ms = title_blink_ms,
                 .home = home,
                 .temporary = parsed.enabled("temp"),
+                .out_limit_bytes = out_limit_bytes,
             };
             if (insideWriter()) {
                 if (!sys.envPresent("TJ_SHELL_HANDOFF")) return error.UseShellHandoff;
@@ -70,6 +75,7 @@ pub fn run(
                 .title = title,
                 .title_blink_ms = title_blink_ms,
                 .home = home,
+                .out_limit_bytes = out_limit_bytes,
             };
             if (insideWriter()) {
                 if (!sys.envPresent("TJ_SHELL_HANDOFF")) return error.UseShellHandoff;
@@ -134,7 +140,7 @@ fn emitHandoff(
     // would only take effect when starting a fresh writer are refused here
     // rather than silently ignored.
     if (root_home_explicit or parsed.present("home") or child.len != 0) return error.InsideJournalHandoffOptions;
-    for ([_][]const u8{ "keep-osc", "title", "title-blink", "no-splash" }) |flag| {
+    for ([_][]const u8{ "keep-osc", "title", "title-blink", "no-splash", "out-limit" }) |flag| {
         if (parsed.present(flag)) return error.InsideJournalHandoffOptions;
     }
     var resolved_selector: ?[]u8 = null;
@@ -251,11 +257,41 @@ fn parseTitleBlink(text: []const u8) !u32 {
     return millis;
 }
 
+fn parseOutLimit(text: []const u8) !u64 {
+    if (text.len == 0) return error.BadOutLimit;
+    var digits: usize = 0;
+    while (digits < text.len and std.ascii.isDigit(text[digits])) digits += 1;
+    if (digits == 0) return error.BadOutLimit;
+    const value = std.fmt.parseInt(u64, text[0..digits], 10) catch return error.BadOutLimit;
+    const suffix = text[digits..];
+    const multiplier: u64 = if (suffix.len == 0 or std.ascii.eqlIgnoreCase(suffix, "b"))
+        1
+    else if (std.ascii.eqlIgnoreCase(suffix, "k") or std.ascii.eqlIgnoreCase(suffix, "kb"))
+        1024
+    else if (std.ascii.eqlIgnoreCase(suffix, "m") or std.ascii.eqlIgnoreCase(suffix, "mb"))
+        1024 * 1024
+    else if (std.ascii.eqlIgnoreCase(suffix, "g") or std.ascii.eqlIgnoreCase(suffix, "gb"))
+        1024 * 1024 * 1024
+    else
+        return error.BadOutLimit;
+    return std.math.mul(u64, value, multiplier) catch return error.BadOutLimit;
+}
+
 test "title blink intervals accept zero and fit poll timeouts" {
     try std.testing.expectEqual(@as(u32, 0), try parseTitleBlink("0"));
     try std.testing.expectEqual(@as(u32, 1500), try parseTitleBlink("1500"));
     try std.testing.expectError(error.BadTitleBlink, parseTitleBlink("fast"));
     try std.testing.expectError(error.BadTitleBlink, parseTitleBlink("2147483648"));
+}
+
+test "output limits accept binary size suffixes and zero" {
+    try std.testing.expectEqual(@as(u64, 0), try parseOutLimit("0"));
+    try std.testing.expectEqual(@as(u64, 1024), try parseOutLimit("1K"));
+    try std.testing.expectEqual(@as(u64, 1024 * 1024), try parseOutLimit("1mb"));
+    try std.testing.expectEqual(@as(u64, 1024 * 1024 * 1024), try parseOutLimit("1G"));
+    try std.testing.expectError(error.BadOutLimit, parseOutLimit("1.5G"));
+    try std.testing.expectError(error.BadOutLimit, parseOutLimit("huge"));
+    try std.testing.expectError(error.BadOutLimit, parseOutLimit("18446744073709551615G"));
 }
 
 fn completeJournals(gpa: std.mem.Allocator, io: Io, home: ?[]const u8, prefix: []const u8, out: *Io.Writer) !void {

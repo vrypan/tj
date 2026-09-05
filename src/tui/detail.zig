@@ -139,7 +139,17 @@ pub fn load(
     }
     if (info.out_present) {
         var size_buf: [24]u8 = undefined;
-        try document.print(gpa, "out size  {s} ({d} bytes)\n", .{ report.formatHumanSize(info.out_bytes, &size_buf), info.out_bytes });
+        const output_state = store.readOutputRecordingState(gpa, io, root, journal, number);
+        if (output_state.truncated) {
+            var limit_buf: [24]u8 = undefined;
+            try document.print(gpa, "out size  {s} ({d} bytes, truncated at {s})\n", .{
+                report.formatHumanSize(info.out_bytes, &size_buf),
+                info.out_bytes,
+                report.formatHumanSize(output_state.limit_bytes, &limit_buf),
+            });
+        } else {
+            try document.print(gpa, "out size  {s} ({d} bytes)\n", .{ report.formatHumanSize(info.out_bytes, &size_buf), info.out_bytes });
+        }
     } else {
         try document.appendSlice(gpa, "out size  removed\n");
     }
@@ -425,4 +435,25 @@ test "detail exports original command cwd and output bytes" {
     }
     try std.testing.expect(command_found and cwd_found and first_output_found and last_output_found);
     try std.testing.expect(structural_separator_found and source_separator_found);
+}
+
+test "detail identifies output truncated by the recorder" {
+    const gpa = std.testing.allocator;
+    const io = std.testing.io;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var root_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const root_len = try tmp.dir.realPath(io, &root_buf);
+    const home = root_buf[0..root_len];
+
+    var journal = try store.Store.createJournal(gpa, io, home);
+    defer journal.close();
+    journal.setOutputLimit(5);
+    journal.begin("verbose", null, "/tmp");
+    journal.append("123456789");
+    journal.finish(0);
+
+    var detail = try load(gpa, io, home, journal.journalId(), 1);
+    defer detail.deinit(gpa);
+    try std.testing.expect(std.mem.indexOf(u8, detail.document, "out size  5b (5 bytes, truncated at 5b)") != null);
 }

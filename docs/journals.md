@@ -97,6 +97,24 @@ tjctl use project-work --title-blink 0     # disable blinking
 
 `TJ_TITLE_BLINK` sets the default interval.
 
+## Entry output limit
+
+TJ records at most 1 GiB of terminal output per entry by default. Output beyond
+the limit remains visible in the terminal but is not written to `out`. TJ
+prints a notice after that command ends and records the truncation in
+`meta.json`.
+
+Set a different startup limit with bytes or a binary `K`, `M`, or `G` suffix:
+
+```sh
+tjctl new project-work --out-limit 256M
+tjctl use project-work --out-limit 2G
+tjctl new project-work --out-limit 0      # unlimited
+```
+
+`TJ_OUT_LIMIT` sets the default when the flag is absent. A journal handoff
+keeps the active proxy's limit; it cannot change this startup setting.
+
 ## Replay
 
 `tjctl use` replays the journal without recorded delays before starting the new
