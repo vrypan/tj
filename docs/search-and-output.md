@@ -10,17 +10,19 @@ tj grep --cmd docker
 tj grep --out 'connection refused'
 tj grep --all example.com
 tj grep --ignore-case warning
-tj grep --tui warning
+tj grep warning --numbers
+tj grep warning --numbers | tj tui
 tj grep -- --pattern-starting-with-a-dash
 ```
 
 Options that select `--cmd` or `--out` may be combined. Without either option,
 both are searched. `--all` searches every journal.
 
-`--tui` opens the entry browser containing each matching entry once, even when
-several lines or both resources match. It searches the current journal and may
-be combined with `--cmd`, `--out`, and `--ignore-case`. It cannot be combined
-with `--all` or `--color`.
+`--numbers` prints each matching entry number once as one space-separated line,
+even when several lines or both resources match. It searches the current
+journal and may be combined with `--cmd`, `--out`, and `--ignore-case`. Pipe
+it to `tj tui` to browse the matches. It cannot be combined with `--all` or
+`--color` because its unqualified numbers belong to the current journal.
 
 Exit status is `0` when a match is found, `1` when no match is found, and
 greater than `1` for an error.

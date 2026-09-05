@@ -146,6 +146,14 @@ Individual published resources cannot be removed separately.
 
 `tj tui` opens a full-screen browser for the current journal.
 
+When standard input is redirected, it is read as a space-separated list of
+entry numbers and the browser shows only those entries. Numbers are sorted and
+duplicates are ignored:
+
+```sh
+echo 100 101 1002 | tj tui
+```
+
 | Key | Action |
 |---|---|
 | `Up`, `Down`, `j`, `k` | Move |
@@ -182,12 +190,12 @@ tj tui | contrib/tj-md --prompt
 ```
 
 The detail view is a list of selectable logical lines, including its metadata,
-`cwd`, `cmd`, and every output line. Long lines are clipped on screen rather
-than wrapped; selecting one still prints its complete value. `Up`, `Down`,
-`j`, and `k` move the cursor; Space toggles a line and Shift+Up/Down selects an
-inclusive range. Enter restores the terminal, prints the selected lines (or
-the focused line when nothing is selected), and exits. Escape clears a
-selection before returning to the list; `q` returns directly.
+`cwd`, `cmd`, and every output line. Long lines wrap across visual rows but
+remain one selectable item. `Up`, `Down`, `j`, and `k` move the cursor; Space
+toggles a line and Shift+Up/Down selects an inclusive range. Enter restores
+the terminal, prints the complete selected lines (or the focused line when
+nothing is selected), and exits. Escape clears a selection before returning
+to the list; `q` returns directly.
 
 Unpinned entries are deleted without a prompt. If the targets include pinned
 entries, one prompt offers to include them. The browser restores the terminal

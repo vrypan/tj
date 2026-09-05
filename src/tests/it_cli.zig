@@ -62,7 +62,8 @@ test "application and every command expose generated help" {
         defer gpa.free(usage);
         try std.testing.expect(std.mem.indexOf(u8, result.stdout, usage) != null);
         if (std.mem.eql(u8, name, "grep")) {
-            try std.testing.expect(std.mem.indexOf(u8, result.stdout, "--tui") != null);
+            try std.testing.expect(std.mem.indexOf(u8, result.stdout, "--numbers") != null);
+            try std.testing.expect(std.mem.indexOf(u8, result.stdout, "--tui") == null);
             try std.testing.expect(std.mem.indexOf(u8, result.stdout, "Arguments:") != null);
             try std.testing.expect(std.mem.indexOf(u8, result.stdout, "Options:") != null);
             try std.testing.expect(std.mem.indexOf(u8, result.stdout, "--color, --colour <WHEN>") != null);
@@ -275,8 +276,8 @@ test "schema errors use status two and command help" {
         .{ .args = &.{"resolve"}, .diagnostic = "missing required argument", .usage = "Usage: tj resolve" },
         .{ .args = &.{ "complete", "@1", "@2" }, .diagnostic = "too many arguments", .usage = "Usage: tj complete" },
         .{ .args = &.{ "grep", "--color=sometimes", "x" }, .diagnostic = "invalid value", .usage = "Usage: tj grep" },
-        .{ .args = &.{ "grep", "--tui", "--all", "x" }, .diagnostic = "invalid arguments", .usage = "Usage: tj grep" },
-        .{ .args = &.{ "grep", "--tui", "--color=never", "x" }, .diagnostic = "invalid arguments", .usage = "Usage: tj grep" },
+        .{ .args = &.{ "grep", "--numbers", "--all", "x" }, .diagnostic = "invalid arguments", .usage = "Usage: tj grep" },
+        .{ .args = &.{ "grep", "--numbers", "--color=never", "x" }, .diagnostic = "invalid arguments", .usage = "Usage: tj grep" },
         .{ .args = &.{"grep"}, .diagnostic = "invalid arguments", .usage = "Usage: tj grep" },
         .{ .args = &.{ "grep", "needle", "--", "other" }, .diagnostic = "invalid arguments", .usage = "Usage: tj grep" },
         .{ .args = &.{ "grep", "--", "one", "two" }, .diagnostic = "invalid arguments", .usage = "Usage: tj grep" },

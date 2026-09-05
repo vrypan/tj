@@ -189,7 +189,7 @@ fn writeDetailRange(screen: *zooi.Screen, document: []const u8, item: anytype, s
 
 fn drawHeader(journal: []const u8, model: anytype, screen: *zooi.Screen) void {
     var buffer: [160]u8 = undefined;
-    const noun = if (model.allowed_numbers != null) "matches" else "entries";
+    const noun = "entries";
     const text = if (model.selectedCount() == 0)
         std.fmt.bufPrint(&buffer, "tj  {s}  {d} {s} ", .{ journal, model.count, noun }) catch "tj "
     else

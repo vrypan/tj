@@ -55,7 +55,7 @@ const force_flag = [_]zecli.FlagSpec{
 
 const grep_flags = [_]zecli.FlagSpec{
     .{ .name = "all", .short = 'a', .description = "Search every journal" },
-    .{ .name = "tui", .description = "Browse matching entries" },
+    .{ .name = "numbers", .description = "Print matching entry numbers" },
     .{ .name = "cmd", .description = "Search commands" },
     .{ .name = "out", .description = "Search output" },
     .{ .name = "ignore-case", .short = 'i', .description = "Fold ASCII letter case" },
@@ -80,6 +80,7 @@ const commands = [_]zecli.CommandSpec{
         .name = "tui",
         .description = "Browse, inspect, pin, and delete entries",
         .usage = "tj tui",
+        .extra_help = "With redirected standard input, show only the space-separated entry numbers it contains.\n",
     },
     .{
         .name = "filter",

@@ -94,6 +94,49 @@ test "tui exports an explicit selection as space-separated entry numbers" {
     try std.testing.expectEqual(@as(u8, 0), try terminal.finish());
 }
 
+test "tui filters entries from a space-separated stdin list" {
+    if (!support.haveZsh()) return error.SkipZigTest;
+    const gpa = std.testing.allocator;
+
+    var journal = try support.Journal.open(gpa);
+    defer journal.close();
+    const child = try support.spawnJournalZsh(gpa, &journal);
+    var terminal = support.TerminalSession.init(gpa, child);
+    defer terminal.deinit();
+    const transcript = &terminal.transcript;
+    try terminal.setupZsh("");
+
+    for ([_][]const u8{
+        "echo FILTER_KEEP_ONE\n",
+        "echo FILTER_DROP_TWO\n",
+        "echo FILTER_KEEP_THREE\n",
+        "echo FILTER_KEEP_FOUR\n",
+    }) |command| {
+        const from = transcript.items.len;
+        try terminal.write(command);
+        try terminal.expectPromptFrom(from);
+    }
+
+    var from = transcript.items.len;
+    try terminal.write("print -r -- '4 1 4 3' | command \"$TJ\" tui\n");
+    try terminal.expectFrom(from, "3 entries");
+    try terminal.expectFrom(from, "FILTER_KEEP_ONE");
+    try terminal.expectFrom(from, "FILTER_KEEP_THREE");
+    try terminal.expectFrom(from, "FILTER_KEEP_FOUR");
+    const browser = transcript.items[from..];
+    try std.testing.expect(std.mem.indexOf(u8, browser, "FILTER_DROP_TWO") == null);
+    try terminal.write("q");
+    try terminal.expectPromptFrom(from);
+
+    from = transcript.items.len;
+    try terminal.write("print -r -- '1 nope' | command \"$TJ\" tui\n");
+    try terminal.expectFrom(from, "tui stdin must contain space-separated entry numbers");
+    try terminal.expectPromptFrom(from);
+
+    try terminal.write("exit 0\n");
+    try std.testing.expectEqual(@as(u8, 0), try terminal.finish());
+}
+
 test "tui exports output that matches its structural separator" {
     if (!support.haveZsh()) return error.SkipZigTest;
     const gpa = std.testing.allocator;
@@ -251,7 +294,7 @@ test "tui shows details, confirms deletion, and shares pin semantics" {
     try std.testing.expect(std.mem.indexOf(u8, tui_out, "entries") == null);
 }
 
-test "grep tui deduplicates matching entries" {
+test "grep numbers compose with tui and deduplicate matching entries" {
     if (!support.haveZsh()) return error.SkipZigTest;
     const gpa = std.testing.allocator;
 
@@ -274,8 +317,8 @@ test "grep tui deduplicates matching entries" {
     try terminal.expectPromptFrom(from);
 
     from = transcript.items.len;
-    try terminal.write("command \"$TJ\" grep --tui DEDUP_TUI_HIT\n");
-    try terminal.expectFrom(from, "2 matches");
+    try terminal.write("command \"$TJ\" grep DEDUP_TUI_HIT --numbers | command \"$TJ\" tui\n");
+    try terminal.expectFrom(from, "2 entries");
     const browser = transcript.items[from..];
     try std.testing.expect(std.mem.indexOf(u8, browser, "UNRELATED_TUI_ENTRY") == null);
     try terminal.write("q");

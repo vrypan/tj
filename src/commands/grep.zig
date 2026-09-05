@@ -10,7 +10,6 @@ const pins = @import("../journal/pins.zig");
 const search = @import("../journal/search.zig");
 const report = @import("../presentation/report.zig");
 const cmd_context = @import("context.zig");
-const cmd_tui = @import("tui.zig");
 const presentation = @import("../presentation/entry.zig");
 
 pub fn grepRequestFromArgs(args: []const [:0]const u8) !GrepRequest {
@@ -23,7 +22,7 @@ pub const ColorWhen = enum { never, auto, always };
 
 pub const GrepRequest = struct {
     all: bool = false,
-    tui: bool = false,
+    numbers: bool = false,
     commands: bool = true,
     output: bool = true,
     ignore_case: bool = false,
@@ -34,7 +33,7 @@ pub const GrepRequest = struct {
 pub fn grepRequest(parsed: *const zecli.Parsed) !GrepRequest {
     var request: GrepRequest = .{
         .all = parsed.enabled("all"),
-        .tui = parsed.enabled("tui"),
+        .numbers = parsed.enabled("numbers"),
         .ignore_case = parsed.enabled("ignore-case"),
     };
     if (parsed.enabled("cmd") or parsed.enabled("out")) {
@@ -394,12 +393,12 @@ pub fn grepCommand(
 ) !u8 {
     const request = try grepRequest(parsed);
 
-    if (request.tui and (request.all or parsed.present("color"))) return error.BadArguments;
+    if (request.numbers and (request.all or parsed.present("color"))) return error.BadArguments;
 
     const current = sys.env("TJ_JOURNAL");
     if (!request.all and (current == null or current.?.len == 0)) {
-        if (request.tui) {
-            cmd_context.note(io, "tj grep --tui: no current journal\n", .{});
+        if (request.numbers) {
+            cmd_context.note(io, "tj grep --numbers: no current journal\n", .{});
         } else {
             cmd_context.note(io, "tj grep: no current journal; use --all\n", .{});
         }
@@ -412,12 +411,22 @@ pub fn grepCommand(
     defer matcher.deinit();
     const active = cmd_context.activeInteraction();
 
-    if (request.tui) {
+    if (request.numbers) {
         var numbers: std.ArrayList(u32) = .empty;
         defer numbers.deinit(gpa);
         try collectMatchingEntries(gpa, io, root, current.?, request, active, &matcher, &numbers);
         if (numbers.items.len == 0) return 1;
-        try cmd_tui.runFiltered(gpa, io, home, numbers.items);
+        var noout_region: report.NooutRegion = .{
+            .out = out,
+            .enabled = sys.isTty(io, 1),
+        };
+        defer noout_region.finish();
+        try noout_region.begin();
+        for (numbers.items, 0..) |number, index| {
+            if (index != 0) try out.writeByte(' ');
+            try out.print("{d}", .{number});
+        }
+        try out.writeByte('\n');
         return 0;
     }
 
@@ -612,7 +621,7 @@ test "grep arguments select resources and preserve literal syntax" {
     try std.testing.expectEqualStrings("-needle", leading.pattern);
 
     try std.testing.expectEqual(ColorWhen.never, (try grepRequestFromArgs(&.{"x"})).color);
-    try std.testing.expect((try grepRequestFromArgs(&.{ "--tui", "x" })).tui);
+    try std.testing.expect((try grepRequestFromArgs(&.{ "x", "--numbers" })).numbers);
     const automatic = try grepRequestFromArgs(&.{ "--color", "auto", "x" });
     try std.testing.expectEqual(ColorWhen.auto, automatic.color);
     try std.testing.expectEqualStrings("x", automatic.pattern);

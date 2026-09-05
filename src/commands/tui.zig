@@ -22,6 +22,7 @@ const tui_page = @import("../tui/page.zig");
 const tui_render = @import("../tui/render.zig");
 
 const max_events_per_frame = 64;
+const max_filter_input_bytes = 4 * 1024 * 1024;
 
 const Effect = tui_model.Effect;
 const Model = tui_model.Model;
@@ -30,17 +31,17 @@ var region_active: std.atomic.Value(bool) = .init(false);
 var region_fd: std.atomic.Value(c_int) = .init(-1);
 
 pub fn run(gpa: std.mem.Allocator, io: Io, home: ?[]const u8) !void {
+    if (!sys.isTty(io, 0)) {
+        const numbers = try readFilterNumbers(gpa, io);
+        defer gpa.free(numbers);
+        return runWithFilter(gpa, io, home, numbers);
+    }
     return runWithFilter(gpa, io, home, null);
-}
-
-pub fn runFiltered(gpa: std.mem.Allocator, io: Io, home: ?[]const u8, numbers: []const u32) !void {
-    return runWithFilter(gpa, io, home, numbers);
 }
 
 fn runWithFilter(gpa: std.mem.Allocator, io: Io, home: ?[]const u8, allowed_numbers: ?[]const u32) !void {
     const journal = try context.currentJournal();
     if (journal.len == 0) return error.NotInJournal;
-    if (!sys.isTty(io, 0)) return error.NoControllingTerminal;
     const terminal_output: sys.Fd = if (sys.isTty(io, 1)) 1 else if (sys.isTty(io, 2)) 2 else return error.NoControllingTerminal;
 
     var model: Model = .{};
@@ -103,6 +104,39 @@ fn runWithFilter(gpa: std.mem.Allocator, io: Io, home: ?[]const u8, allowed_numb
         }
     }
     if (model.selection_exported) try writeSelectedNumbers(io, &model);
+}
+
+fn readFilterNumbers(gpa: std.mem.Allocator, io: Io) ![]u32 {
+    var reader_buffer: [4096]u8 = undefined;
+    var reader = Io.File.stdin().readerStreaming(io, &reader_buffer);
+    const input = reader.interface.allocRemaining(gpa, .limited(max_filter_input_bytes)) catch |err| switch (err) {
+        error.StreamTooLong => return error.TuiInputTooLarge,
+        else => return err,
+    };
+    defer gpa.free(input);
+    return parseFilterNumbers(gpa, input);
+}
+
+fn parseFilterNumbers(gpa: std.mem.Allocator, input: []const u8) ![]u32 {
+    var numbers: std.ArrayList(u32) = .empty;
+    defer numbers.deinit(gpa);
+
+    var tokens = std.mem.tokenizeAny(u8, input, " \t\r\n\x0b\x0c");
+    while (tokens.next()) |token| {
+        const number = std.fmt.parseInt(u32, token, 10) catch return error.InvalidTuiInput;
+        if (number == 0) return error.InvalidTuiInput;
+        try numbers.append(gpa, number);
+    }
+
+    std.mem.sort(u32, numbers.items, {}, std.sort.asc(u32));
+    var unique: usize = 0;
+    for (numbers.items) |number| {
+        if (unique != 0 and numbers.items[unique - 1] == number) continue;
+        numbers.items[unique] = number;
+        unique += 1;
+    }
+    numbers.items.len = unique;
+    return numbers.toOwnedSlice(gpa);
 }
 
 fn writeSelectedNumbers(io: Io, model: *const Model) !void {
@@ -276,4 +310,13 @@ fn friendlyError(err: anyerror) []const u8 {
         error.NoSuchInteraction => "entry disappeared; press r to refresh",
         else => @errorName(err),
     };
+}
+
+test "tui input numbers are sorted and deduplicated" {
+    const gpa = std.testing.allocator;
+    const numbers = try parseFilterNumbers(gpa, "1002  100\n101\t1002\n");
+    defer gpa.free(numbers);
+    try std.testing.expectEqualSlices(u32, &.{ 100, 101, 1002 }, numbers);
+    try std.testing.expectError(error.InvalidTuiInput, parseFilterNumbers(gpa, "1 @2"));
+    try std.testing.expectError(error.InvalidTuiInput, parseFilterNumbers(gpa, "0"));
 }

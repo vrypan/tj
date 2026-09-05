@@ -129,6 +129,8 @@ fn isUsageError(err: anyerror) bool {
 fn commandErrorMessage(which: cli.CommandName, err: anyerror) []const u8 {
     if (which == .tui) return switch (err) {
         error.NotInJournal => "tj: tui must run inside a tj journal writer\n",
+        error.InvalidTuiInput => "tj: tui stdin must contain space-separated entry numbers\n",
+        error.TuiInputTooLarge => "tj: tui stdin is too large\n",
         error.NoControllingTerminal, error.NotATerminal => "tj: tui needs an interactive terminal\n",
         error.TerminalSetupFailed, error.ReadFailed, error.PollFailed => "tj: tui terminal session failed\n",
         else => "tj: cannot open the journal browser\n",
@@ -138,11 +140,6 @@ fn commandErrorMessage(which: cli.CommandName, err: anyerror) []const u8 {
         error.NoControllingTerminal => "tj: filter --noout needs a controlling terminal\n",
         error.ForkFailed => "tj: cannot fork\n",
         else => "tj: cannot run filter\n",
-    };
-    if (which == .grep) switch (err) {
-        error.NoControllingTerminal, error.NotATerminal => return "tj: grep --tui needs an interactive terminal\n",
-        error.TerminalSetupFailed, error.ReadFailed, error.PollFailed => return "tj: grep --tui terminal session failed\n",
-        else => {},
     };
     return switch (err) {
         error.NotInJournal => "tj: not inside a tj journal writer\n",

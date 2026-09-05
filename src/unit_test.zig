@@ -6,6 +6,7 @@ comptime {
     _ = @import("tjctl_main.zig");
     _ = @import("terminal/title.zig");
     _ = @import("child.zig");
+    _ = @import("commands/tui.zig");
     _ = @import("tui/detail.zig");
     _ = @import("tui/detail_layout.zig");
     _ = @import("tui/model.zig");

@@ -333,11 +333,24 @@ test "native grep searches literal command and output lines with stable statuses
     try std.testing.expect(std.mem.indexOf(u8, both.stdout, "   4 >") != null);
     try std.testing.expect(std.mem.indexOf(u8, both.stdout, "   4 <") != null);
 
+    const numbers = try support.runNonTtyInJournal(gpa, &.{ "--home", home, "grep", "LITERAL_012", "--numbers" }, id, "");
+    defer gpa.free(numbers.stdout);
+    defer gpa.free(numbers.stderr);
+    try std.testing.expectEqual(@as(u8, 0), numbers.term.exited);
+    try std.testing.expectEqualStrings("1 2 4\n", numbers.stdout);
+    try std.testing.expectEqualStrings("", numbers.stderr);
+
     const outside = try support.runNonTtyInJournal(gpa, &.{ "--home", home, "grep", "x" }, "", "");
     defer gpa.free(outside.stdout);
     defer gpa.free(outside.stderr);
     try std.testing.expectEqual(@as(u8, 2), outside.term.exited);
     try std.testing.expectEqualStrings("tj grep: no current journal; use --all\n", outside.stderr);
+
+    const numbers_outside = try support.runNonTtyInJournal(gpa, &.{ "--home", home, "grep", "x", "--numbers" }, "", "");
+    defer gpa.free(numbers_outside.stdout);
+    defer gpa.free(numbers_outside.stderr);
+    try std.testing.expectEqual(@as(u8, 2), numbers_outside.term.exited);
+    try std.testing.expectEqualStrings("tj grep --numbers: no current journal\n", numbers_outside.stderr);
 
     const help = try support.runNonTtyInJournal(gpa, &.{ "grep", "--help" }, "", "");
     defer gpa.free(help.stdout);
