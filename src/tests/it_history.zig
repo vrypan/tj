@@ -8,36 +8,6 @@ const support = @import("it_support.zig");
 
 // Pins and history display.
 
-test "pins are entry-local and filter history" {
-    if (!support.haveZsh()) return error.SkipZigTest;
-    const gpa = std.testing.allocator;
-
-    var journal = try support.Journal.open(gpa);
-    defer journal.close();
-    try support.recordJournal(gpa, &journal, &.{ "echo first-entry", "echo second-entry" });
-    try journal.enter(gpa);
-    const home = try journal.homeArg(gpa);
-    defer gpa.free(home);
-
-    var pinned = try support.run(gpa, &.{ "--home", home, "pin", "@1" }, 24, 100);
-    defer pinned.out.deinit(gpa);
-    try std.testing.expectEqual(@as(u8, 0), pinned.code);
-
-    var listed = try support.run(gpa, &.{ "--home", home, "pin" }, 24, 100);
-    defer listed.out.deinit(gpa);
-    try std.testing.expect(std.mem.indexOf(u8, listed.out.items, "@1") != null);
-    try std.testing.expect(std.mem.indexOf(u8, listed.out.items, "@2") == null);
-
-    var filtered = try support.run(gpa, &.{ "--home", home, "hist", "--pinned" }, 24, 120);
-    defer filtered.out.deinit(gpa);
-    try std.testing.expect(std.mem.indexOf(u8, filtered.out.items, "first-entry") != null);
-    try std.testing.expect(std.mem.indexOf(u8, filtered.out.items, "second-entry") == null);
-
-    var unpinned = try support.run(gpa, &.{ "--home", home, "pin", "--remove", "@1" }, 24, 100);
-    defer unpinned.out.deinit(gpa);
-    try std.testing.expectEqual(@as(u8, 0), unpinned.code);
-}
-
 test "history wraps to terminal width and pipes remain one entry per line" {
     if (!support.haveZsh()) return error.SkipZigTest;
     const gpa = std.testing.allocator;
@@ -186,9 +156,16 @@ test "history shows pin and failure flags size UTC date and wrapped commands" {
     try std.testing.expect(visible.len >= continuation + 23);
     for (visible[continuation .. continuation + 23]) |byte| try std.testing.expectEqual(@as(u8, ' '), byte);
 
+    var filtered = try support.run(gpa, &.{ "--home", home, "hist", "--pinned" }, 24, 120);
+    defer filtered.out.deinit(gpa);
+    try std.testing.expectEqual(@as(u8, 0), filtered.code);
+    try std.testing.expect(std.mem.indexOf(u8, filtered.out.items, "printf 1234567890") != null);
+    try std.testing.expect(std.mem.indexOf(u8, filtered.out.items, "false") == null);
+
     const pinned = try support.runNonTtyInJournal(gpa, &.{ "--home", home, "hist", "--pinned" }, id, "4");
     defer gpa.free(pinned.stdout);
     defer gpa.free(pinned.stderr);
+    try std.testing.expectEqual(@as(u8, 0), pinned.term.exited);
     try std.testing.expect(std.mem.indexOf(u8, pinned.stdout, "printf 1234567890") != null);
     try std.testing.expect(std.mem.indexOf(u8, pinned.stdout, "false") == null);
 
@@ -196,8 +173,8 @@ test "history shows pin and failure flags size UTC date and wrapped commands" {
     // narrowed listing lines up with the full one instead of shifting left.
     const whole_line = "*  1   10b Aug 29  2001 printf";
     try std.testing.expect(std.mem.indexOf(u8, plain_result.stdout, whole_line) != null);
+    try std.testing.expect(std.mem.indexOf(u8, pinned.stdout, whole_line) != null);
     for ([_][]const []const u8{
-        &.{ "--home", home, "hist", "--pinned" },
         &.{ "--home", home, "hist", "@1" },
         &.{ "--home", home, "hist", "@1..@1" },
     }) |args| {
@@ -318,6 +295,14 @@ test "pin and cat ranges are inclusive and skip numbering holes" {
     try std.testing.expect(std.mem.indexOf(u8, pins.out.items, "@4\r\n") != null);
     try std.testing.expect(std.mem.indexOf(u8, pins.out.items, "@2\r\n") == null);
     try std.testing.expect(std.mem.indexOf(u8, pins.out.items, "@3\r\n") == null);
+
+    var unpinned_single = try support.run(gpa, &.{ "--home", home, "pin", "--remove", "@1" }, 24, 100);
+    defer unpinned_single.out.deinit(gpa);
+    try std.testing.expectEqual(@as(u8, 0), unpinned_single.code);
+    var dir = try journal.journalDir();
+    defer dir.close(std.testing.io);
+    try std.testing.expectError(error.FileNotFound, dir.statFile(std.testing.io, "1/pin", .{}));
+    _ = try dir.statFile(std.testing.io, "4/pin", .{});
 
     var concatenated = try support.run(gpa, &.{ "--home", home, "cat", "--plain", "@2..@4" }, 24, 100);
     defer concatenated.out.deinit(gpa);

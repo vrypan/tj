@@ -159,17 +159,9 @@ test "entry ranges remove existing entries across holes and reject the running b
     const home = try journal.homeArg(gpa);
     defer gpa.free(home);
 
-    for ([_][]const []const u8{
-        &.{ "pin", "@4" },
-    }) |command_args| {
-        var argv: std.ArrayList([]const u8) = .empty;
-        defer argv.deinit(gpa);
-        try argv.appendSlice(gpa, &.{ "--home", home });
-        try argv.appendSlice(gpa, command_args);
-        var result = try support.run(gpa, argv.items, 24, 100);
-        defer result.out.deinit(gpa);
-        try std.testing.expectEqual(@as(u8, 0), result.code);
-    }
+    var pin_result = try support.run(gpa, &.{ "--home", home, "pin", "@4" }, 24, 100);
+    defer pin_result.out.deinit(gpa);
+    try std.testing.expectEqual(@as(u8, 0), pin_result.code);
 
     // support.recordJournal leaves its `exit` interaction as the protected highest
     // directory. A range containing it must fail before removing @2.

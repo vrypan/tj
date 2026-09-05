@@ -158,39 +158,6 @@ test "a malformed reference and a missing one are told apart" {
 
 // Reference expansion, validation, and completion.
 
-test "numeric bare references expand while unknown handles stay literal" {
-    if (!support.haveZsh()) return error.SkipZigTest;
-    const gpa = std.testing.allocator;
-    var journal = try support.Journal.open(gpa);
-    defer journal.close();
-
-    const child = try support.spawnJournalZsh(gpa, &journal);
-    var terminal = support.TerminalSession.init(gpa, child);
-    defer terminal.deinit();
-    const out = &terminal.transcript;
-    try terminal.setupZsh("");
-
-    for ([_][]const u8{
-        "echo seed",
-        "printf 'RESOLVED=%s\\n' @1/out",
-        "printf 'HANDLE=%s\\n' @someone",
-    }) |line| {
-        const from = out.items.len;
-        try terminal.write(line);
-        try terminal.write("\n");
-        try terminal.expectPromptFrom(from);
-    }
-    try terminal.write("exit 0\n");
-    try std.testing.expectEqual(@as(u8, 0), try terminal.finish());
-
-    try std.testing.expect(std.mem.indexOf(u8, out.items, "RESOLVED=") != null);
-    try std.testing.expect(std.mem.indexOf(u8, out.items, "/1/out") != null);
-    try std.testing.expect(std.mem.indexOf(u8, out.items, "HANDLE=@someone") != null);
-    const typed = try journal.read(gpa, "2/cmd");
-    defer gpa.free(typed);
-    try std.testing.expectEqualStrings("printf 'RESOLVED=%s\\n' @1/out", typed);
-}
-
 test "a reference cannot escape its entry directory" {
     if (!support.haveZsh()) return error.SkipZigTest;
     const gpa = std.testing.allocator;
@@ -400,7 +367,7 @@ test "quoted references and addresses are left alone" {
         "echo 'literal @1/out here'",
         "echo user@host",
         "echo \"literal @1/out here\"",
-        "echo @0 @4294967296 @not-a-reference",
+        "echo @0 @4294967296 @not-a-reference @someone",
     });
 
     const quoted = try journal.read(gpa, "2/out");
@@ -413,7 +380,7 @@ test "quoted references and addresses are left alone" {
 
     const malformed = try journal.read(gpa, "5/out");
     defer gpa.free(malformed);
-    try std.testing.expect(std.mem.indexOf(u8, malformed, "@0 @4294967296 @not-a-reference") != null);
+    try std.testing.expect(std.mem.indexOf(u8, malformed, "@0 @4294967296 @not-a-reference @someone") != null);
 
     // None of these lines contains an eligible unquoted shell-word reference.
     for ([_][]const u8{ "2/meta.json", "3/meta.json", "4/meta.json", "5/meta.json" }) |path| {
