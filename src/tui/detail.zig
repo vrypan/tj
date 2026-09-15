@@ -487,6 +487,17 @@ test "detail identifies output truncated by the recorder" {
     journal.append("123456789");
     journal.finish(0);
 
+    const original = try journal.journal_dir.readFileAlloc(io, "1/meta.json", gpa, .limited(store.max_metadata_bytes));
+    defer gpa.free(original);
+    var large_meta: std.ArrayList(u8) = .empty;
+    defer large_meta.deinit(gpa);
+    try large_meta.appendSlice(gpa, original[0 .. original.len - 2]);
+    try large_meta.appendSlice(gpa, ",\"padding\":\"");
+    try large_meta.appendNTimes(gpa, 'x', 70 * 1024);
+    try large_meta.appendSlice(gpa, "\"}\n");
+    try journal.journal_dir.writeFile(io, .{ .sub_path = "1/meta.json", .data = large_meta.items });
+    try std.testing.expect(large_meta.items.len > 64 * 1024);
+
     var detail = try load(gpa, io, home, journal.journalId(), 1);
     defer detail.deinit(gpa);
     try std.testing.expect(std.mem.indexOf(u8, detail.document, "out size  5b (5 bytes, truncated at 5b)") != null);

@@ -646,6 +646,47 @@ test "a resource the program never closed is flagged truncated" {
     try std.testing.expect(std.mem.indexOf(u8, meta, "\"truncated\":true") != null);
 }
 
+test "output removal reads resource metadata larger than sixty-four kibibytes" {
+    const gpa = std.testing.allocator;
+    const io = std.testing.io;
+    var scratch = try support.Scratch.open();
+    defer scratch.close();
+
+    const id = journal_name.legacy(46, .{9} ** 10);
+    try scratch.makeJournal(id, &.{ "1", "2" });
+    var journal = try scratch.tmp.dir.openDir(io, &id, .{});
+    defer journal.close(io);
+    var interaction = try journal.openDir(io, "1", .{});
+    defer interaction.close(io);
+    try interaction.writeFile(io, .{ .sub_path = "cmd", .data = "publish" });
+    try interaction.writeFile(io, .{ .sub_path = "out", .data = "published bytes" });
+    try interaction.writeFile(io, .{ .sub_path = "published", .data = "published bytes" });
+
+    var meta: std.ArrayList(u8) = .empty;
+    defer meta.deinit(gpa);
+    try meta.appendSlice(gpa, "{\"v\":1,\"started\":\"2026-09-15T10:00:00.000Z\"," ++
+        "\"ended\":\"2026-09-15T10:00:01.000Z\"," ++
+        "\"resources\":{\"published\":{\"mime\":\"text/plain\"," ++
+        "\"truncated\":false}},\"padding\":\"");
+    try meta.appendNTimes(gpa, 'x', 70 * 1024);
+    try meta.appendSlice(gpa, "\"}\n");
+    try interaction.writeFile(io, .{ .sub_path = "meta.json", .data = meta.items });
+    try std.testing.expect(meta.items.len > 64 * 1024);
+
+    const removed = try support.runNonTtyInJournal(gpa, &.{
+        "--home", scratch.path(), "rm", "@1/out",
+    }, &id, "3");
+    defer gpa.free(removed.stdout);
+    defer gpa.free(removed.stderr);
+    try std.testing.expectEqual(@as(u8, 0), removed.term.exited);
+    try std.testing.expectError(error.FileNotFound, interaction.openFile(io, "out", .{}));
+    try std.testing.expectError(error.FileNotFound, interaction.openFile(io, "published", .{}));
+    const rewritten = try interaction.readFileAlloc(io, "meta.json", gpa, .limited(128 * 1024));
+    defer gpa.free(rewritten);
+    try std.testing.expect(std.mem.indexOf(u8, rewritten, "\"resources\"") == null);
+    try std.testing.expect(std.mem.indexOf(u8, rewritten, "\"out_removed\":true") != null);
+}
+
 test "published resources are addressable and completable" {
     if (!support.haveZsh()) return error.SkipZigTest;
     const gpa = std.testing.allocator;

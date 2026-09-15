@@ -64,6 +64,40 @@ test "replay prefers recorded prompts and permits an explicit override" {
     try std.testing.expect(std.mem.indexOf(u8, overridden.out.items, "CAPTURED-PROMPT") == null);
 }
 
+test "replay reads timing from metadata larger than sixty-four kibibytes" {
+    const gpa = std.testing.allocator;
+    const io = std.testing.io;
+    support.leaveJournal();
+    var scratch = try support.Scratch.open();
+    defer scratch.close();
+
+    const id = journal_name.legacy(45, .{8} ** 10);
+    try scratch.makeJournal(id, &.{"1"});
+    var journal = try scratch.tmp.dir.openDir(io, &id, .{});
+    defer journal.close(io);
+    var interaction = try journal.openDir(io, "1", .{});
+    defer interaction.close(io);
+    try interaction.writeFile(io, .{ .sub_path = "cmd", .data = "recorded-command" });
+    try interaction.writeFile(io, .{ .sub_path = "out", .data = "recorded-output\n" });
+
+    var meta: std.ArrayList(u8) = .empty;
+    defer meta.deinit(gpa);
+    try meta.appendSlice(gpa, "{\"v\":1,\"started\":\"2026-09-15T10:00:00.000Z\"," ++
+        "\"ended\":\"2026-09-15T10:00:05.000Z\",\"padding\":\"");
+    try meta.appendNTimes(gpa, 'x', 70 * 1024);
+    try meta.appendSlice(gpa, "\"}\n");
+    try interaction.writeFile(io, .{ .sub_path = "meta.json", .data = meta.items });
+    try std.testing.expect(meta.items.len > 64 * 1024);
+
+    const duration = try support.runTjctlNonTty(gpa, &.{
+        "--home", scratch.path(), "replay", &id, "--duration", "--typing", "0", "--max-pause", "10000",
+    });
+    defer gpa.free(duration.stdout);
+    defer gpa.free(duration.stderr);
+    try std.testing.expectEqual(@as(u8, 0), duration.term.exited);
+    try std.testing.expectEqualStrings("5\n", duration.stdout);
+}
+
 test "a journal replays the commands and output it recorded" {
     if (!support.haveZsh()) return error.SkipZigTest;
     const gpa = std.testing.allocator;

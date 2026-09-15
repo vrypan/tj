@@ -25,6 +25,7 @@ pub const Dir = std.Io.Dir;
 const File = std.Io.File;
 
 const sys = @import("../sys.zig");
+const scanner = @import("../protocol/scanner.zig");
 const journal_name = @import("name.zig");
 const altscreen = @import("../terminal/altscreen.zig");
 const pins = @import("pins.zig");
@@ -44,6 +45,15 @@ const max_resource_bytes = 64 * 1024 * 1024;
 
 /// Per interaction. A program publishing more than this is misbehaving.
 const max_resources = 32;
+
+/// Maximum metadata size produced from protocol input. JSON string escaping
+/// can expand one arbitrary input byte to `\\u00XX` (six bytes). Each accepted
+/// resource contributes at most one `scanner.max_osc` payload shared by its
+/// path and MIME type, and the context contributes at most one more payload
+/// containing `expanded_cmd`. The remaining 64 KiB covers JSON structure,
+/// timestamps, counters, booleans, and future fixed-size fields.
+pub const max_metadata_bytes: usize =
+    (max_resources + 1) * scanner.max_osc * 6 + 64 * 1024;
 
 /// Diagnostics must not become a second unbounded recording stream. Keep a
 /// small journal-wide byte ceiling and stop after a bounded number of warning
@@ -1526,7 +1536,7 @@ fn outputRemovalComplete(
     } else |_| {}
 
     const meta_path = std.fmt.bufPrint(&path_buf, "{s}/{d}/meta.json", .{ journal, number }) catch return false;
-    const text = root.readFileAlloc(io, meta_path, gpa, .limited(4 * 1024 * 1024)) catch return false;
+    const text = root.readFileAlloc(io, meta_path, gpa, .limited(max_metadata_bytes)) catch return false;
     defer gpa.free(text);
     const parsed = std.json.parseFromSlice(std.json.Value, gpa, text, .{}) catch return false;
     defer parsed.deinit();
@@ -1552,7 +1562,7 @@ pub fn removeOutput(
     var interaction = try journal_dir.openDir(io, interaction_name, .{ .follow_symlinks = false });
     defer interaction.close(io);
 
-    const meta_text = interaction.readFileAlloc(io, "meta.json", gpa, .limited(4 * 1024 * 1024)) catch |err| switch (err) {
+    const meta_text = interaction.readFileAlloc(io, "meta.json", gpa, .limited(max_metadata_bytes)) catch |err| switch (err) {
         error.FileNotFound => return error.InvalidMetadata,
         else => return err,
     };
@@ -2733,7 +2743,7 @@ test "a carriage return at the very end of a resource is kept" {
     try std.testing.expectEqualStrings("ends with cr\r", text);
 }
 
-test "metadata preserves every accepted resource beyond eight kibibytes" {
+test "metadata readers preserve maximum escaped recorder metadata" {
     const io = std.testing.io;
     const gpa = std.testing.allocator;
     var tmp = std.testing.tmpDir(.{});
@@ -2741,17 +2751,16 @@ test "metadata preserves every accepted resource beyond eight kibibytes" {
     var root_buf: [std.fs.max_path_bytes]u8 = undefined;
     const root_len = try tmp.dir.realPath(io, &root_buf);
 
-    const long_mime =
-        "application/x-test; title=\"quoted\\\\value\"; padding=" ++
-        "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx" ++
-        "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx" ++
-        "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx" ++
-        "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx" ++
-        "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx" ++
-        "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx";
+    const expanded = try gpa.alloc(u8, scanner.max_osc - 128);
+    defer gpa.free(expanded);
+    @memset(expanded, 1);
+    const long_mime = try gpa.alloc(u8, scanner.max_osc - 128);
+    defer gpa.free(long_mime);
+    @memset(long_mime, 1);
 
     var store = try Store.createJournal(gpa, io, root_buf[0..root_len]);
-    store.begin("demo", "expanded \"command\" with \\ and a newline\n", null);
+    store.out_limit_bytes = 123_456;
+    store.begin("demo", expanded, null);
 
     for (0..max_resources) |i| {
         var path_buf: [96]u8 = undefined;
@@ -2760,20 +2769,23 @@ test "metadata preserves every accepted resource beyond eight kibibytes" {
         store.endRegion();
         store.current.?.published[i].truncated = i % 3 == 0;
     }
+    store.current.?.out_truncated = true;
     store.finish(0);
 
-    const meta = try store.journal_dir.readFileAlloc(io, "1/meta.json", gpa, .limited(64 * 1024));
+    const meta = try store.journal_dir.readFileAlloc(io, "1/meta.json", gpa, .limited(max_metadata_bytes));
     defer gpa.free(meta);
-    store.close();
 
-    try std.testing.expect(meta.len > 8 * 1024);
+    try std.testing.expect(meta.len > 64 * 1024);
+    try std.testing.expect(meta.len <= max_metadata_bytes);
     const parsed = try std.json.parseFromSlice(std.json.Value, gpa, meta, .{});
     defer parsed.deinit();
 
     const root = parsed.value.object;
     try std.testing.expect(root.get("started").?.string.len > 0);
     try std.testing.expect(root.get("ended").?.string.len > 0);
-    try std.testing.expectEqualStrings("expanded \"command\" with \\ and a newline\n", root.get("expanded_cmd").?.string);
+    try std.testing.expectEqualStrings(expanded, root.get("expanded_cmd").?.string);
+    try std.testing.expect(root.get("out_truncated").?.bool);
+    try std.testing.expectEqual(@as(i64, 123_456), root.get("out_limit_bytes").?.integer);
 
     const resources = root.get("resources").?.object;
     try std.testing.expectEqual(max_resources, resources.count());
@@ -2784,6 +2796,39 @@ test "metadata preserves every accepted resource beyond eight kibibytes" {
         try std.testing.expectEqualStrings(long_mime, entry.get("mime").?.string);
         try std.testing.expectEqual(i % 3 == 0, entry.get("truncated").?.bool);
     }
+
+    const output_state = readOutputRecordingState(gpa, io, store.root, store.journal, 1);
+    try std.testing.expect(output_state.truncated);
+    try std.testing.expectEqual(@as(u64, 123_456), output_state.limit_bytes);
+    const timing = readTiming(gpa, io, store.root, store.journal, 1) orelse return error.TestUnexpectedResult;
+    try std.testing.expect(timing.ended >= timing.started);
+    store.close();
+}
+
+test "metadata readers reject malformed and over-limit external files" {
+    const io = std.testing.io;
+    const gpa = std.testing.allocator;
+    var tmp = std.testing.tmpDir(.{ .iterate = true });
+    defer tmp.cleanup();
+    var root_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const root_len = try tmp.dir.realPath(io, &root_buf);
+
+    var store = try Store.createJournal(gpa, io, root_buf[0..root_len]);
+    store.begin("demo", null, null);
+    store.finish(0);
+
+    try store.journal_dir.writeFile(io, .{ .sub_path = "1/meta.json", .data = "not json" });
+    try std.testing.expect(!readOutputRecordingState(gpa, io, store.root, store.journal, 1).truncated);
+    try std.testing.expect(readTiming(gpa, io, store.root, store.journal, 1) == null);
+
+    const oversized = try gpa.alloc(u8, max_metadata_bytes + 1);
+    defer gpa.free(oversized);
+    @memset(oversized, 'x');
+    try store.journal_dir.writeFile(io, .{ .sub_path = "1/meta.json", .data = oversized });
+    try std.testing.expect(!readOutputRecordingState(gpa, io, store.root, store.journal, 1).truncated);
+    try std.testing.expect(readTiming(gpa, io, store.root, store.journal, 1) == null);
+    try std.testing.expectError(error.StreamTooLong, removeOutput(gpa, io, store.root, store.journal, 1));
+    store.close();
 }
 
 test "output removal redacts out and published resources but keeps the entry" {
@@ -2915,7 +2960,7 @@ pub const OutputRecordingState = struct {
 pub fn readOutputRecordingState(gpa: std.mem.Allocator, io: Io, root: Dir, journal: []const u8, number: u32) OutputRecordingState {
     var path_buf: [journal_name.max_len + 32]u8 = undefined;
     const sub = std.fmt.bufPrint(&path_buf, "{s}/{d}/meta.json", .{ journal, number }) catch return .{};
-    const text = root.readFileAlloc(io, sub, gpa, .limited(64 * 1024)) catch return .{};
+    const text = root.readFileAlloc(io, sub, gpa, .limited(max_metadata_bytes)) catch return .{};
     defer gpa.free(text);
 
     const Meta = struct {
@@ -2936,7 +2981,7 @@ pub fn readTiming(gpa: std.mem.Allocator, io: Io, root: Dir, journal: []const u8
     var path_buf: [journal_name.max_len + 32]u8 = undefined;
     const sub = std.fmt.bufPrint(&path_buf, "{s}/{d}/meta.json", .{ journal, number }) catch return null;
 
-    const text = root.readFileAlloc(io, sub, gpa, .limited(64 * 1024)) catch return null;
+    const text = root.readFileAlloc(io, sub, gpa, .limited(max_metadata_bytes)) catch return null;
     defer gpa.free(text);
 
     const Meta = struct { started: []const u8 = "", ended: []const u8 = "" };
