@@ -462,7 +462,9 @@ test "terminal native grep omits its results while redirected output stays plain
     const producer = try journal.fixture(
         gpa,
         "native-grep-producer.sh",
-        "printf '  NOOUT_GREP_PAYLOAD_012    padded\\tresult  \\n'\n",
+        "printf '  NOOUT_GREP_PAYLOAD_012    padded\\tresult  \\n'\n" ++
+            "printf 'xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx" ++
+            "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxEND\\r\\n'\n",
     );
     defer gpa.free(producer);
     const redirected_path = try journal.fixture(gpa, "redirected-grep", "");
@@ -517,6 +519,13 @@ test "terminal native grep omits its results while redirected output stays plain
     from = transcript.items.len;
     try terminal.write("command \"$TJ\" grep --cmd SELF_ONLY_GREP_012; printf 'SELF-STATUS=%s\\n' $?\n");
     try terminal.expectFrom(from, "SELF-STATUS=1");
+    try terminal.expectPromptFrom(from);
+
+    // Presentation removes the line's trailing CR, but matching must retain
+    // its raw offset before clipping the line to the terminal width.
+    from = transcript.items.len;
+    try terminal.write("command \"$TJ\" grep --out $'END\\r'; printf 'CR-STATUS=%s\\n' $?\n");
+    try terminal.expectFrom(from, "CR-STATUS=0");
     try terminal.expectPromptFrom(from);
     try terminal.write("exit 0\n");
     try std.testing.expectEqual(@as(u8, 0), try terminal.finish());

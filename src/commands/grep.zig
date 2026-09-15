@@ -233,19 +233,32 @@ pub const GrepLineSink = struct {
         budget: ?usize,
         entry: *const presentation.EntryPresentation,
     ) !void {
-        var end = original_end;
-        if (end > start) {
+        var display_end = original_end;
+        if (display_end > start) {
             var last: [1]u8 = undefined;
-            const n = try file.readPositional(self.output.io, &.{last[0..]}, end - 1);
-            if (n == 1 and last[0] == '\r') end -= 1;
+            const n = try file.readPositional(self.output.io, &.{last[0..]}, display_end - 1);
+            if (n == 1 and last[0] == '\r') display_end -= 1;
         }
 
-        var window: GrepWindow = .{ .start = start, .end = end };
+        var window: GrepWindow = .{ .start = start, .end = display_end };
         if (budget) |width| {
-            if (end - start > width) {
-                const match = (try search.firstMatchSpan(self.output.io, file, start, end, self.matcher)) orelse
+            if (display_end - start > width) {
+                // Match the original interval before presentation removes a
+                // trailing CR. A pattern that includes only that CR has no
+                // visible bytes, so anchor its clipping window at line end.
+                const raw_match = (try search.firstMatchSpan(
+                    self.output.io,
+                    file,
+                    start,
+                    original_end,
+                    self.matcher,
+                )) orelse
                     return error.UnexpectedEndOfFile;
-                window = grepWindow(start, end, match.start, match.end, width);
+                const match = search.MatchSpan{
+                    .start = @min(raw_match.start, display_end),
+                    .end = @min(raw_match.end, display_end),
+                };
+                window = grepWindow(start, display_end, match.start, match.end, width);
             }
         }
         if (window.leading_ellipsis) try writer.writeAll("…");
@@ -463,14 +476,9 @@ pub fn grepCommand(
     return if (total == 0) 1 else 0;
 }
 
-const MatchOnlySink = struct {
-    fn emit(_: *anyopaque, _: Io.File, _: u64, _: u64) !void {}
-};
-
 const MatchingEntryVisitor = struct {
     gpa: std.mem.Allocator,
     numbers: *std.ArrayList(u32),
-    sink_context: u8 = 0,
 
     fn beginResource(
         _: *MatchingEntryVisitor,
@@ -480,8 +488,8 @@ const MatchingEntryVisitor = struct {
         _: *const search.Matcher,
     ) !void {}
 
-    fn sink(self: *MatchingEntryVisitor) search.Sink {
-        return .{ .context = &self.sink_context, .emit = MatchOnlySink.emit };
+    fn scan(_: *MatchingEntryVisitor, io: Io, file: Io.File, matcher: *const search.Matcher) !u64 {
+        return if (try search.fileContains(io, file, matcher)) 1 else 0;
     }
 
     fn endResource(self: *MatchingEntryVisitor, number: u32, found: u64) !bool {
@@ -520,6 +528,10 @@ const FormattedMatchVisitor = struct {
 
     fn sink(self: *FormattedMatchVisitor) search.Sink {
         return .{ .context = &self.line_sink, .emit = GrepLineSink.emit };
+    }
+
+    fn scan(self: *FormattedMatchVisitor, io: Io, file: Io.File, matcher: *const search.Matcher) !u64 {
+        return search.scanFile(io, file, matcher, self.sink());
     }
 
     fn endResource(self: *FormattedMatchVisitor, _: u32, found: u64) !bool {
@@ -565,7 +577,7 @@ fn traverseGrepJournal(
             defer file.close(io);
 
             try visitor.beginResource(journal, info, resource.name, matcher);
-            const found = try search.scanFile(io, file, matcher, visitor.sink());
+            const found = try visitor.scan(io, file, matcher);
             if (try visitor.endResource(info.number, found)) break;
         }
     }
