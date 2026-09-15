@@ -49,8 +49,10 @@ pub fn removeCommand(
 ) !void {
     _ = out;
     const request = try removeRequest(parsed);
+    var mutation = try context.openCurrentMutation(gpa, io, home, .exclusive);
+    defer mutation.deinit(io);
     for (request.targets) |target| {
-        try removeInteraction(gpa, io, home, target, request.force);
+        try removeTarget(gpa, io, &mutation, target, request.force);
     }
 }
 
@@ -100,20 +102,30 @@ pub fn removeInteraction(
     interaction: []const u8,
     force: bool,
 ) !void {
+    var mutation = try context.openCurrentMutation(gpa, io, home, .exclusive);
+    defer mutation.deinit(io);
+    return removeTarget(gpa, io, &mutation, interaction, force);
+}
+
+fn removeTarget(
+    gpa: std.mem.Allocator,
+    io: Io,
+    mutation: *context.Mutation,
+    interaction: []const u8,
+    force: bool,
+) !void {
     if (try context.parseInteractionRange(interaction)) |range| {
-        return removeInteractionRange(gpa, io, home, range, force);
+        const selected = try context.selectedNumbers(gpa, io, mutation.root, mutation.journal, range);
+        defer gpa.free(selected);
+        const result = try removeNumbers(gpa, io, mutation, selected, force);
+        noteSkippedPins(io, result.skipped_pinned);
+        return;
     }
-    const target = blk: {
-        var root = try store.openRoot(io, home);
-        defer root.close(io);
-        break :blk try context.requireMutationTarget(gpa, io, root, interaction);
-    };
+    const target = try context.requireMutationTarget(gpa, io, mutation.root, interaction);
     defer target.deinit(gpa);
     const output_only = std.mem.eql(u8, target.subpath, "out");
     if (target.subpath.len != 0 and !output_only) return error.UnsupportedRemoval;
 
-    var mutation = try context.openCurrentMutation(gpa, io, home, .exclusive);
-    defer mutation.deinit(io);
     if (!std.mem.eql(u8, target.journal, mutation.journal)) return error.CrossJournalMutation;
     if (!store.interactionExists(io, mutation.root, mutation.journal, target.number)) return error.NoSuchInteraction;
     const highest = try store.highestNumber(gpa, io, mutation.root, mutation.journal) orelse

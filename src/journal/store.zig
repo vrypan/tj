@@ -64,6 +64,7 @@ const log_suppression_notice = "further journal warnings suppressed\n";
 const max_prompt_bytes = 64 * 1024;
 const prompt_end_st = "\x1b]133;B\x1b\\";
 const prompt_end_bel = "\x1b]133;B\x07";
+const pending_output_removals = ".pending-output-removals";
 
 /// Recorded once for a visible region deliberately omitted from `out`.
 pub const noout_placeholder = "<tj:noout>";
@@ -1511,17 +1512,51 @@ pub fn recoverPendingOutputRemovals(
     root: Dir,
     journal: []const u8,
 ) !void {
-    const numbers = try listNumbers(gpa, io, root, journal);
-    defer gpa.free(numbers);
-    for (numbers) |number| {
-        var marker_buf: [96]u8 = undefined;
-        const marker_path = try std.fmt.bufPrint(&marker_buf, "{s}/{d}/out.removed", .{ journal, number });
-        const marker = root.openFile(io, marker_path, .{}) catch |err| switch (err) {
-            error.FileNotFound => continue,
-            else => return err,
-        };
-        marker.close(io);
-        if (outputRemovalComplete(gpa, io, root, journal, number)) continue;
+    return recoverPendingOutputRemovalsCounted(gpa, io, root, journal, null);
+}
+
+const RecoveryStats = struct {
+    pending_probes: usize = 0,
+};
+
+fn recoverPendingOutputRemovalsCounted(
+    gpa: std.mem.Allocator,
+    io: Io,
+    root: Dir,
+    journal: []const u8,
+    stats: ?*RecoveryStats,
+) !void {
+    var journal_dir = try root.openDir(io, journal, .{ .follow_symlinks = false });
+    defer journal_dir.close(io);
+    var pending = journal_dir.openDir(io, pending_output_removals, .{
+        .iterate = true,
+        .follow_symlinks = false,
+    }) catch |err| switch (err) {
+        error.FileNotFound => return,
+        else => return err,
+    };
+    defer pending.close(io);
+
+    var numbers: std.ArrayList(u32) = .empty;
+    defer numbers.deinit(gpa);
+    var it = pending.iterate();
+    while (try it.next(io)) |entry| {
+        const number = parseInteractionDirName(entry.name) orelse return error.InvalidMetadata;
+        var canonical_buf: [16]u8 = undefined;
+        const canonical = try std.fmt.bufPrint(&canonical_buf, "{d}", .{number});
+        if (!std.mem.eql(u8, canonical, entry.name)) return error.InvalidMetadata;
+        const stat = try pending.statFile(io, entry.name, .{ .follow_symlinks = false });
+        if (stat.kind != .file) return error.InvalidMetadata;
+        try numbers.append(gpa, number);
+    }
+    std.mem.sort(u32, numbers.items, {}, std.sort.asc(u32));
+
+    for (numbers.items) |number| {
+        if (stats) |value| value.pending_probes += 1;
+        if (!interactionExists(io, root, journal, number)) {
+            try removePendingOutputRemoval(io, journal_dir, number);
+            continue;
+        }
         try removeOutput(gpa, io, root, journal, number);
     }
 }
@@ -1560,6 +1595,26 @@ pub fn removeOutput(
     journal: []const u8,
     number: u32,
 ) !void {
+    return removeOutputWithFault(gpa, io, root, journal, number, null);
+}
+
+const OutputRemovalFault = enum {
+    before_intent_sync,
+    after_intent,
+    after_marker,
+    after_first_move,
+    after_metadata,
+    before_intent_removal,
+};
+
+fn removeOutputWithFault(
+    gpa: std.mem.Allocator,
+    io: Io,
+    root: Dir,
+    journal: []const u8,
+    number: u32,
+    fault: ?OutputRemovalFault,
+) !void {
     var journal_dir = try root.openDir(io, journal, .{ .follow_symlinks = false });
     defer journal_dir.close(io);
     var number_buf: [16]u8 = undefined;
@@ -1591,6 +1646,16 @@ pub fn removeOutput(
         while (validate.next()) |item| try validateOptionalFile(io, interaction, item.key_ptr.*);
     }
 
+    try publishPendingOutputRemoval(io, journal_dir, number, fault == .before_intent_sync);
+    if (fault == .after_intent) return error.InjectedFailure;
+
+    if (outputRemovalComplete(gpa, io, root, journal, number)) {
+        try cleanupOutputTrash(io, journal_dir, number);
+        if (fault == .before_intent_removal) return error.InjectedFailure;
+        try removePendingOutputRemoval(io, journal_dir, number);
+        return;
+    }
+
     const marker = interaction.createFile(io, "out.removed", .{
         .exclusive = true,
         .permissions = file_permissions,
@@ -1606,6 +1671,7 @@ pub fn removeOutput(
         try file.sync(io);
         file.close(io);
     }
+    if (fault == .after_marker) return error.InjectedFailure;
 
     _ = journal_dir.createDir(io, ".trash", dir_permissions) catch |err| switch (err) {
         error.PathAlreadyExists => {},
@@ -1617,6 +1683,7 @@ pub fn removeOutput(
     var out_dest_buf: [32]u8 = undefined;
     const out_dest = try std.fmt.bufPrint(&out_dest_buf, "{d}.0", .{number});
     try stageOptional(io, interaction, trash, "out", out_dest);
+    if (fault == .after_first_move) return error.InjectedFailure;
     if (resources_value) |resources| {
         var it = resources.object.iterator();
         var index: usize = 1;
@@ -1631,16 +1698,98 @@ pub fn removeOutput(
     _ = parsed.value.object.orderedRemove("resources");
     try parsed.value.object.put(parsed.arena.allocator(), "out_removed", .{ .bool = true });
     try writeJsonAtomic(gpa, io, interaction, "meta.json", ".meta.tmp", parsed.value);
+    if (fault == .after_metadata) return error.InjectedFailure;
 
-    // All staged paths have names beginning with this interaction number. The
-    // mutation lock prevents another remover from sharing the staging area.
+    // The mutation lock prevents another remover from sharing the staging
+    // area, so every path with this entry prefix belongs to this operation.
+    try cleanupOutputTrash(io, journal_dir, number);
+    if (fault == .before_intent_removal) return error.InjectedFailure;
+    try removePendingOutputRemoval(io, journal_dir, number);
+}
+
+fn publishPendingOutputRemoval(
+    io: Io,
+    journal_dir: Dir,
+    number: u32,
+    fail_before_sync: bool,
+) !void {
+    _ = journal_dir.createDir(io, pending_output_removals, dir_permissions) catch |err| switch (err) {
+        error.PathAlreadyExists => {},
+        else => return err,
+    };
+    var pending = try journal_dir.openDir(io, pending_output_removals, .{ .follow_symlinks = false });
+    defer pending.close(io);
+    var name_buf: [16]u8 = undefined;
+    const name = try std.fmt.bufPrint(&name_buf, "{d}", .{number});
+    if (pending.statFile(io, name, .{ .follow_symlinks = false })) |stat| {
+        if (stat.kind != .file) return error.InvalidMetadata;
+        return;
+    } else |err| switch (err) {
+        error.FileNotFound => {},
+        else => return err,
+    }
+
+    var temp_buf: [64]u8 = undefined;
+    const temp_name = try std.fmt.bufPrint(
+        &temp_buf,
+        ".pending-output-removal.{d}.tmp",
+        .{number},
+    );
+    if (journal_dir.statFile(io, temp_name, .{ .follow_symlinks = false })) |stat| {
+        if (stat.kind != .file) return error.InvalidMetadata;
+        try journal_dir.deleteFile(io, temp_name);
+    } else |err| switch (err) {
+        error.FileNotFound => {},
+        else => return err,
+    }
+
+    var renamed = false;
+    defer if (!renamed) journal_dir.deleteFile(io, temp_name) catch {};
+    {
+        const file = try journal_dir.createFile(io, temp_name, .{
+            .exclusive = true,
+            .permissions = file_permissions,
+        });
+        defer file.close(io);
+        if (fail_before_sync) return error.InjectedFailure;
+        try file.sync(io);
+    }
+    try journal_dir.rename(temp_name, pending, name, io);
+    renamed = true;
+}
+
+fn cleanupOutputTrash(io: Io, journal_dir: Dir, number: u32) !void {
+    var trash = journal_dir.openDir(io, ".trash", .{
+        .iterate = true,
+        .follow_symlinks = false,
+    }) catch |err| switch (err) {
+        error.FileNotFound => return,
+        else => return err,
+    };
+    defer trash.close(io);
     var it = trash.iterate();
     var prefix_buf: [24]u8 = undefined;
     const prefix = try std.fmt.bufPrint(&prefix_buf, "{d}.", .{number});
     while (try it.next(io)) |entry| {
         if (!std.mem.startsWith(u8, entry.name, prefix)) continue;
-        deleteOptionalEntry(io, trash, entry.name) catch {};
+        try deleteOptionalEntry(io, trash, entry.name);
     }
+}
+
+fn removePendingOutputRemoval(io: Io, journal_dir: Dir, number: u32) !void {
+    var pending = journal_dir.openDir(io, pending_output_removals, .{ .follow_symlinks = false }) catch |err| switch (err) {
+        error.FileNotFound => return,
+        else => return err,
+    };
+    defer pending.close(io);
+    var name_buf: [16]u8 = undefined;
+    const name = try std.fmt.bufPrint(&name_buf, "{d}", .{number});
+    const stat = pending.statFile(io, name, .{ .follow_symlinks = false }) catch |err| switch (err) {
+        error.FileNotFound => return,
+        else => return err,
+    };
+    if (stat.kind != .file) return error.InvalidMetadata;
+    try pending.deleteFile(io, name);
 }
 
 /// Moves one output-derived file using directory handles opened without
@@ -2858,9 +3007,10 @@ test "output removal redacts out and published resources but keeps the entry" {
 
     var root = try tmp.dir.openDir(io, ".", .{ .iterate = true });
     defer root.close(io);
-    var marker_path_buf: [96]u8 = undefined;
-    const marker_path = try std.fmt.bufPrint(&marker_path_buf, "{s}/1/out.removed", .{id});
-    try root.writeFile(io, .{ .sub_path = marker_path, .data = "", .flags = .{ .permissions = file_permissions } });
+    try std.testing.expectError(
+        error.InjectedFailure,
+        removeOutputWithFault(gpa, io, root, id, 1, .after_marker),
+    );
     try recoverPendingOutputRemovals(gpa, io, root, id);
 
     var path_buf: [96]u8 = undefined;
@@ -2882,6 +3032,181 @@ test "output removal redacts out and published resources but keeps the entry" {
     defer parsed.deinit();
     try std.testing.expect(parsed.value.object.get("resources") == null);
     try std.testing.expect(parsed.value.object.get("out_removed").?.bool);
+}
+
+test "pending output removal jobs recover every irreversible transition" {
+    const io = std.testing.io;
+    const gpa = std.testing.allocator;
+    var tmp = std.testing.tmpDir(.{ .iterate = true });
+    defer tmp.cleanup();
+    var root_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const root_len = try tmp.dir.realPath(io, &root_buf);
+
+    var journal = try Store.createJournal(gpa, io, root_buf[0..root_len]);
+    const id = try gpa.dupe(u8, journal.journal);
+    defer gpa.free(id);
+    const faults = [_]OutputRemovalFault{
+        .after_intent,
+        .after_marker,
+        .after_first_move,
+        .after_metadata,
+        .before_intent_removal,
+    };
+    for (faults, 1..) |_, number| {
+        var cmd_buf: [32]u8 = undefined;
+        journal.begin(try std.fmt.bufPrint(&cmd_buf, "entry {d}", .{number}), null, null);
+        journal.beginResource("files/report.txt", "text/plain");
+        journal.append("published bytes\r\n");
+        journal.endRegion();
+        journal.finish(0);
+    }
+    journal.begin("allocation failure", null, null);
+    journal.append("recover later\r\n");
+    journal.finish(0);
+    journal.begin("intent sync failure", null, null);
+    journal.beginResource("files/report.txt", "text/plain");
+    journal.append("must remain\r\n");
+    journal.endRegion();
+    journal.finish(0);
+    journal.close();
+
+    var root = try tmp.dir.openDir(io, ".", .{ .iterate = true });
+    defer root.close(io);
+    for (faults, 1..) |fault, number_usize| {
+        const number: u32 = @intCast(number_usize);
+        try std.testing.expectError(
+            error.InjectedFailure,
+            removeOutputWithFault(gpa, io, root, id, number, fault),
+        );
+
+        var stats: RecoveryStats = .{};
+        try recoverPendingOutputRemovalsCounted(gpa, io, root, id, &stats);
+        try std.testing.expectEqual(@as(usize, 1), stats.pending_probes);
+
+        var path_buf: [128]u8 = undefined;
+        const out_path = try std.fmt.bufPrint(&path_buf, "{s}/{d}/out", .{ id, number });
+        try std.testing.expectError(error.FileNotFound, root.openFile(io, out_path, .{}));
+        const resource_path = try std.fmt.bufPrint(&path_buf, "{s}/{d}/files/report.txt", .{ id, number });
+        try std.testing.expectError(error.FileNotFound, root.openFile(io, resource_path, .{}));
+        const pending_path = try std.fmt.bufPrint(
+            &path_buf,
+            "{s}/{s}/{d}",
+            .{ id, pending_output_removals, number },
+        );
+        try std.testing.expectError(error.FileNotFound, root.openFile(io, pending_path, .{}));
+
+        stats = .{};
+        try recoverPendingOutputRemovalsCounted(gpa, io, root, id, &stats);
+        try std.testing.expectEqual(@as(usize, 0), stats.pending_probes);
+    }
+
+    try std.testing.expectError(
+        error.InjectedFailure,
+        removeOutputWithFault(gpa, io, root, id, 6, .after_intent),
+    );
+    var failing = std.testing.FailingAllocator.init(gpa, .{ .fail_index = 0 });
+    try std.testing.expectError(
+        error.OutOfMemory,
+        recoverPendingOutputRemovals(failing.allocator(), io, root, id),
+    );
+    var pending_buf: [128]u8 = undefined;
+    const pending_six = try std.fmt.bufPrint(
+        &pending_buf,
+        "{s}/{s}/6",
+        .{ id, pending_output_removals },
+    );
+    var retained = try root.openFile(io, pending_six, .{});
+    retained.close(io);
+    try recoverPendingOutputRemovals(gpa, io, root, id);
+    try std.testing.expectError(error.FileNotFound, root.openFile(io, pending_six, .{}));
+
+    try std.testing.expectError(
+        error.InjectedFailure,
+        removeOutputWithFault(gpa, io, root, id, 7, .before_intent_sync),
+    );
+    const pending_seven = try std.fmt.bufPrint(
+        &pending_buf,
+        "{s}/{s}/7",
+        .{ id, pending_output_removals },
+    );
+    try std.testing.expectError(error.FileNotFound, root.openFile(io, pending_seven, .{}));
+    const marker_seven = try std.fmt.bufPrint(&pending_buf, "{s}/7/out.removed", .{id});
+    try std.testing.expectError(error.FileNotFound, root.openFile(io, marker_seven, .{}));
+    const out_seven = try std.fmt.bufPrint(&pending_buf, "{s}/7/out", .{id});
+    var retained_out = try root.openFile(io, out_seven, .{});
+    retained_out.close(io);
+    const resource_seven = try std.fmt.bufPrint(&pending_buf, "{s}/7/files/report.txt", .{id});
+    var retained_resource = try root.openFile(io, resource_seven, .{});
+    retained_resource.close(io);
+    var no_work: RecoveryStats = .{};
+    try recoverPendingOutputRemovalsCounted(gpa, io, root, id, &no_work);
+    try std.testing.expectEqual(@as(usize, 0), no_work.pending_probes);
+    const out_after_recovery = try std.fmt.bufPrint(&pending_buf, "{s}/7/out", .{id});
+    retained_out = try root.openFile(io, out_after_recovery, .{});
+    retained_out.close(io);
+    const resource_after_recovery = try std.fmt.bufPrint(
+        &pending_buf,
+        "{s}/7/files/report.txt",
+        .{id},
+    );
+    retained_resource = try root.openFile(io, resource_after_recovery, .{});
+    retained_resource.close(io);
+}
+
+test "pending recovery ignores legacy markers and rejects unsafe jobs" {
+    const io = std.testing.io;
+    const gpa = std.testing.allocator;
+    var tmp = std.testing.tmpDir(.{ .iterate = true });
+    defer tmp.cleanup();
+    var root_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const root_len = try tmp.dir.realPath(io, &root_buf);
+
+    var journal = try Store.createJournal(gpa, io, root_buf[0..root_len]);
+    const id = try gpa.dupe(u8, journal.journal);
+    defer gpa.free(id);
+    journal.begin("keep legacy output", null, null);
+    journal.append("still present\r\n");
+    journal.finish(0);
+    journal.close();
+
+    var root = try tmp.dir.openDir(io, ".", .{ .iterate = true });
+    defer root.close(io);
+    var path_buf: [128]u8 = undefined;
+    const marker_path = try std.fmt.bufPrint(&path_buf, "{s}/1/out.removed", .{id});
+    try root.writeFile(io, .{
+        .sub_path = marker_path,
+        .data = "",
+        .flags = .{ .permissions = file_permissions },
+    });
+    var stats: RecoveryStats = .{};
+    try recoverPendingOutputRemovalsCounted(gpa, io, root, id, &stats);
+    try std.testing.expectEqual(@as(usize, 0), stats.pending_probes);
+    const out_path = try std.fmt.bufPrint(&path_buf, "{s}/1/out", .{id});
+    var legacy_out = try root.openFile(io, out_path, .{});
+    legacy_out.close(io);
+
+    const pending_path = try std.fmt.bufPrint(&path_buf, "{s}/{s}", .{ id, pending_output_removals });
+    try root.createDir(io, pending_path, dir_permissions);
+    var pending = try root.openDir(io, pending_path, .{ .iterate = true, .follow_symlinks = false });
+    defer pending.close(io);
+    try pending.writeFile(io, .{ .sub_path = "not-a-number", .data = "" });
+    try std.testing.expectError(
+        error.InvalidMetadata,
+        recoverPendingOutputRemovals(gpa, io, root, id),
+    );
+    try pending.deleteFile(io, "not-a-number");
+    try pending.symLink(io, "../1", "1", .{ .is_directory = true });
+    try std.testing.expectError(
+        error.InvalidMetadata,
+        recoverPendingOutputRemovals(gpa, io, root, id),
+    );
+    try pending.deleteFile(io, "1");
+
+    try pending.writeFile(io, .{ .sub_path = "999", .data = "" });
+    stats = .{};
+    try recoverPendingOutputRemovalsCounted(gpa, io, root, id, &stats);
+    try std.testing.expectEqual(@as(usize, 1), stats.pending_probes);
+    try std.testing.expectError(error.FileNotFound, pending.openFile(io, "999", .{}));
 }
 
 test "output removal refuses resource paths that traverse symlinks" {
@@ -2922,6 +3247,13 @@ test "output removal refuses resource paths that traverse symlinks" {
     var out = try interaction.openFile(io, "out", .{});
     out.close(io);
     try std.testing.expectError(error.FileNotFound, interaction.openFile(io, "out.removed", .{}));
+    var pending_path_buf: [128]u8 = undefined;
+    const pending_path = try std.fmt.bufPrint(
+        &pending_path_buf,
+        "{s}/{s}/1",
+        .{ id, pending_output_removals },
+    );
+    try std.testing.expectError(error.FileNotFound, root.openFile(io, pending_path, .{}));
     const outside = try root.readFileAlloc(io, "outside/report.txt", gpa, .limited(64));
     defer gpa.free(outside);
     try std.testing.expectEqualStrings("must survive", outside);

@@ -268,6 +268,42 @@ test "rm accepts mixed target lists and applies force to every target" {
     try std.testing.expectError(error.FileNotFound, dir.openDir(io, "6", .{}));
 }
 
+test "rm preserves ordered partial success for duplicate and overlapping targets" {
+    if (!support.haveZsh()) return error.SkipZigTest;
+    const gpa = std.testing.allocator;
+    const io = std.testing.io;
+    var journal = try support.Journal.open(gpa);
+    defer journal.close();
+    try support.recordJournal(gpa, &journal, &.{
+        "echo one",
+        "echo two",
+        "echo three",
+        "echo four",
+        "echo five",
+    });
+    try journal.enter(gpa);
+    const home = try journal.homeArg(gpa);
+    defer gpa.free(home);
+
+    var duplicate = try support.run(gpa, &.{ "--home", home, "rm", "@1", "@1" }, 24, 100);
+    defer duplicate.out.deinit(gpa);
+    try std.testing.expectEqual(@as(u8, 2), duplicate.code);
+    var dir = try journal.journalDir();
+    defer dir.close(io);
+    try std.testing.expectError(error.FileNotFound, dir.openDir(io, "1", .{}));
+    var two = try dir.openDir(io, "2", .{});
+    two.close(io);
+
+    var overlap = try support.run(gpa, &.{
+        "--home", home, "rm", "@2..@3", "@3..@4",
+    }, 24, 100);
+    defer overlap.out.deinit(gpa);
+    try std.testing.expectEqual(@as(u8, 0), overlap.code);
+    for ([_][]const u8{ "2", "3", "4" }) |number| {
+        try std.testing.expectError(error.FileNotFound, dir.openDir(io, number, .{}));
+    }
+}
+
 test "whole-journal removal is outside-writer only and refuses active journals" {
     if (!support.haveZsh()) return error.SkipZigTest;
     const gpa = std.testing.allocator;
