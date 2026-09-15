@@ -166,7 +166,9 @@ pub const Decorator = struct {
                     if (self.esc_pending) try sink.emit(&[_]u8{esc});
                 }
             },
-            .pass => if (self.esc_pending) try sink.emit(&[_]u8{esc}),
+            // Pass-through bytes are emitted as they arrive, including an ESC
+            // which might later prove to be the start of ST.
+            .pass => {},
         }
         self.state = .ground;
         self.len = 0;
@@ -233,23 +235,26 @@ pub const Decorator = struct {
 
     fn scanPass(self: *Decorator, bytes: []const u8, from: usize, sink: anytype) !usize {
         var i = from;
+        const start = from;
         while (i < bytes.len) {
             const byte = bytes[i];
             i += 1;
-            try sink.emit(bytes[i - 1 .. i]);
             if (self.esc_pending) {
                 self.esc_pending = false;
                 if (byte == '\\') {
                     self.state = .ground;
+                    try sink.emit(bytes[start..i]);
                     return i;
                 }
             } else if (byte == esc) {
                 self.esc_pending = true;
             } else if (byte == bel) {
                 self.state = .ground;
+                try sink.emit(bytes[start..i]);
                 return i;
             }
         }
+        if (i > start) try sink.emit(bytes[start..i]);
         return i;
     }
 
@@ -423,8 +428,10 @@ test "title insertion waits for split terminal control sequences" {
 const TestSink = struct {
     gpa: std.mem.Allocator,
     bytes: std.ArrayList(u8) = .empty,
+    emit_calls: usize = 0,
 
     pub fn emit(self: *TestSink, bytes: []const u8) !void {
+        self.emit_calls += 1;
         try self.bytes.appendSlice(self.gpa, bytes);
     }
 
@@ -470,6 +477,81 @@ test "title capture reports complete titles and forwards everything else" {
         const actual = try transform(gpa, input, chunk, .capture);
         defer gpa.free(actual);
         try std.testing.expectEqualStrings(expected, actual);
+    }
+}
+
+test "large foreign OSC is forwarded byte-identically in bounded writes" {
+    const gpa = std.testing.allocator;
+    var input: std.ArrayList(u8) = .empty;
+    defer input.deinit(gpa);
+    try input.appendSlice(gpa, "before\x1b]777;foreign;");
+    try input.appendNTimes(gpa, 'x', 1024 * 1024);
+    // An ESC that is not followed by ST remains part of the foreign payload.
+    try input.appendSlice(gpa, "\x1bXtail\x1b\\after");
+
+    for ([_]usize{ input.items.len, 4093 }) |chunk_size| {
+        var sink: TestSink = .{ .gpa = gpa };
+        defer sink.bytes.deinit(gpa);
+        var decorator: Decorator = .{ .mode = .capture };
+        var at: usize = 0;
+        while (at < input.items.len) {
+            const end = @min(input.items.len, at + chunk_size);
+            try decorator.feed(input.items[at..end], &sink);
+            at = end;
+        }
+        try decorator.flush(&sink);
+
+        try std.testing.expectEqualSlices(u8, input.items, sink.bytes.items);
+        const chunks = (input.items.len + chunk_size - 1) / chunk_size;
+        try std.testing.expect(sink.emit_calls <= chunks + 8);
+    }
+}
+
+test "foreign OSC batching preserves split terminators and flushes" {
+    const gpa = std.testing.allocator;
+    const cases = [_]struct {
+        parts: []const []const u8,
+        expected: []const u8,
+    }{
+        .{
+            .parts = &.{ "\x1b]777;split-st\x1b", "\\after" },
+            .expected = "\x1b]777;split-st\x1b\\after",
+        },
+        .{
+            .parts = &.{ "\x1b]777;bel", "\x07after" },
+            .expected = "\x1b]777;bel\x07after",
+        },
+        .{
+            .parts = &.{ "\x1b]777;embedded\x1b", "Xunfinished\x1b" },
+            .expected = "\x1b]777;embedded\x1bXunfinished\x1b",
+        },
+        .{
+            // Preserve the existing rule: after ESC ESC, the backslash is
+            // payload rather than ST, so the following title remains inside
+            // the foreign OSC and is forwarded rather than captured.
+            .parts = &.{ "\x1b]777;repeated\x1b", "\x1b", "\\after\x1b]2;still-foreign\x1b\\" },
+            .expected = "\x1b]777;repeated\x1b\x1b\\after\x1b]2;still-foreign\x1b\\",
+        },
+    };
+
+    for (cases) |case| {
+        var sink: TestSink = .{ .gpa = gpa };
+        defer sink.bytes.deinit(gpa);
+        var decorator: Decorator = .{ .mode = .capture };
+        for (case.parts) |part| try decorator.feed(part, &sink);
+        try decorator.flush(&sink);
+        try std.testing.expectEqualSlices(u8, case.expected, sink.bytes.items);
+    }
+}
+
+test "title capture resumes around a foreign OSC" {
+    const gpa = std.testing.allocator;
+    const input = "\x1b]0;before\x1b\\\x1b]777;foreign\x07\x1b]2;after\x07";
+    const expected = "0:before\x1b]777;foreign\x072:after";
+    for ([_]usize{ 1, 7, input.len }) |chunk_size| {
+        const actual = try transform(gpa, input, chunk_size, .capture);
+        defer gpa.free(actual);
+        try std.testing.expectEqualSlices(u8, expected, actual);
     }
 }
 

@@ -314,6 +314,38 @@ test "tj's own control sequences never reach the terminal" {
     try std.testing.expect(std.mem.indexOf(u8, out.items, "133;") != null);
 }
 
+test "title capture forwards a large foreign OSC byte for byte" {
+    const gpa = std.testing.allocator;
+    const io = std.testing.io;
+    var scratch = try support.Scratch.open();
+    defer scratch.close();
+
+    const script =
+        "printf '\\033]3110;CONTEXT;MTsxMDs0OzA7MDtmb3JlaWduLW9zYy90bXA=\\033\\\\" ++
+        "\\033]133;C\\033\\\\" ++
+        "BEFORE\\033]777;'; " ++
+        "i=0; while [ \"$i\" -lt 4096 ]; do printf 0123456789abcdef; i=$((i + 1)); done; " ++
+        "printf '\\033\\\\AFTER\\033]133;D;0\\033\\\\'";
+    const child = try support.spawnTjctlWithSplash(gpa, &.{
+        support.tjctl, "--home", scratch.path(), "new", "foreign-osc", "--no-splash", "--title-blink=1", "--", "/bin/sh", "-c", script,
+    }, 24, 80);
+    var terminal: std.ArrayList(u8) = .empty;
+    defer terminal.deinit(gpa);
+    try std.testing.expectEqual(@as(u8, 0), try child.finish(gpa, &terminal, support.timeout_ms));
+
+    var expected: std.ArrayList(u8) = .empty;
+    defer expected.deinit(gpa);
+    try expected.appendSlice(gpa, "BEFORE\x1b]777;");
+    var i: usize = 0;
+    while (i < 4096) : (i += 1) try expected.appendSlice(gpa, "0123456789abcdef");
+    try expected.appendSlice(gpa, "\x1b\\AFTER");
+
+    try std.testing.expect(std.mem.indexOf(u8, terminal.items, expected.items) != null);
+    const recorded = try scratch.tmp.dir.readFileAlloc(io, "foreign-osc/1/out", gpa, .limited(1024 * 1024));
+    defer gpa.free(recorded);
+    try std.testing.expect(std.mem.indexOf(u8, recorded, expected.items) != null);
+}
+
 test "a command line with shell metacharacters survives the round trip" {
     if (!support.haveZsh()) return error.SkipZigTest;
     const gpa = std.testing.allocator;
