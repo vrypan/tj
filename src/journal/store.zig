@@ -1275,6 +1275,11 @@ fn readExitCode(io: Io, dir: Dir) ?u8 {
     return std.fmt.parseInt(u8, text, 10) catch null;
 }
 
+/// Reads an exit code relative to an already-open entry directory.
+pub fn entryExitCode(io: Io, entry_dir: Dir) ?u8 {
+    return readExitCode(io, entry_dir);
+}
+
 // --- time ------------------------------------------------------------------
 
 fn nowMillis(io: Io) i64 {

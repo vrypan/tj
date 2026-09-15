@@ -78,6 +78,24 @@ pub fn build(b: *std.Build) void {
     const run_step = b.step("run", "Run tj");
     run_step.dependOn(&run_cmd.step);
 
+    const grep_benchmark_mod = b.createModule(.{
+        .root_source_file = b.path("src/tools/grep_benchmark.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+    grep_benchmark_mod.addImport("grep_search", b.createModule(.{
+        .root_source_file = b.path("src/journal/search.zig"),
+        .target = target,
+        .optimize = optimize,
+    }));
+    const grep_benchmark = b.addExecutable(.{
+        .name = "tj-grep-benchmark",
+        .root_module = grep_benchmark_mod,
+    });
+    const run_grep_benchmark = b.addRunArtifact(grep_benchmark);
+    const grep_benchmark_step = b.step("benchmark-grep", "Benchmark journal grep search paths");
+    grep_benchmark_step.dependOn(&run_grep_benchmark.step);
+
     // The integration tests drive the real binary through a pty, so they need
     // to know where it landed.
     const selftest_options = b.addOptions();

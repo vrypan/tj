@@ -9,6 +9,17 @@ const Io = std.Io;
 
 pub const marker_name = "pin";
 
+/// Tests a pin marker relative to an already-open entry directory. Callers
+/// traversing a journal can avoid reopening the journal and entry for every
+/// probe while retaining the same no-follow behavior.
+pub fn isPinnedInEntry(io: Io, entry_dir: Io.Dir) !bool {
+    _ = entry_dir.statFile(io, marker_name, .{ .follow_symlinks = false }) catch |err| switch (err) {
+        error.FileNotFound => return false,
+        else => return err,
+    };
+    return true;
+}
+
 pub fn isPinned(io: Io, root: Io.Dir, journal: []const u8, number: u32) !bool {
     var journal_dir = root.openDir(io, journal, .{ .follow_symlinks = false }) catch |err| switch (err) {
         error.FileNotFound => return false,
@@ -22,11 +33,7 @@ pub fn isPinned(io: Io, root: Io.Dir, journal: []const u8, number: u32) !bool {
         else => return err,
     };
     defer entry_dir.close(io);
-    _ = entry_dir.statFile(io, marker_name, .{ .follow_symlinks = false }) catch |err| switch (err) {
-        error.FileNotFound => return false,
-        else => return err,
-    };
-    return true;
+    return isPinnedInEntry(io, entry_dir);
 }
 
 pub fn setPinned(io: Io, root: Io.Dir, journal: []const u8, number: u32, pinned: bool) !void {

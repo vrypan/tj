@@ -52,34 +52,41 @@ pub const MatchSpan = struct {
     end: u64,
 };
 
-const ReadStats = struct {
-    calls: usize = 0,
-    bytes: u64 = 0,
+pub const Stats = struct {
+    calls: std.atomic.Value(usize) = .init(0),
+    bytes: std.atomic.Value(u64) = .init(0),
 
-    fn record(self: *ReadStats, count: usize) !void {
-        self.calls = try std.math.add(usize, self.calls, 1);
-        self.bytes = try std.math.add(u64, self.bytes, count);
+    fn record(self: *Stats, count: usize) void {
+        _ = self.calls.fetchAdd(1, .monotonic);
+        _ = self.bytes.fetchAdd(count, .monotonic);
     }
 };
 
 /// Returns as soon as a complete match is read. Matcher state is reset at a
 /// newline, matching `scanFile` without waiting for the rest of that line.
 pub fn fileContains(io: Io, file: Io.File, matcher: *const Matcher) !bool {
-    return fileContainsWithStats(io, file, matcher, null);
+    return fileContainsMeasured(io, file, matcher, null);
 }
 
-fn fileContainsWithStats(
+pub fn fileContainsMeasured(io: Io, file: Io.File, matcher: *const Matcher, stats: ?*Stats) !bool {
+    if (!matcher.ignore_case and matcher.pattern.len <= chunk_size) {
+        return fileContainsBulk(io, file, matcher, stats);
+    }
+    return fileContainsKmp(io, file, matcher, stats);
+}
+
+fn fileContainsKmp(
     io: Io,
     file: Io.File,
     matcher: *const Matcher,
-    stats: ?*ReadStats,
+    stats: ?*Stats,
 ) !bool {
     var buffer: [chunk_size]u8 = undefined;
     var offset: u64 = 0;
     var prefix_len: usize = 0;
     while (true) {
         const n = try file.readPositional(io, &.{&buffer}, offset);
-        if (stats) |value| try value.record(n);
+        if (stats) |value| value.record(n);
         if (n == 0) return false;
         for (buffer[0..n]) |raw| {
             if (raw == '\n') {
@@ -94,6 +101,30 @@ fn fileContainsWithStats(
             if (prefix_len == matcher.pattern.len) return true;
         }
         offset = try std.math.add(u64, offset, n);
+    }
+}
+
+fn fileContainsBulk(io: Io, file: Io.File, matcher: *const Matcher, stats: ?*Stats) !bool {
+    const carry_capacity = matcher.pattern.len - 1;
+    var storage: [chunk_size * 2 - 1]u8 = undefined;
+    const buffer = storage[0 .. chunk_size + carry_capacity];
+    var read_offset: u64 = 0;
+    var carry_len: usize = 0;
+    while (true) {
+        const n = try file.readPositional(io, &.{buffer[carry_len .. carry_len + chunk_size]}, read_offset);
+        if (stats) |value| value.record(n);
+        if (n == 0) return false;
+        const available = carry_len + n;
+        var start: usize = 0;
+        while (std.mem.indexOfScalarPos(u8, buffer[0..available], start, '\n')) |newline| {
+            if (std.mem.indexOf(u8, buffer[start..newline], matcher.pattern) != null) return true;
+            start = newline + 1;
+        }
+        const tail = buffer[start..available];
+        if (std.mem.indexOf(u8, tail, matcher.pattern) != null) return true;
+        carry_len = @min(carry_capacity, tail.len);
+        std.mem.copyForwards(u8, buffer[0..carry_len], tail[tail.len - carry_len ..]);
+        read_offset = try std.math.add(u64, read_offset, n);
     }
 }
 
@@ -137,6 +168,17 @@ pub fn firstMatchSpan(
 /// Calls `sink` once for every source line containing the pattern. Offsets do
 /// not include the terminating newline. Matcher state never crosses a newline.
 pub fn scanFile(io: Io, file: Io.File, matcher: *const Matcher, sink: Sink) !u64 {
+    return scanFileMeasured(io, file, matcher, sink, null);
+}
+
+pub fn scanFileMeasured(io: Io, file: Io.File, matcher: *const Matcher, sink: Sink, stats: ?*Stats) !u64 {
+    if (!matcher.ignore_case and matcher.pattern.len <= chunk_size) {
+        return scanFileBulk(io, file, matcher, sink, stats);
+    }
+    return scanFileKmp(io, file, matcher, sink, stats);
+}
+
+fn scanFileKmp(io: Io, file: Io.File, matcher: *const Matcher, sink: Sink, stats: ?*Stats) !u64 {
     var reader_buffer: [chunk_size]u8 = undefined;
     var bytes: [chunk_size]u8 = undefined;
     var reader = file.readerStreaming(io, &reader_buffer);
@@ -148,6 +190,7 @@ pub fn scanFile(io: Io, file: Io.File, matcher: *const Matcher, sink: Sink) !u64
 
     while (true) {
         const n = try reader.interface.readSliceShort(&bytes);
+        if (stats) |value| value.record(n);
         if (n == 0) break;
         for (bytes[0..n]) |raw| {
             if (raw == '\n') {
@@ -180,6 +223,64 @@ pub fn scanFile(io: Io, file: Io.File, matcher: *const Matcher, sink: Sink) !u64
     }
     return matches;
 }
+
+fn scanFileBulk(io: Io, file: Io.File, matcher: *const Matcher, sink: Sink, stats: ?*Stats) !u64 {
+    const carry_capacity = matcher.pattern.len - 1;
+    var storage: [chunk_size * 2 - 1]u8 = undefined;
+    const buffer = storage[0 .. chunk_size + carry_capacity];
+    var read_offset: u64 = 0;
+    var carry_len: usize = 0;
+    var line_start: u64 = 0;
+    var line_matched = false;
+    var matches: u64 = 0;
+
+    while (true) {
+        const n = try file.readPositional(io, &.{buffer[carry_len .. carry_len + chunk_size]}, read_offset);
+        if (stats) |value| value.record(n);
+        if (n == 0) break;
+        const available = carry_len + n;
+        const base = try std.math.sub(u64, read_offset, carry_len);
+        var start: usize = 0;
+        while (std.mem.indexOfScalarPos(u8, buffer[0..available], start, '\n')) |newline| {
+            if (!line_matched and std.mem.indexOf(u8, buffer[start..newline], matcher.pattern) != null) {
+                line_matched = true;
+            }
+            if (line_matched) {
+                try sink.emit(sink.context, file, line_start, try std.math.add(u64, base, newline));
+                matches = try std.math.add(u64, matches, 1);
+            }
+            line_start = try std.math.add(u64, base, newline + 1);
+            line_matched = false;
+            start = newline + 1;
+        }
+
+        const tail = buffer[start..available];
+        if (!line_matched and std.mem.indexOf(u8, tail, matcher.pattern) != null) line_matched = true;
+        carry_len = if (line_matched) 0 else @min(carry_capacity, tail.len);
+        if (carry_len != 0) {
+            std.mem.copyForwards(u8, buffer[0..carry_len], tail[tail.len - carry_len ..]);
+        }
+        read_offset = try std.math.add(u64, read_offset, n);
+    }
+
+    if (line_matched) {
+        try sink.emit(sink.context, file, line_start, read_offset);
+        matches = try std.math.add(u64, matches, 1);
+    }
+    return matches;
+}
+
+/// Scalar reference entry points used only by the non-installed benchmark.
+/// This compares optimized code with the same oracle used by unit tests.
+pub const Benchmark = struct {
+    pub fn fileContainsScalar(io: Io, file: Io.File, matcher: *const Matcher) !bool {
+        return fileContainsKmp(io, file, matcher, null);
+    }
+
+    pub fn scanFileScalar(io: Io, file: Io.File, matcher: *const Matcher, sink: Sink) !u64 {
+        return scanFileKmp(io, file, matcher, sink, null);
+    }
+};
 
 /// Copies `[start, end)` without changing the file's streaming cursor.
 pub fn copySpan(io: Io, file: Io.File, start: u64, end: u64, out: *Io.Writer) !void {
@@ -223,7 +324,7 @@ fn copyHighlightedSpanWithStats(
     sgr: []const u8,
     out: *Io.Writer,
     content_out: *Io.Writer,
-    stats: ?*ReadStats,
+    stats: ?*Stats,
 ) !void {
     if (end < start) return error.InvalidOffset;
     if (sgr.len == 0) return copySpan(io, file, start, end, content_out);
@@ -241,7 +342,7 @@ fn copyHighlightedSpanWithStats(
         const remaining = end - read_offset;
         const wanted: usize = @intCast(@min(remaining, chunk_size));
         const n = try file.readPositional(io, &.{buffer[carry_len .. carry_len + wanted]}, read_offset);
-        if (stats) |value| try value.record(n);
+        if (stats) |value| value.record(n);
         if (n == 0) return error.UnexpectedEndOfFile;
         const available = carry_len + n;
         var prefix_len = carry_len;
@@ -302,6 +403,77 @@ fn scanText(text: []const u8, pattern: []const u8, ignore_case: bool) !TestSink 
     var found: TestSink = .{};
     _ = try scanFile(io, file, &matcher, .{ .context = &found, .emit = TestSink.emit });
     return found;
+}
+
+fn scanTextOracle(text: []const u8, pattern: []const u8) !TestSink {
+    const io = std.testing.io;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var file = try tmp.dir.createFile(io, "resource", .{ .read = true });
+    defer file.close(io);
+    try file.writePositionalAll(io, text, 0);
+    var matcher = try Matcher.init(std.testing.allocator, pattern, false);
+    defer matcher.deinit();
+    var found: TestSink = .{};
+    _ = try scanFileKmp(io, file, &matcher, .{ .context = &found, .emit = TestSink.emit }, null);
+    return found;
+}
+
+test "bulk case-sensitive search is differential-equivalent to KMP" {
+    const gpa = std.testing.allocator;
+    const text = try gpa.alloc(u8, chunk_size * 2 + 257);
+    defer gpa.free(text);
+    var state: u64 = 0x9e3779b97f4a7c15;
+    for (text, 0..) |*byte, i| {
+        state = state *% 6364136223846793005 +% 1442695040888963407;
+        byte.* = if (i % 997 == 0) '\n' else @as(u8, @truncate(state >> 32));
+    }
+    @memcpy(text[chunk_size - 3 .. chunk_size + 5], "abababac");
+    @memcpy(text[chunk_size + 40 .. chunk_size + 44], "x\x00\ry");
+
+    for ([_][]const u8{ "a", "ababac", "x\x00\ry", "absent", "\r", "\x00" }) |pattern| {
+        var expected = try scanTextOracle(text, pattern);
+        defer expected.ranges.deinit(gpa);
+        var actual = try scanText(text, pattern, false);
+        defer actual.ranges.deinit(gpa);
+        try std.testing.expectEqualSlices([2]u64, expected.ranges.items, actual.ranges.items);
+
+        const io = std.testing.io;
+        var tmp = std.testing.tmpDir(.{});
+        defer tmp.cleanup();
+        var file = try tmp.dir.createFile(io, "resource", .{ .read = true });
+        defer file.close(io);
+        try file.writePositionalAll(io, text, 0);
+        var matcher = try Matcher.init(gpa, pattern, false);
+        defer matcher.deinit();
+        try std.testing.expectEqual(
+            try fileContainsKmp(io, file, &matcher, null),
+            try fileContainsBulk(io, file, &matcher, null),
+        );
+    }
+}
+
+test "bulk search handles edge pattern lengths and newline boundaries" {
+    const gpa = std.testing.allocator;
+    var pattern = try gpa.alloc(u8, chunk_size);
+    defer gpa.free(pattern);
+    @memset(pattern, 'q');
+    const text = try std.mem.concat(gpa, u8, &.{ pattern[0 .. pattern.len - 1], "\nq\n", pattern });
+    defer gpa.free(text);
+    var found = try scanText(text, pattern, false);
+    defer found.ranges.deinit(gpa);
+    try std.testing.expectEqualSlices([2]u64, &.{.{ pattern.len + 2, pattern.len * 2 + 2 }}, found.ranges.items);
+
+    const above = try gpa.alloc(u8, chunk_size + 1);
+    defer gpa.free(above);
+    @memset(above, 'z');
+    var above_found = try scanText(above, above, false);
+    defer above_found.ranges.deinit(gpa);
+    try std.testing.expectEqualSlices([2]u64, &.{.{ 0, above.len }}, above_found.ranges.items);
+
+    var split = try scanText("needle\nneedle\n\n", "e\nn", false);
+    defer split.ranges.deinit(gpa);
+    try std.testing.expectEqual(@as(usize, 0), split.ranges.items.len);
 }
 
 test "fixed search reports each matching line once and resets at newlines" {
@@ -461,10 +633,10 @@ test "existence search stops after the chunk containing its first match" {
 
     var matcher = try Matcher.init(gpa, "needle", false);
     defer matcher.deinit();
-    var stats: ReadStats = .{};
-    try std.testing.expect(try fileContainsWithStats(io, file, &matcher, &stats));
-    try std.testing.expectEqual(@as(usize, 1), stats.calls);
-    try std.testing.expectEqual(@as(u64, chunk_size), stats.bytes);
+    var stats: Stats = .{};
+    try std.testing.expect(try fileContainsBulk(io, file, &matcher, &stats));
+    try std.testing.expectEqual(@as(usize, 1), stats.calls.load(.monotonic));
+    try std.testing.expectEqual(@as(u64, chunk_size), stats.bytes.load(.monotonic));
 
     var split_matcher = try Matcher.init(gpa, "ab", false);
     defer split_matcher.deinit();
@@ -488,7 +660,7 @@ test "highlighted copying reads dense matches once by chunks" {
 
     var matcher = try Matcher.init(gpa, "a", false);
     defer matcher.deinit();
-    var stats: ReadStats = .{};
+    var stats: Stats = .{};
     var bytes: std.ArrayList(u8) = .empty;
     var writer = Io.Writer.Allocating.fromArrayList(gpa, &bytes);
     try copyHighlightedSpanWithStats(
@@ -504,8 +676,8 @@ test "highlighted copying reads dense matches once by chunks" {
     );
     bytes = writer.toArrayList();
     defer bytes.deinit(gpa);
-    try std.testing.expectEqual(@as(usize, 2), stats.calls);
-    try std.testing.expectEqual(@as(u64, input.len), stats.bytes);
+    try std.testing.expectEqual(@as(usize, 2), stats.calls.load(.monotonic));
+    try std.testing.expectEqual(@as(u64, input.len), stats.bytes.load(.monotonic));
     try std.testing.expectEqual(@as(usize, input.len * "\x1b[1ma\x1b[m".len), bytes.items.len);
 }
 
@@ -524,7 +696,7 @@ test "highlighted copying handles KMP fallback across a chunk" {
 
     var matcher = try Matcher.init(gpa, "ababac", false);
     defer matcher.deinit();
-    var stats: ReadStats = .{};
+    var stats: Stats = .{};
     var bytes: std.ArrayList(u8) = .empty;
     var writer = Io.Writer.Allocating.fromArrayList(gpa, &bytes);
     try copyHighlightedSpanWithStats(
@@ -540,7 +712,7 @@ test "highlighted copying handles KMP fallback across a chunk" {
     );
     bytes = writer.toArrayList();
     defer bytes.deinit(gpa);
-    try std.testing.expectEqual(@as(usize, 2), stats.calls);
+    try std.testing.expectEqual(@as(usize, 2), stats.calls.load(.monotonic));
     try std.testing.expectEqualStrings(prefix, bytes.items[0..prefix.len]);
     try std.testing.expectEqualStrings("ab\x1b[4mababac\x1b[m", bytes.items[prefix.len..]);
 }
@@ -559,7 +731,7 @@ test "highlighted copying supports a pattern larger than one chunk" {
 
     var matcher = try Matcher.init(gpa, pattern, false);
     defer matcher.deinit();
-    var stats: ReadStats = .{};
+    var stats: Stats = .{};
     var bytes: std.ArrayList(u8) = .empty;
     var writer = Io.Writer.Allocating.fromArrayList(gpa, &bytes);
     try copyHighlightedSpanWithStats(
@@ -575,7 +747,7 @@ test "highlighted copying supports a pattern larger than one chunk" {
     );
     bytes = writer.toArrayList();
     defer bytes.deinit(gpa);
-    try std.testing.expectEqual(@as(usize, 2), stats.calls);
+    try std.testing.expectEqual(@as(usize, 2), stats.calls.load(.monotonic));
     try std.testing.expectEqualStrings("\x1b[1m", bytes.items[0..4]);
     try std.testing.expectEqualStrings(pattern, bytes.items[4 .. 4 + pattern.len]);
     try std.testing.expectEqualStrings("\x1b[m", bytes.items[4 + pattern.len ..]);

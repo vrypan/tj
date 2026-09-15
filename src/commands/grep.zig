@@ -30,6 +30,60 @@ pub const GrepRequest = struct {
     pattern: []const u8 = "",
 };
 
+pub const GrepStats = struct {
+    number_lists: std.atomic.Value(usize) = .init(0),
+    entry_opens: std.atomic.Value(usize) = .init(0),
+    resource_opens: std.atomic.Value(usize) = .init(0),
+    rc_probes: std.atomic.Value(usize) = .init(0),
+    pin_probes: std.atomic.Value(usize) = .init(0),
+    out_length_probes: std.atomic.Value(usize) = .init(0),
+    live_jobs: std.atomic.Value(usize) = .init(0),
+    max_lock: std.atomic.Mutex = .unlocked,
+    max_live_jobs: usize = 0,
+    search: search.Stats = .{},
+
+    fn add(counter: *std.atomic.Value(usize)) void {
+        _ = counter.fetchAdd(1, .monotonic);
+    }
+
+    fn jobStart(self: *GrepStats) void {
+        const live = self.live_jobs.fetchAdd(1, .monotonic) + 1;
+        while (!self.max_lock.tryLock()) std.atomic.spinLoopHint();
+        defer self.max_lock.unlock();
+        self.max_live_jobs = @max(self.max_live_jobs, live);
+    }
+
+    fn jobEnd(self: *GrepStats) void {
+        _ = self.live_jobs.fetchSub(1, .monotonic);
+    }
+};
+
+pub const GrepStatsSnapshot = struct {
+    number_lists: usize,
+    entry_opens: usize,
+    resource_opens: usize,
+    rc_probes: usize,
+    pin_probes: usize,
+    out_length_probes: usize,
+    bytes_read: u64,
+    read_calls: usize,
+    max_live_jobs: usize,
+};
+
+pub fn grepStatsSnapshot(stats: *const GrepStats) GrepStatsSnapshot {
+    return .{
+        .number_lists = stats.number_lists.load(.monotonic),
+        .entry_opens = stats.entry_opens.load(.monotonic),
+        .resource_opens = stats.resource_opens.load(.monotonic),
+        .rc_probes = stats.rc_probes.load(.monotonic),
+        .pin_probes = stats.pin_probes.load(.monotonic),
+        .out_length_probes = stats.out_length_probes.load(.monotonic),
+        .bytes_read = stats.search.bytes.load(.monotonic),
+        .read_calls = stats.search.calls.load(.monotonic),
+        .max_live_jobs = stats.max_live_jobs,
+    };
+}
+
 pub fn grepRequest(parsed: *const zecli.Parsed) !GrepRequest {
     var request: GrepRequest = .{
         .all = parsed.enabled("all"),
@@ -97,6 +151,7 @@ pub const GrepOutput = struct {
     terminal_columns: ?usize,
     layout_color: bool,
     reference_width: usize,
+    stats: ?*GrepStats = null,
 };
 
 pub const GrepWindow = struct {
@@ -184,9 +239,22 @@ pub const GrepLineSink = struct {
     matcher: *const search.Matcher,
     pinned: bool,
     exit_code: ?u8,
+    entry_dir: ?*store.Dir = null,
+    metadata_loaded: bool = true,
+
+    fn loadMetadata(self: *GrepLineSink) !void {
+        if (self.metadata_loaded) return;
+        const entry_dir = self.entry_dir orelse return error.InvalidState;
+        if (self.output.stats) |stats| GrepStats.add(&stats.pin_probes);
+        self.pinned = try pins.isPinnedInEntry(self.output.io, entry_dir.*);
+        if (self.output.stats) |stats| GrepStats.add(&stats.rc_probes);
+        self.exit_code = store.entryExitCode(self.output.io, entry_dir.*);
+        self.metadata_loaded = true;
+    }
 
     pub fn emit(context: *anyopaque, file: Io.File, start: u64, end: u64) !void {
         const self: *GrepLineSink = @ptrCast(@alignCast(context));
+        try self.loadMetadata();
         try self.output.noout_region.begin();
         const entry = presentation.EntryPresentation.init(
             self.journal,
@@ -383,18 +451,34 @@ test "history display sanitization preserves ordinary spacing" {
     try std.testing.expectEqualStrings("echo\tbeforeafter next", sanitized);
 }
 
-pub fn grepReferenceWidth(io: Io, root: store.Dir, journals: []const []const u8, qualified: bool) !usize {
+fn grepReferenceWidth(journals: []const JournalEntries, qualified: bool) usize {
     var width: usize = 1;
     for (journals) |journal| {
-        const highest = try store.highestEntryNumber(io, root, journal) orelse continue;
+        const highest = if (journal.numbers.len == 0) continue else journal.numbers[journal.numbers.len - 1];
         const number_width = report.decimalWidth(highest);
         const candidate = if (qualified)
-            1 + journal.len + 1 + number_width
+            1 + journal.name.len + 1 + number_width
         else
             number_width;
         width = @max(width, candidate);
     }
     return width;
+}
+
+const JournalEntries = struct {
+    name: []const u8,
+    numbers: []u32,
+};
+
+fn listGrepNumbers(
+    gpa: std.mem.Allocator,
+    io: Io,
+    root: store.Dir,
+    journal: []const u8,
+    stats: ?*GrepStats,
+) ![]u32 {
+    if (stats) |value| GrepStats.add(&value.number_lists);
+    return store.listNumbers(gpa, io, root, journal);
 }
 
 pub fn grepCommand(
@@ -427,7 +511,9 @@ pub fn grepCommand(
     if (request.numbers) {
         var numbers: std.ArrayList(u32) = .empty;
         defer numbers.deinit(gpa);
-        try collectMatchingEntries(gpa, io, root, current.?, request, active, &matcher, &numbers);
+        const entries = try listGrepNumbers(gpa, io, root, current.?, null);
+        defer gpa.free(entries);
+        try collectMatchingEntries(gpa, io, root, current.?, entries, request, active, &matcher, &numbers);
         if (numbers.items.len == 0) return 1;
         var noout_region: report.NooutRegion = .{
             .out = out,
@@ -465,13 +551,31 @@ pub fn grepCommand(
             for (journals) |journal| gpa.free(journal);
             gpa.free(journals);
         }
-        output.reference_width = try grepReferenceWidth(io, root, journals, true);
+        var entries: std.ArrayList(JournalEntries) = .empty;
+        defer {
+            for (entries.items) |item| gpa.free(item.numbers);
+            entries.deinit(gpa);
+        }
         for (journals) |journal| {
-            try grepJournal(gpa, io, root, journal, request, active, &matcher, &output, &total);
+            const numbers = listGrepNumbers(gpa, io, root, journal, null) catch |err| switch (err) {
+                error.FileNotFound => continue,
+                else => |other| return other,
+            };
+            errdefer gpa.free(numbers);
+            try entries.append(gpa, .{ .name = journal, .numbers = numbers });
+        }
+        output.reference_width = grepReferenceWidth(entries.items, true);
+        for (entries.items) |journal| {
+            try grepJournal(gpa, io, root, journal.name, journal.numbers, request, active, &matcher, &output, &total, null);
         }
     } else {
-        output.reference_width = try grepReferenceWidth(io, root, &.{current.?}, false);
-        try grepJournal(gpa, io, root, current.?, request, active, &matcher, &output, &total);
+        const numbers = listGrepNumbers(gpa, io, root, current.?, null) catch |err| switch (err) {
+            error.FileNotFound => return error.NoSuchJournal,
+            else => |other| return other,
+        };
+        defer gpa.free(numbers);
+        output.reference_width = grepReferenceWidth(&.{.{ .name = current.?, .numbers = numbers }}, false);
+        try grepJournal(gpa, io, root, current.?, numbers, request, active, &matcher, &output, &total, null);
     }
     return if (total == 0) 1 else 0;
 }
@@ -479,17 +583,28 @@ pub fn grepCommand(
 const MatchingEntryVisitor = struct {
     gpa: std.mem.Allocator,
     numbers: *std.ArrayList(u32),
+    stats: ?*GrepStats,
+
+    fn beginEntry(
+        _: *MatchingEntryVisitor,
+        _: []const u8,
+        _: u32,
+        _: *store.Dir,
+    ) !void {}
 
     fn beginResource(
         _: *MatchingEntryVisitor,
         _: []const u8,
-        _: store.InteractionInfo,
-        _: []const u8,
         _: *const search.Matcher,
     ) !void {}
 
-    fn scan(_: *MatchingEntryVisitor, io: Io, file: Io.File, matcher: *const search.Matcher) !u64 {
-        return if (try search.fileContains(io, file, matcher)) 1 else 0;
+    fn scan(self: *MatchingEntryVisitor, io: Io, file: Io.File, matcher: *const search.Matcher) !u64 {
+        return if (try search.fileContainsMeasured(
+            io,
+            file,
+            matcher,
+            if (self.stats) |stats| &stats.search else null,
+        )) 1 else 0;
     }
 
     fn endResource(self: *MatchingEntryVisitor, number: u32, found: u64) !bool {
@@ -499,31 +614,185 @@ const MatchingEntryVisitor = struct {
     }
 };
 
-const FormattedMatchVisitor = struct {
-    output: *GrepOutput,
+// Four workers retained the large-resource speedup without the intermittent
+// tiny-file contention measured at eight workers.
+const max_grep_workers = 4;
+const parallel_entry_threshold = 64;
+
+fn grepWorkerCount(entry_count: usize, forced: ?usize) usize {
+    if (entry_count == 0) return 1;
+    if (forced) |count| return @max(1, @min(count, @min(max_grep_workers, entry_count)));
+    if (entry_count < parallel_entry_threshold) return 1;
+    const cpu_count = std.Thread.getCpuCount() catch return 1;
+    return @max(1, @min(cpu_count, @min(max_grep_workers, entry_count)));
+}
+
+fn entryContains(
+    io: Io,
+    journal_dir: store.Dir,
+    number: u32,
+    request: GrepRequest,
+    matcher: *const search.Matcher,
+    stats: ?*GrepStats,
+) !bool {
+    var number_buf: [16]u8 = undefined;
+    const entry_name = try std.fmt.bufPrint(&number_buf, "{d}", .{number});
+    var entry_dir = journal_dir.openDir(io, entry_name, .{ .follow_symlinks = false }) catch |err| switch (err) {
+        error.FileNotFound, error.NotDir => return false,
+        else => |other| return other,
+    };
+    defer entry_dir.close(io);
+    if (stats) |value| GrepStats.add(&value.entry_opens);
+    for ([_]struct { enabled: bool, name: []const u8 }{
+        .{ .enabled = request.commands, .name = "cmd" },
+        .{ .enabled = request.output, .name = "out" },
+    }) |resource| {
+        if (!resource.enabled) continue;
+        var file = entry_dir.openFile(io, resource.name, .{}) catch |err| switch (err) {
+            error.FileNotFound => continue,
+            else => |other| return other,
+        };
+        defer file.close(io);
+        if (stats) |value| GrepStats.add(&value.resource_opens);
+        if (try search.fileContainsMeasured(
+            io,
+            file,
+            matcher,
+            if (stats) |value| &value.search else null,
+        )) return true;
+    }
+    return false;
+}
+
+const ParallelNumbers = struct {
     io: Io,
     root: store.Dir,
+    journal: []const u8,
+    numbers: []const u32,
+    request: GrepRequest,
+    active: ?cmd_context.ActiveInteraction,
+    matcher: *const search.Matcher,
+    matched: []bool,
+    next: std.atomic.Value(usize) = .init(0),
+    start: std.atomic.Value(bool) = .init(false),
+    abort: std.atomic.Value(bool) = .init(false),
+    error_lock: std.atomic.Mutex = .unlocked,
+    first_error: ?anyerror = null,
+    stats: ?*GrepStats,
+
+    fn setError(self: *ParallelNumbers, err: anyerror) void {
+        while (!self.error_lock.tryLock()) std.atomic.spinLoopHint();
+        defer self.error_lock.unlock();
+        if (self.first_error == null) self.first_error = err;
+        self.abort.store(true, .release);
+    }
+
+    fn worker(self: *ParallelNumbers) void {
+        while (!self.start.load(.acquire)) std.atomic.spinLoopHint();
+        if (self.abort.load(.acquire)) return;
+        var journal_dir = self.root.openDir(self.io, self.journal, .{ .follow_symlinks = false }) catch |err| {
+            self.setError(err);
+            return;
+        };
+        defer journal_dir.close(self.io);
+        while (!self.abort.load(.acquire)) {
+            const index = self.next.fetchAdd(1, .monotonic);
+            if (index >= self.numbers.len) return;
+            const number = self.numbers[index];
+            if (self.active) |item| {
+                if (item.number == number and std.mem.eql(u8, item.journal, self.journal)) continue;
+            }
+            if (self.stats) |stats| stats.jobStart();
+            defer if (self.stats) |stats| stats.jobEnd();
+            self.matched[index] = entryContains(self.io, journal_dir, number, self.request, self.matcher, self.stats) catch |err| {
+                self.setError(err);
+                return;
+            };
+        }
+    }
+};
+
+fn collectMatchingEntriesParallel(
+    gpa: std.mem.Allocator,
+    io: Io,
+    root: store.Dir,
+    journal: []const u8,
+    entry_numbers: []const u32,
+    request: GrepRequest,
+    active: ?cmd_context.ActiveInteraction,
+    matcher: *const search.Matcher,
+    numbers: *std.ArrayList(u32),
+    forced_workers: ?usize,
+    stats: ?*GrepStats,
+) !void {
+    const worker_count = grepWorkerCount(entry_numbers.len, forced_workers);
+    if (worker_count == 1) {
+        return collectMatchingEntriesSerial(gpa, io, root, journal, entry_numbers, request, active, matcher, numbers, stats);
+    }
+    const matched = try gpa.alloc(bool, entry_numbers.len);
+    defer gpa.free(matched);
+    @memset(matched, false);
+    var state: ParallelNumbers = .{
+        .io = io,
+        .root = root,
+        .journal = journal,
+        .numbers = entry_numbers,
+        .request = request,
+        .active = active,
+        .matcher = matcher,
+        .matched = matched,
+        .stats = stats,
+    };
+    var threads: [max_grep_workers]std.Thread = undefined;
+    var spawned: usize = 0;
+    while (spawned < worker_count) : (spawned += 1) {
+        threads[spawned] = std.Thread.spawn(.{}, ParallelNumbers.worker, .{&state}) catch {
+            state.abort.store(true, .release);
+            state.start.store(true, .release);
+            for (threads[0..spawned]) |thread| thread.join();
+            return collectMatchingEntriesSerial(gpa, io, root, journal, entry_numbers, request, active, matcher, numbers, stats);
+        };
+    }
+    state.start.store(true, .release);
+    for (threads[0..spawned]) |thread| thread.join();
+    if (state.first_error) |err| return err;
+    for (entry_numbers, matched) |number, found| if (found) try numbers.append(gpa, number);
+}
+
+const FormattedMatchVisitor = struct {
+    output: *GrepOutput,
     qualified: bool,
     total: *u64,
     line_sink: GrepLineSink = undefined,
+    stats: ?*GrepStats,
 
-    fn beginResource(
+    fn beginEntry(
         self: *FormattedMatchVisitor,
         journal: []const u8,
-        info: store.InteractionInfo,
-        resource: []const u8,
-        matcher: *const search.Matcher,
+        number: u32,
+        entry_dir: *store.Dir,
     ) !void {
         self.line_sink = .{
             .output = self.output,
             .journal = journal,
-            .number = info.number,
-            .resource = resource,
+            .number = number,
+            .resource = undefined,
             .qualified = self.qualified,
-            .matcher = matcher,
-            .pinned = try pins.isPinned(self.io, self.root, journal, info.number),
-            .exit_code = info.exit_code,
+            .matcher = undefined,
+            .pinned = false,
+            .exit_code = null,
+            .entry_dir = entry_dir,
+            .metadata_loaded = false,
         };
+    }
+
+    fn beginResource(
+        self: *FormattedMatchVisitor,
+        resource: []const u8,
+        matcher: *const search.Matcher,
+    ) !void {
+        self.line_sink.resource = resource;
+        self.line_sink.matcher = matcher;
     }
 
     fn sink(self: *FormattedMatchVisitor) search.Sink {
@@ -531,7 +800,13 @@ const FormattedMatchVisitor = struct {
     }
 
     fn scan(self: *FormattedMatchVisitor, io: Io, file: Io.File, matcher: *const search.Matcher) !u64 {
-        return search.scanFile(io, file, matcher, self.sink());
+        return search.scanFileMeasured(
+            io,
+            file,
+            matcher,
+            self.sink(),
+            if (self.stats) |stats| &stats.search else null,
+        );
     }
 
     fn endResource(self: *FormattedMatchVisitor, _: u32, found: u64) !bool {
@@ -545,40 +820,48 @@ fn traverseGrepJournal(
     io: Io,
     root: store.Dir,
     journal: []const u8,
+    numbers: []const u32,
     request: GrepRequest,
     active: ?cmd_context.ActiveInteraction,
     matcher: *const search.Matcher,
     visitor: anytype,
+    stats: ?*GrepStats,
 ) !void {
-    // Matching reads resource files directly; recorded command text never
-    // needs to be resident merely to traverse a journal.
-    var interactions = store.iterateInteractions(gpa, io, root, journal, store.no_command) catch |err| switch (err) {
+    _ = gpa;
+    var journal_dir = root.openDir(io, journal, .{ .follow_symlinks = false }) catch |err| switch (err) {
         error.FileNotFound => return error.NoSuchJournal,
         else => |other| return other,
     };
-    defer interactions.deinit();
+    defer journal_dir.close(io);
 
-    while (try interactions.next()) |info| {
-        defer info.deinit(gpa);
+    for (numbers) |number| {
         if (active) |item| {
-            if (item.number == info.number and std.mem.eql(u8, item.journal, journal)) continue;
+            if (item.number == number and std.mem.eql(u8, item.journal, journal)) continue;
         }
+        var number_buf: [16]u8 = undefined;
+        const entry_name = try std.fmt.bufPrint(&number_buf, "{d}", .{number});
+        var entry_dir = journal_dir.openDir(io, entry_name, .{ .follow_symlinks = false }) catch |err| switch (err) {
+            error.FileNotFound, error.NotDir => continue,
+            else => |other| return other,
+        };
+        defer entry_dir.close(io);
+        if (stats) |value| GrepStats.add(&value.entry_opens);
+        try visitor.beginEntry(journal, number, &entry_dir);
         for ([_]struct { enabled: bool, name: []const u8 }{
             .{ .enabled = request.commands, .name = "cmd" },
             .{ .enabled = request.output, .name = "out" },
         }) |resource| {
             if (!resource.enabled) continue;
-            var path_buf: [96]u8 = undefined;
-            const path = try std.fmt.bufPrint(&path_buf, "{s}/{d}/{s}", .{ journal, info.number, resource.name });
-            var file = root.openFile(io, path, .{}) catch |err| switch (err) {
+            var file = entry_dir.openFile(io, resource.name, .{}) catch |err| switch (err) {
                 error.FileNotFound => continue,
                 else => |other| return other,
             };
             defer file.close(io);
+            if (stats) |value| GrepStats.add(&value.resource_opens);
 
-            try visitor.beginResource(journal, info, resource.name, matcher);
+            try visitor.beginResource(resource.name, matcher);
             const found = try visitor.scan(io, file, matcher);
-            if (try visitor.endResource(info.number, found)) break;
+            if (try visitor.endResource(number, found)) break;
         }
     }
 }
@@ -588,16 +871,265 @@ fn collectMatchingEntries(
     io: Io,
     root: store.Dir,
     journal: []const u8,
+    entry_numbers: []const u32,
     request: GrepRequest,
     active: ?cmd_context.ActiveInteraction,
     matcher: *const search.Matcher,
     numbers: *std.ArrayList(u32),
 ) !void {
+    return collectMatchingEntriesParallel(
+        gpa,
+        io,
+        root,
+        journal,
+        entry_numbers,
+        request,
+        active,
+        matcher,
+        numbers,
+        null,
+        null,
+    );
+}
+
+fn collectMatchingEntriesSerial(
+    gpa: std.mem.Allocator,
+    io: Io,
+    root: store.Dir,
+    journal: []const u8,
+    entry_numbers: []const u32,
+    request: GrepRequest,
+    active: ?cmd_context.ActiveInteraction,
+    matcher: *const search.Matcher,
+    numbers: *std.ArrayList(u32),
+    stats: ?*GrepStats,
+) !void {
     var visitor: MatchingEntryVisitor = .{
         .gpa = gpa,
         .numbers = numbers,
+        .stats = stats,
     };
-    try traverseGrepJournal(gpa, io, root, journal, request, active, matcher, &visitor);
+    try traverseGrepJournal(gpa, io, root, journal, entry_numbers, request, active, matcher, &visitor, stats);
+}
+
+test "grep worker selection stays serial for small inputs and respects its cap" {
+    try std.testing.expectEqual(@as(usize, 1), grepWorkerCount(0, null));
+    try std.testing.expectEqual(@as(usize, 1), grepWorkerCount(parallel_entry_threshold - 1, null));
+    try std.testing.expectEqual(@as(usize, 1), grepWorkerCount(100, 1));
+    try std.testing.expectEqual(@as(usize, 2), grepWorkerCount(100, 2));
+    try std.testing.expectEqual(@as(usize, max_grep_workers), grepWorkerCount(100, max_grep_workers + 10));
+}
+
+test "parallel number collection matches serial order and active exclusion" {
+    const gpa = std.testing.allocator;
+    const io = std.testing.io;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    try tmp.dir.createDirPath(io, "work");
+    var listed: std.ArrayList(u32) = .empty;
+    defer listed.deinit(gpa);
+    for (1..97) |raw_number| {
+        const number: u32 = @intCast(raw_number);
+        try listed.append(gpa, number);
+        var path_buf: [32]u8 = undefined;
+        const path = try std.fmt.bufPrint(&path_buf, "work/{d}", .{number});
+        try tmp.dir.createDirPath(io, path);
+        if (number % 3 == 0) {
+            var resource_buf: [40]u8 = undefined;
+            const resource = try std.fmt.bufPrint(&resource_buf, "{s}/out", .{path});
+            const file = try tmp.dir.createFile(io, resource, .{});
+            defer file.close(io);
+            try file.writeStreamingAll(io, "needle\n");
+        }
+        if (number % 5 == 0) {
+            var resource_buf: [40]u8 = undefined;
+            const resource = try std.fmt.bufPrint(&resource_buf, "{s}/cmd", .{path});
+            const file = try tmp.dir.createFile(io, resource, .{});
+            defer file.close(io);
+            try file.writeStreamingAll(io, "Needle in command\n");
+        }
+    }
+    const active = cmd_context.ActiveInteraction{ .journal = "work", .number = 96 };
+    for ([_]bool{ false, true }) |ignore_case| {
+        var matcher = try search.Matcher.init(gpa, if (ignore_case) "NEEDLE" else "needle", ignore_case);
+        defer matcher.deinit();
+        const request: GrepRequest = .{
+            .commands = true,
+            .output = true,
+            .ignore_case = ignore_case,
+            .pattern = if (ignore_case) "NEEDLE" else "needle",
+        };
+        var serial: std.ArrayList(u32) = .empty;
+        defer serial.deinit(gpa);
+        try collectMatchingEntriesParallel(
+            gpa,
+            io,
+            tmp.dir,
+            "work",
+            listed.items,
+            request,
+            active,
+            &matcher,
+            &serial,
+            1,
+            null,
+        );
+        for ([_]usize{ 2, max_grep_workers, max_grep_workers + 1 }) |workers| {
+            var parallel: std.ArrayList(u32) = .empty;
+            defer parallel.deinit(gpa);
+            var stats: GrepStats = .{};
+            try collectMatchingEntriesParallel(
+                gpa,
+                io,
+                tmp.dir,
+                "work",
+                listed.items,
+                request,
+                active,
+                &matcher,
+                &parallel,
+                workers,
+                &stats,
+            );
+            try std.testing.expectEqualSlices(u32, serial.items, parallel.items);
+            const snapshot = grepStatsSnapshot(&stats);
+            try std.testing.expect(snapshot.max_live_jobs <= @min(workers, max_grep_workers));
+            try std.testing.expect(snapshot.max_live_jobs > 0);
+            try std.testing.expect(snapshot.resource_opens <= snapshot.entry_opens * 2);
+        }
+        try std.testing.expectEqual(@as(u32, 3), serial.items[0]);
+        try std.testing.expectEqual(@as(u32, if (ignore_case) 95 else 93), serial.items[serial.items.len - 1]);
+    }
+
+    for ([_]GrepRequest{
+        .{ .commands = true, .output = false, .pattern = "needle" },
+        .{ .commands = false, .output = true, .pattern = "needle" },
+        .{ .commands = true, .output = true, .pattern = "absent" },
+    }) |request| {
+        var matcher = try search.Matcher.init(gpa, request.pattern, false);
+        defer matcher.deinit();
+        var serial: std.ArrayList(u32) = .empty;
+        defer serial.deinit(gpa);
+        try collectMatchingEntriesParallel(gpa, io, tmp.dir, "work", listed.items, request, null, &matcher, &serial, 1, null);
+        var parallel: std.ArrayList(u32) = .empty;
+        defer parallel.deinit(gpa);
+        try collectMatchingEntriesParallel(gpa, io, tmp.dir, "work", listed.items, request, null, &matcher, &parallel, 2, null);
+        try std.testing.expectEqualSlices(u32, serial.items, parallel.items);
+    }
+}
+
+test "parallel number collection propagates resource open errors" {
+    const gpa = std.testing.allocator;
+    const io = std.testing.io;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    try tmp.dir.createDirPath(io, "work/1");
+    try tmp.dir.createDirPath(io, "work/2");
+    var entry = try tmp.dir.openDir(io, "work/1", .{});
+    defer entry.close(io);
+    try entry.symLink(io, "cmd", "cmd", .{});
+    var matcher = try search.Matcher.init(gpa, "needle", false);
+    defer matcher.deinit();
+    var found: std.ArrayList(u32) = .empty;
+    defer found.deinit(gpa);
+    try std.testing.expectError(
+        error.SymLinkLoop,
+        collectMatchingEntriesParallel(
+            gpa,
+            io,
+            tmp.dir,
+            "work",
+            &.{ 1, 2 },
+            .{ .commands = true, .output = false, .pattern = "needle" },
+            null,
+            &matcher,
+            &found,
+            2,
+            null,
+        ),
+    );
+}
+
+test "grep traversal defers metadata and lists journal numbers once" {
+    const gpa = std.testing.allocator;
+    const io = std.testing.io;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    for (1..3) |number| {
+        var path_buf: [32]u8 = undefined;
+        const path = try std.fmt.bufPrint(&path_buf, "work/{d}", .{number});
+        try tmp.dir.createDirPath(io, path);
+        for ([_][]const u8{ "cmd", "out", "rc", "pin" }) |resource| {
+            var resource_buf: [48]u8 = undefined;
+            const resource_path = try std.fmt.bufPrint(&resource_buf, "{s}/{s}", .{ path, resource });
+            const file = try tmp.dir.createFile(io, resource_path, .{});
+            defer file.close(io);
+            if (std.mem.eql(u8, resource, "cmd") or std.mem.eql(u8, resource, "out")) {
+                try file.writeStreamingAll(io, if (number == 1) "needle\nneedle again\n" else "ordinary\n");
+            } else if (std.mem.eql(u8, resource, "rc")) {
+                try file.writeStreamingAll(io, "7\n");
+            }
+        }
+    }
+    var matcher = try search.Matcher.init(gpa, "needle", false);
+    defer matcher.deinit();
+    const request: GrepRequest = .{ .pattern = "needle" };
+
+    var number_stats: GrepStats = .{};
+    const listed = try listGrepNumbers(gpa, io, tmp.dir, "work", &number_stats);
+    defer gpa.free(listed);
+    var found: std.ArrayList(u32) = .empty;
+    defer found.deinit(gpa);
+    try collectMatchingEntriesParallel(
+        gpa,
+        io,
+        tmp.dir,
+        "work",
+        listed,
+        request,
+        null,
+        &matcher,
+        &found,
+        1,
+        &number_stats,
+    );
+    const number_snapshot = grepStatsSnapshot(&number_stats);
+    try std.testing.expectEqual(@as(usize, 1), number_snapshot.number_lists);
+    try std.testing.expectEqual(@as(usize, 0), number_snapshot.rc_probes);
+    try std.testing.expectEqual(@as(usize, 0), number_snapshot.pin_probes);
+    try std.testing.expectEqual(@as(usize, 0), number_snapshot.out_length_probes);
+
+    var discard_buffer: [256]u8 = undefined;
+    var discard = Io.Writer.Discarding.init(&discard_buffer);
+    var no_match_stats: GrepStats = .{};
+    var absent = try search.Matcher.init(gpa, "absent", false);
+    defer absent.deinit();
+    var no_match_output: GrepOutput = .{
+        .io = io,
+        .out = &discard.writer,
+        .noout_region = .{ .out = &discard.writer, .enabled = false },
+        .match_sgr = "",
+        .terminal_columns = null,
+        .layout_color = false,
+        .reference_width = 1,
+        .stats = &no_match_stats,
+    };
+    var total: u64 = 0;
+    try grepJournal(gpa, io, tmp.dir, "work", listed, request, null, &absent, &no_match_output, &total, &no_match_stats);
+    const no_match_snapshot = grepStatsSnapshot(&no_match_stats);
+    try std.testing.expectEqual(@as(usize, 0), no_match_snapshot.rc_probes);
+    try std.testing.expectEqual(@as(usize, 0), no_match_snapshot.pin_probes);
+
+    var match_stats: GrepStats = .{};
+    var match_output = no_match_output;
+    match_output.stats = &match_stats;
+    total = 0;
+    try grepJournal(gpa, io, tmp.dir, "work", listed, request, null, &matcher, &match_output, &total, &match_stats);
+    const match_snapshot = grepStatsSnapshot(&match_stats);
+    try std.testing.expectEqual(@as(u64, 4), total);
+    try std.testing.expectEqual(@as(usize, 1), match_snapshot.rc_probes);
+    try std.testing.expectEqual(@as(usize, 1), match_snapshot.pin_probes);
+    try std.testing.expectEqual(@as(usize, 0), match_snapshot.out_length_probes);
 }
 
 pub fn grepJournal(
@@ -605,20 +1137,21 @@ pub fn grepJournal(
     io: Io,
     root: store.Dir,
     journal: []const u8,
+    entry_numbers: []const u32,
     request: GrepRequest,
     active: ?cmd_context.ActiveInteraction,
     matcher: *const search.Matcher,
     output: *GrepOutput,
     total: *u64,
+    stats: ?*GrepStats,
 ) !void {
     var visitor: FormattedMatchVisitor = .{
         .output = output,
-        .io = io,
-        .root = root,
         .qualified = request.all,
         .total = total,
+        .stats = stats,
     };
-    try traverseGrepJournal(gpa, io, root, journal, request, active, matcher, &visitor);
+    try traverseGrepJournal(gpa, io, root, journal, entry_numbers, request, active, matcher, &visitor, stats);
 }
 
 test "grep arguments select resources and preserve literal syntax" {

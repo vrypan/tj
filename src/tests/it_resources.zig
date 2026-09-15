@@ -553,6 +553,45 @@ test "terminal native grep omits its results while redirected output stays plain
     try std.testing.expect(std.mem.indexOf(u8, self_out, "<tj:noout>") == null);
 }
 
+test "grep numbers preserves numeric order and match status" {
+    if (!support.haveZsh()) return error.SkipZigTest;
+    const gpa = std.testing.allocator;
+    var journal = try support.Journal.open(gpa);
+    defer journal.close();
+    try support.recordJournal(gpa, &journal, &.{
+        "echo ORDERED_GREP_MATCH",
+        "echo unrelated",
+        "printf ORDERED_GREP_MATCH",
+    });
+    try journal.enter(gpa);
+    defer support.leaveJournal();
+    const home = try journal.homeArg(gpa);
+    defer gpa.free(home);
+
+    var matched = try support.run(
+        gpa,
+        &.{ "--home", home, "grep", "--cmd", "--numbers", "ORDERED_GREP_MATCH" },
+        24,
+        80,
+    );
+    defer matched.out.deinit(gpa);
+    try std.testing.expectEqual(@as(u8, 0), matched.code);
+    try std.testing.expectEqualStrings(
+        "\x1b]3110;NOOUT\x1b\\1 3\r\n\x1b]3110;END\x1b\\",
+        matched.out.items,
+    );
+
+    var absent = try support.run(
+        gpa,
+        &.{ "--home", home, "grep", "--cmd", "--numbers", "NO_SUCH_GREP_MATCH" },
+        24,
+        80,
+    );
+    defer absent.out.deinit(gpa);
+    try std.testing.expectEqual(@as(u8, 1), absent.code);
+    try std.testing.expectEqualStrings("", absent.out.items);
+}
+
 test "a program can publish parts of its output as named resources" {
     if (!support.haveZsh()) return error.SkipZigTest;
     const gpa = std.testing.allocator;
