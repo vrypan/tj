@@ -126,6 +126,15 @@ pub fn selfPipe(io: std.Io) Error![2]Fd {
     return .{ fds[0], fds[1] };
 }
 
+/// Changes only the descriptor's nonblocking flag, preserving every other
+/// status flag inherited from the terminal or pty setup.
+pub fn setNonBlocking(fd: Fd, enabled: bool) Error!void {
+    const flags = c.fcntl(fd, posix.F.GETFL, @as(c_int, 0));
+    if (flags < 0) return error.Syscall;
+    const updated = if (enabled) flags | O_NONBLOCK else flags & ~O_NONBLOCK;
+    if (c.fcntl(fd, posix.F.SETFL, updated) < 0) return error.Syscall;
+}
+
 /// A bidirectional private control channel inherited by the shell. It is used
 /// only to acknowledge an OSC handoff after the proxy has switched stores.
 pub fn socketPair() Error![2]Fd {
@@ -156,6 +165,47 @@ pub fn read(fd: Fd, buf: []u8) Error!usize {
         error.InputOutput => 0,
         else => error.Syscall,
     };
+}
+
+pub const NonBlockingRead = union(enum) {
+    bytes: usize,
+    would_block,
+    eof,
+};
+
+/// Performs one nonblocking read, distinguishing backpressure from EOF.
+pub fn readNonBlocking(fd: Fd, buf: []u8) Error!NonBlockingRead {
+    while (true) {
+        const result = c.read(fd, buf.ptr, buf.len);
+        if (result > 0) return .{ .bytes = @intCast(result) };
+        if (result == 0) return .eof;
+        switch (posix.errno(result)) {
+            .INTR => continue,
+            .AGAIN => return .would_block,
+            // A pty master reports EIO once its slave has disappeared.
+            .IO => return .eof,
+            else => return error.Syscall,
+        }
+    }
+}
+
+pub const NonBlockingWrite = union(enum) {
+    bytes: usize,
+    would_block,
+};
+
+/// Performs one nonblocking write, preserving short-write information.
+pub fn writeNonBlocking(fd: Fd, buf: []const u8) Error!NonBlockingWrite {
+    while (true) {
+        const result = c.write(fd, buf.ptr, buf.len);
+        if (result > 0) return .{ .bytes = @intCast(result) };
+        if (result == 0) return .would_block;
+        switch (posix.errno(result)) {
+            .INTR => continue,
+            .AGAIN => return .would_block,
+            else => return error.Syscall,
+        }
+    }
 }
 
 /// Writes the whole slice, retrying on interruption and short writes.

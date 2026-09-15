@@ -358,6 +358,57 @@ pub fn finishKeepingTail(
     }
 }
 
+/// Feeds a child while draining its output through the same pty master. This
+/// models a terminal emulator without using a helper thread, and bounds both
+/// the operation and retained output.
+pub fn exchangeWhileDraining(
+    gpa: std.mem.Allocator,
+    child: harness.PtyChild,
+    input: []const u8,
+    marker: []const u8,
+    resize_after: ?usize,
+    timeout: i32,
+) !std.ArrayList(u8) {
+    var out: std.ArrayList(u8) = .empty;
+    errdefer out.deinit(gpa);
+    const deadline = try harness.Deadline.init(timeout);
+    var written: usize = 0;
+    var resized = false;
+    var buf: [64 * 1024]u8 = undefined;
+
+    try sys.setNonBlocking(child.master, true);
+    defer sys.setNonBlocking(child.master, false) catch {};
+
+    while (written < input.len or std.mem.indexOf(u8, out.items, marker) == null) {
+        const interval = try deadline.pollInterval(100) orelse return error.PtyTimeout;
+        var events: i16 = posix.POLL.IN;
+        if (written < input.len) events |= posix.POLL.OUT;
+        var fds = [_]posix.pollfd{.{ .fd = child.master, .events = events, .revents = 0 }};
+        const ready = try posix.poll(&fds, interval);
+        if (ready == 0) continue;
+
+        if (fds[0].revents & (posix.POLL.IN | posix.POLL.HUP) != 0) {
+            switch (try sys.readNonBlocking(child.master, &buf)) {
+                .bytes => |n| try out.appendSlice(gpa, buf[0..n]),
+                .would_block => {},
+                .eof => return error.UnexpectedEndOfFile,
+            }
+        }
+        if (written < input.len and fds[0].revents & posix.POLL.OUT != 0) {
+            switch (try sys.writeNonBlocking(child.master, input[written..])) {
+                .bytes => |n| written += n,
+                .would_block => {},
+            }
+        }
+        if (!resized and resize_after != null and written >= resize_after.?) {
+            try child.resize(37, 91);
+            resized = true;
+        }
+        if (fds[0].revents & (posix.POLL.ERR | posix.POLL.NVAL) != 0) return error.PtyFailure;
+    }
+    return out;
+}
+
 pub const Io = std.Io;
 
 pub const Dir = std.Io.Dir;

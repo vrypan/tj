@@ -25,6 +25,7 @@ const handoff = @import("../protocol/handoff.zig");
 const report = @import("../presentation/report.zig");
 
 const io_buf_size = 64 * 1024;
+const pending_input_capacity = 64 * 1024;
 const max_protocol_error_log_bytes = 384;
 
 /// How often a running command's buffered output reaches the disk.
@@ -60,6 +61,49 @@ const FlushSchedule = struct {
         if (now_ms < self.deadline_ms.?) return false;
         self.deadline_ms = now_ms + flush_interval_ms;
         return true;
+    }
+};
+
+/// A fixed-capacity queue between the outer terminal and the child pty. The
+/// pump stops polling stdin while this is full, applying backpressure without
+/// ever blocking the output and signal paths on a master write.
+const PendingInput = struct {
+    bytes: [pending_input_capacity]u8 = undefined,
+    start: usize = 0,
+    len: usize = 0,
+
+    fn isEmpty(self: *const PendingInput) bool {
+        return self.len == 0;
+    }
+
+    fn isFull(self: *const PendingInput) bool {
+        return self.len == self.bytes.len;
+    }
+
+    fn pending(self: *const PendingInput) []const u8 {
+        return self.bytes[self.start .. self.start + @min(self.len, self.bytes.len - self.start)];
+    }
+
+    fn writable(self: *PendingInput) []u8 {
+        if (self.isFull()) return self.bytes[0..0];
+        const end = (self.start + self.len) % self.bytes.len;
+        const available = if (end < self.start)
+            self.start - end
+        else
+            self.bytes.len - end;
+        return self.bytes[end .. end + available];
+    }
+
+    fn commit(self: *PendingInput, count: usize) void {
+        std.debug.assert(count <= self.bytes.len - self.len);
+        self.len += count;
+    }
+
+    fn consume(self: *PendingInput, count: usize) void {
+        std.debug.assert(count <= self.len);
+        self.start = (self.start + count) % self.bytes.len;
+        self.len -= count;
+        if (self.len == 0) self.start = 0;
     }
 };
 
@@ -182,6 +226,9 @@ pub fn run(gpa: std.mem.Allocator, io: std.Io, opts: Options) !Result {
         sys.close(io, pty.master);
         sys.close(io, pty.slave);
     }
+    // The slave retains ordinary blocking semantics. Only the proxy's master
+    // is nonblocking, so its single pump can keep servicing both directions.
+    try sys.setNonBlocking(pty.master, true);
 
     const sig_fds = try sys.selfPipe(io);
     errdefer {
@@ -532,8 +579,9 @@ const Recorder = struct {
 };
 
 fn pump(gpa: std.mem.Allocator, io: std.Io, home: ?[]const u8, master: sys.Fd, sig_r: sys.Fd, pid: c.pid_t, recorder: *Recorder, output: *scanner.Scanner) !void {
-    var in_buf: [io_buf_size]u8 = undefined;
     var out_buf: [io_buf_size]u8 = undefined;
+    var pending_input: PendingInput = .{};
+    var stdin_open = true;
 
     var fds = [_]posix.pollfd{
         .{ .fd = stdin_fd, .events = posix.POLL.IN, .revents = 0 },
@@ -546,6 +594,10 @@ fn pump(gpa: std.mem.Allocator, io: std.Io, home: ?[]const u8, master: sys.Fd, s
     var flush_schedule: FlushSchedule = .{};
 
     while (true) {
+        in.fd = if (stdin_open and !pending_input.isFull()) stdin_fd else -1;
+        out.events = posix.POLL.IN;
+        if (!pending_input.isEmpty()) out.events |= posix.POLL.OUT;
+
         // While a command is running, wake up regularly to flush its output to
         // disk, so `tail -f` on `@N/out` shows progress.
         const recording = recorder.store.isRecording();
@@ -562,11 +614,15 @@ fn pump(gpa: std.mem.Allocator, io: std.Io, home: ?[]const u8, master: sys.Fd, s
         }
 
         if (out.revents & (posix.POLL.IN | posix.POLL.HUP) != 0) {
-            const n = sys.read(master, &out_buf) catch return;
-            if (n == 0) return;
-            output.feed(out_buf[0..n], recorder);
-            if (recorder.broken) return;
-            applyHandoff(gpa, io, home, recorder);
+            switch (sys.readNonBlocking(master, &out_buf) catch return) {
+                .bytes => |n| {
+                    output.feed(out_buf[0..n], recorder);
+                    if (recorder.broken) return;
+                    applyHandoff(gpa, io, home, recorder);
+                },
+                .would_block => {},
+                .eof => return,
+            }
         }
 
         const after_output_ms = std.Io.Clock.now(.awake, io).toMilliseconds();
@@ -580,19 +636,56 @@ fn pump(gpa: std.mem.Allocator, io: std.Io, home: ?[]const u8, master: sys.Fd, s
             if (recorder.broken) return;
         }
 
-        if (in.fd >= 0 and in.revents & (posix.POLL.IN | posix.POLL.HUP) != 0) {
-            const n = sys.read(stdin_fd, &in_buf) catch 0;
-            if (n == 0) {
-                // The user's input ended, but the child may still be talking.
-                in.fd = -1;
-            } else {
-                sys.writeAll(io, master, in_buf[0..n]) catch return;
+        if (!pending_input.isEmpty() and out.revents & posix.POLL.OUT != 0) {
+            switch (sys.writeNonBlocking(master, pending_input.pending()) catch return) {
+                .bytes => |n| pending_input.consume(n),
+                .would_block => {},
             }
         }
 
-        if (in.fd >= 0 and in.revents & (posix.POLL.ERR | posix.POLL.NVAL) != 0) in.fd = -1;
+        if (in.fd >= 0 and in.revents & (posix.POLL.IN | posix.POLL.HUP) != 0) {
+            const writable = pending_input.writable();
+            const n = sys.read(stdin_fd, writable) catch 0;
+            if (n == 0) {
+                // The user's input ended, but the child may still be talking.
+                stdin_open = false;
+            } else {
+                pending_input.commit(n);
+            }
+        }
+
+        if (in.fd >= 0 and in.revents & (posix.POLL.ERR | posix.POLL.NVAL) != 0) stdin_open = false;
         if (out.revents & (posix.POLL.ERR | posix.POLL.NVAL) != 0) return;
     }
+}
+
+test "pending input is bounded and preserves partial writes" {
+    var queue: PendingInput = .{};
+    try std.testing.expect(queue.isEmpty());
+    try std.testing.expectEqual(@as(usize, pending_input_capacity), queue.writable().len);
+
+    const first = queue.writable();
+    for (first, 0..) |*byte, i| byte.* = @truncate(i);
+    queue.commit(first.len);
+    try std.testing.expect(queue.isFull());
+
+    queue.consume(17);
+    try std.testing.expect(!queue.isFull());
+    try std.testing.expectEqual(@as(usize, pending_input_capacity - 17), queue.pending().len);
+    const tail = queue.writable();
+    try std.testing.expectEqual(@as(usize, 17), tail.len);
+    @memset(tail, 0xa5);
+    queue.commit(tail.len);
+    try std.testing.expect(queue.isFull());
+    for (queue.pending(), 0..) |byte, i| {
+        try std.testing.expectEqual(@as(u8, @truncate(i + 17)), byte);
+    }
+    queue.consume(pending_input_capacity - 17);
+    try std.testing.expectEqualSlices(u8, &.{0xa5} ** 17, queue.pending());
+
+    queue.consume(17);
+    try std.testing.expect(queue.isEmpty());
+    try std.testing.expectEqual(@as(usize, pending_input_capacity), queue.writable().len);
 }
 
 test "output flush scheduling uses an elapsed deadline" {

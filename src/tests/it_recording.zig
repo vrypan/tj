@@ -8,6 +8,41 @@ const options = @import("build_options");
 const tj = options.tj_exe;
 const support = @import("it_support.zig");
 
+test "proxy drains child output while forwarding large input" {
+    const gpa = std.testing.allocator;
+    var journal = try support.Journal.open(gpa);
+    defer journal.close();
+    const home = try journal.homeArg(gpa);
+    defer gpa.free(home);
+    const child = try support.spawnTjctl(gpa, &.{
+        support.tjctl, "--home", home, "new", "--", options.selftest_exe, "pressure",
+    }, 24, 80);
+    var terminal = support.TerminalSession.init(gpa, child);
+    defer terminal.deinit();
+
+    try terminal.expectFrom(0, "PRESSURE-READY\n");
+    const input = try gpa.alloc(u8, 256 * 1024);
+    defer gpa.free(input);
+    @memset(input, 'I');
+    const marker = "PRESSURE-DONE 262144 37 91\n";
+    var exchanged = try support.exchangeWhileDraining(gpa, child, input, marker, 32 * 1024, support.timeout_ms);
+    defer exchanged.deinit(gpa);
+    var transcript: std.ArrayList(u8) = .empty;
+    defer transcript.deinit(gpa);
+    try transcript.appendSlice(gpa, terminal.transcript.items);
+    try transcript.appendSlice(gpa, exchanged.items);
+    const ready = "PRESSURE-READY\n";
+    const body_start = (std.mem.indexOf(u8, transcript.items, ready) orelse return error.TestUnexpectedResult) + ready.len;
+    const body_end = std.mem.indexOfPos(u8, transcript.items, body_start, "\nPRESSURE-DONE") orelse return error.TestUnexpectedResult;
+    const body = transcript.items[body_start..body_end];
+    try std.testing.expectEqual(@as(usize, 1024 * 1024), body.len);
+    for (body) |byte| try std.testing.expectEqual(@as(u8, 'O'), byte);
+    try std.testing.expect(std.mem.indexOf(u8, exchanged.items, marker) != null);
+
+    const code = try terminal.finish();
+    try std.testing.expectEqual(@as(u8, 0), code);
+}
+
 test "commands are recorded as cmd, out and rc" {
     if (!support.haveZsh()) return error.SkipZigTest;
     const gpa = std.testing.allocator;
