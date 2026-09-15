@@ -25,7 +25,7 @@ pub fn run(
     out: *Io.Writer,
 ) !u8 {
     const home = if (parsed.present("home")) parsed.last("home") else root_home orelse parsed.last("home");
-    const title = parsed.last("title") orelse "TJ | %3~";
+    const title = parsed.last("title") orelse "⡏⣸ %3~";
     const splash_enabled = !parsed.enabled("no-splash");
     const out_limit_bytes = if (which == .new or which == .use)
         try parseOutLimit(parsed.last("out-limit").?)

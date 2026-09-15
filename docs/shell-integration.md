@@ -241,10 +241,10 @@ PROMPT='${TJ_NEXT:+[$TJ_NEXT] }%~ %# '
 Starship example:
 
 ```toml
-format = '$all${env_var.TJ_REF}$character'
+format = '$all${env_var.TJ_NEXT}$character'
 
-[env_var.TJ_REF]
-format = '[$env_value]($style) '
+[env_var.TJ_NEXT]
+format = '[TJ $env_value]($style) '
 style = 'dimmed white'
 ```
 

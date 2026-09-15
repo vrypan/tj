@@ -78,7 +78,7 @@ tjctl use project-work --no-splash
 precedence over environment values.
 
 The zsh plugin evaluates a terminal-title format at each prompt. The default is
-`TJ | %3~`. Override it with either form:
+`⡏⣸ %3~`. Override it with either form:
 
 ```sh
 tjctl use project-work --title 'recording | $TJ_REF | ${PWD:t}'

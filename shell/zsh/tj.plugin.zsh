@@ -171,7 +171,7 @@ _tj_publish
 
 _tj_update_running_title() {
   emulate -L zsh
-  local format=${TJ_TITLE:-'TJ | %3~'}
+  local format=${TJ_TITLE:-'⡏⣸ %3~'}
   [[ $format == none ]] && return 0
 
   # The command is terminal data, not a format: remove control bytes rather
@@ -182,7 +182,7 @@ _tj_update_running_title() {
 
 _tj_update_title() {
   emulate -L zsh
-  local format=${TJ_TITLE:-'TJ | %3~'}
+  local format=${TJ_TITLE:-'⡏⣸ %3~'}
   [[ $format == none ]] && return 0
 
   # The format is deliberately shell-evaluated: users may use parameters,

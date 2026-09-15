@@ -20,7 +20,7 @@ const title = zecli.FlagSpec{
     .value = .string,
     .value_name = "FORMAT",
     .description = "Override the shell-evaluated terminal-title format, or use none",
-    .default_value = "TJ | %3~",
+    .default_value = "⡏⣸ %3~",
 };
 const out_limit = zecli.FlagSpec{
     .name = "out-limit",
