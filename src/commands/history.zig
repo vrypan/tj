@@ -150,10 +150,6 @@ pub fn appendWholeHistoryJournal(
     });
 }
 
-pub fn historyReferenceWidth(journal: *const HistoryJournal, item: HistoryCursor.Item) usize {
-    return presentation.EntryPresentation.init(journal.name, item.number, item.qualified, false, null).referenceWidth();
-}
-
 pub fn writeHistoryReference(
     out: *Io.Writer,
     journal: *const HistoryJournal,

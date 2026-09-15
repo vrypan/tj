@@ -429,8 +429,8 @@ const Recorder = struct {
     command_len: usize = 0,
     has_command: bool = false,
     warned_missing_command: bool = false,
-    /// Executable shell text after canonical TJ named-directory tokens were
-    /// resolved to paths for metadata, when the integration reports any.
+    /// Executable shell text after zsh has expanded aliases, when the
+    /// integration reports a form that differs from what the user typed.
     expanded: [scanner.max_osc]u8 = undefined,
     expanded_len: usize = 0,
     has_expanded: bool = false,

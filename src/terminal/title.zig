@@ -36,22 +36,15 @@ pub fn restoreFromSignal(fd: sys.Fd) void {
 }
 
 const State = enum { ground, escape, probe, title, pass };
-pub const Mode = enum { pass, omit, capture };
 
-pub const Decorator = struct {
-    mode: Mode = .pass,
+pub const Filter = struct {
     state: State = .ground,
     buf: [max_title]u8 = undefined,
     len: usize = 0,
     esc_pending: bool = false,
 
     /// `sink` provides `emit(bytes)`, which writes bytes to the outer terminal.
-    pub fn feed(self: *Decorator, bytes: []const u8, sink: anytype) !void {
-        if (self.mode == .pass) {
-            try sink.emit(bytes);
-            return;
-        }
-
+    pub fn feed(self: *Filter, bytes: []const u8, sink: anytype) !void {
         var i: usize = 0;
         while (i < bytes.len) switch (self.state) {
             .ground => {
@@ -81,16 +74,15 @@ pub const Decorator = struct {
     }
 
     /// Releases a partial sequence exactly as received at end of stream.
-    pub fn flush(self: *Decorator, sink: anytype) !void {
+    pub fn flush(self: *Filter, sink: anytype) !void {
         switch (self.state) {
             .ground => {},
             .escape => try sink.emit(&[_]u8{esc}),
             .probe, .title => {
-                // In omit mode, a recognized title prefix is unsafe to replay
+                // A recognized title prefix is unsafe to replay
                 // even without its terminator: it would leave the terminal
                 // consuming subsequent screen output as title text.
-                const recognized = self.state == .title;
-                if (!recognized or (self.mode != .omit and self.mode != .capture)) {
+                if (self.state != .title) {
                     try sink.emit(&[_]u8{ esc, ']' });
                     try sink.emit(self.buf[0..self.len]);
                     if (self.esc_pending) try sink.emit(&[_]u8{esc});
@@ -105,7 +97,7 @@ pub const Decorator = struct {
         self.esc_pending = false;
     }
 
-    fn scanCandidate(self: *Decorator, bytes: []const u8, from: usize, sink: anytype) !usize {
+    fn scanCandidate(self: *Filter, bytes: []const u8, from: usize, sink: anytype) !usize {
         var i = from;
         while (i < bytes.len) {
             const byte = bytes[i];
@@ -117,7 +109,7 @@ pub const Decorator = struct {
                     try self.finishTitle(sink, false);
                     return i;
                 }
-                if (self.state == .title and self.mode == .omit) {
+                if (self.state == .title) {
                     // The body is deliberately discarded, so an omitted title
                     // has no length-dependent memory or transparency limit.
                 } else if (self.len > self.buf.len - 2) {
@@ -134,7 +126,7 @@ pub const Decorator = struct {
             } else if (byte == bel) {
                 try self.finishTitle(sink, true);
                 return i;
-            } else if (self.state == .title and self.mode == .omit) {
+            } else if (self.state == .title) {
                 // Keep scanning only for BEL or ST.
             } else if (!self.pushByte(byte)) {
                 try self.releaseCandidate(sink);
@@ -148,7 +140,7 @@ pub const Decorator = struct {
         return i;
     }
 
-    fn classify(self: *Decorator, sink: anytype) !void {
+    fn classify(self: *Filter, sink: anytype) !void {
         if (self.len == 1) {
             if (isTitleSelector(self.buf[0])) return;
             try self.releaseCandidate(sink);
@@ -163,7 +155,7 @@ pub const Decorator = struct {
         }
     }
 
-    fn scanPass(self: *Decorator, bytes: []const u8, from: usize, sink: anytype) !usize {
+    fn scanPass(self: *Filter, bytes: []const u8, from: usize, sink: anytype) !usize {
         var i = from;
         const start = from;
         while (i < bytes.len) {
@@ -188,14 +180,14 @@ pub const Decorator = struct {
         return i;
     }
 
-    fn pushByte(self: *Decorator, byte: u8) bool {
+    fn pushByte(self: *Filter, byte: u8) bool {
         if (self.len == self.buf.len) return false;
         self.buf[self.len] = byte;
         self.len += 1;
         return true;
     }
 
-    fn releaseCandidate(self: *Decorator, sink: anytype) !void {
+    fn releaseCandidate(self: *Filter, sink: anytype) !void {
         try sink.emit(&[_]u8{ esc, ']' });
         try sink.emit(self.buf[0..self.len]);
         self.state = .pass;
@@ -203,20 +195,13 @@ pub const Decorator = struct {
         self.esc_pending = false;
     }
 
-    fn finishTitle(self: *Decorator, sink: anytype, terminated_by_bel: bool) !void {
-        const omit = self.state == .title and self.mode == .omit;
-        const capture = self.state == .title and self.mode == .capture;
+    fn finishTitle(self: *Filter, sink: anytype, terminated_by_bel: bool) !void {
         // A still-probing one-byte OSC is not a title after all.
         if (self.state != .title) {
             try sink.emit(&[_]u8{ esc, ']' });
             try sink.emit(self.buf[0..self.len]);
-        } else if (capture) {
-            try sink.title(self.buf[0], self.buf[2..self.len]);
-        } else if (!omit) {
-            try sink.emit(&[_]u8{ esc, ']' });
-            try sink.emit(self.buf[0..self.len]);
+            try sink.emit(if (terminated_by_bel) &[_]u8{bel} else &[_]u8{ esc, '\\' });
         }
-        if (!omit and !capture) try sink.emit(if (terminated_by_bel) &[_]u8{bel} else &[_]u8{ esc, '\\' });
         self.state = .ground;
         self.len = 0;
         self.esc_pending = false;
@@ -247,25 +232,19 @@ const TestSink = struct {
         self.emit_calls += 1;
         try self.bytes.appendSlice(self.gpa, bytes);
     }
-
-    pub fn title(self: *TestSink, selector: u8, value: []const u8) !void {
-        try self.bytes.append(self.gpa, selector);
-        try self.bytes.appendSlice(self.gpa, ":");
-        try self.bytes.appendSlice(self.gpa, value);
-    }
 };
 
-fn transform(gpa: std.mem.Allocator, input: []const u8, chunk: usize, mode: Mode) ![]u8 {
+fn transform(gpa: std.mem.Allocator, input: []const u8, chunk: usize) ![]u8 {
     var sink: TestSink = .{ .gpa = gpa };
     defer sink.bytes.deinit(gpa);
-    var decorator: Decorator = .{ .mode = mode };
+    var filter: Filter = .{};
     var at: usize = 0;
     while (at < input.len) {
         const end = @min(input.len, at + chunk);
-        try decorator.feed(input[at..end], &sink);
+        try filter.feed(input[at..end], &sink);
         at = end;
     }
-    try decorator.flush(&sink);
+    try filter.flush(&sink);
     return gpa.dupe(u8, sink.bytes.items);
 }
 
@@ -275,19 +254,7 @@ test "window and tab titles can be omitted across every read split" {
     const expected = "abcd\x1b]7;file:///tmp\x07";
     var chunk: usize = 1;
     while (chunk <= input.len) : (chunk += 1) {
-        const actual = try transform(gpa, input, chunk, .omit);
-        defer gpa.free(actual);
-        try std.testing.expectEqualStrings(expected, actual);
-    }
-}
-
-test "title capture reports complete titles and forwards everything else" {
-    const gpa = std.testing.allocator;
-    const input = "a\x1b]0;both\x07b\x1b]1;tab\x1b\\c\x1b]2;window\x1b\\d";
-    const expected = "a0:bothb1:tabc2:windowd";
-    var chunk: usize = 1;
-    while (chunk <= input.len) : (chunk += 1) {
-        const actual = try transform(gpa, input, chunk, .capture);
+        const actual = try transform(gpa, input, chunk);
         defer gpa.free(actual);
         try std.testing.expectEqualStrings(expected, actual);
     }
@@ -305,14 +272,14 @@ test "large foreign OSC is forwarded byte-identically in bounded writes" {
     for ([_]usize{ input.items.len, 4093 }) |chunk_size| {
         var sink: TestSink = .{ .gpa = gpa };
         defer sink.bytes.deinit(gpa);
-        var decorator: Decorator = .{ .mode = .capture };
+        var filter: Filter = .{};
         var at: usize = 0;
         while (at < input.items.len) {
             const end = @min(input.items.len, at + chunk_size);
-            try decorator.feed(input.items[at..end], &sink);
+            try filter.feed(input.items[at..end], &sink);
             at = end;
         }
-        try decorator.flush(&sink);
+        try filter.flush(&sink);
 
         try std.testing.expectEqualSlices(u8, input.items, sink.bytes.items);
         const chunks = (input.items.len + chunk_size - 1) / chunk_size;
@@ -350,19 +317,19 @@ test "foreign OSC batching preserves split terminators and flushes" {
     for (cases) |case| {
         var sink: TestSink = .{ .gpa = gpa };
         defer sink.bytes.deinit(gpa);
-        var decorator: Decorator = .{ .mode = .capture };
-        for (case.parts) |part| try decorator.feed(part, &sink);
-        try decorator.flush(&sink);
+        var filter: Filter = .{};
+        for (case.parts) |part| try filter.feed(part, &sink);
+        try filter.flush(&sink);
         try std.testing.expectEqualSlices(u8, case.expected, sink.bytes.items);
     }
 }
 
-test "title capture resumes around a foreign OSC" {
+test "title omission resumes around a foreign OSC" {
     const gpa = std.testing.allocator;
     const input = "\x1b]0;before\x1b\\\x1b]777;foreign\x07\x1b]2;after\x07";
-    const expected = "0:before\x1b]777;foreign\x072:after";
+    const expected = "\x1b]777;foreign\x07";
     for ([_]usize{ 1, 7, input.len }) |chunk_size| {
-        const actual = try transform(gpa, input, chunk_size, .capture);
+        const actual = try transform(gpa, input, chunk_size);
         defer gpa.free(actual);
         try std.testing.expectEqualSlices(u8, expected, actual);
     }
@@ -376,15 +343,7 @@ test "omitting titles is bounded and drops an unfinished title" {
     try input.appendNTimes(gpa, 'x', max_title + 100);
     try input.appendSlice(gpa, "\x1b\\after\x1b]0;unfinished");
 
-    const actual = try transform(gpa, input.items, 17, .omit);
+    const actual = try transform(gpa, input.items, 17);
     defer gpa.free(actual);
     try std.testing.expectEqualStrings("beforeafter", actual);
-}
-
-test "disabled title handling is byte transparent" {
-    const gpa = std.testing.allocator;
-    const input = "before\x1b]2;unfinished\x1b";
-    const disabled = try transform(gpa, input, 1, .pass);
-    defer gpa.free(disabled);
-    try std.testing.expectEqualStrings(input, disabled);
 }

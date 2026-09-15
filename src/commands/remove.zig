@@ -95,18 +95,6 @@ pub fn removeJournal(
     };
 }
 
-pub fn removeInteraction(
-    gpa: std.mem.Allocator,
-    io: Io,
-    home: ?[]const u8,
-    interaction: []const u8,
-    force: bool,
-) !void {
-    var mutation = try context.openCurrentMutation(gpa, io, home, .exclusive);
-    defer mutation.deinit(io);
-    return removeTarget(gpa, io, &mutation, interaction, force);
-}
-
 fn removeTarget(
     gpa: std.mem.Allocator,
     io: Io,
@@ -147,21 +135,6 @@ fn removeTarget(
     const staged = try store.stageInteractionRemoval(gpa, io, mutation.root, mutation.journal, target.number);
     defer gpa.free(staged);
     try store.finishStagedRemoval(io, mutation.root, staged);
-}
-
-pub fn removeInteractionRange(
-    gpa: std.mem.Allocator,
-    io: Io,
-    home: ?[]const u8,
-    range: context.InteractionRange,
-    force: bool,
-) !void {
-    var mutation = try context.openCurrentMutation(gpa, io, home, .exclusive);
-    defer mutation.deinit(io);
-    const selected = try context.selectedNumbers(gpa, io, mutation.root, mutation.journal, range);
-    defer gpa.free(selected);
-    const result = try removeNumbers(gpa, io, &mutation, selected, force);
-    noteSkippedPins(io, result.skipped_pinned);
 }
 
 pub const RemovalResult = struct {

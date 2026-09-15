@@ -54,5 +54,3 @@ pub fn enterRaw(fd: sys.Fd) !Saved {
 pub fn restore(saved: Saved) void {
     posix.tcsetattr(saved.fd, .DRAIN, saved.term) catch {};
 }
-
-pub const isTty = sys.isTty;

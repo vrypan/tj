@@ -3,15 +3,8 @@
 const std = @import("std");
 const builtin = @import("builtin");
 const build_options = @import("build_options");
-const proxy = @import("terminal/proxy.zig");
 
 pub const version = build_options.version;
-pub const panic = std.debug.FullPanic(onPanic);
-
-fn onPanic(msg: []const u8, first_trace_addr: ?usize) noreturn {
-    proxy.restoreOnPanic();
-    std.debug.defaultPanic(msg, first_trace_addr);
-}
 
 var debug_allocator: std.heap.DebugAllocator(.{}) = .init;
 const leak_checked = builtin.mode == .Debug;

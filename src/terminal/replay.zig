@@ -29,7 +29,7 @@ const max_replay_query_len = blk: {
 
 const ReplayOutput = struct {
     out: *Io.Writer,
-    titles: terminal_title.Decorator = .{ .mode = .omit },
+    titles: terminal_title.Filter = .{},
     bell_state: BellState = .ground,
     pending: [max_replay_query_len]u8 = undefined,
     pending_len: usize = 0,

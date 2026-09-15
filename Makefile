@@ -37,9 +37,6 @@ uninstall:
 	rm -f \
 		"$(PREFIX)/bin/tj" \
 		"$(PREFIX)/bin/tjctl" \
-		"$(PREFIX)/bin/tj-fence" \
-		"$(PREFIX)/bin/tj-grep" \
-		"$(PREFIX)/bin/tj-tape" \
 		"$(PREFIX)/share/tj/tj.plugin.zsh" \
 		"$(PREFIX)/share/tj/tj.plugin.fish" \
 		"$(PREFIX)/share/bash-completion/completions/tj" \

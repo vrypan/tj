@@ -18,8 +18,6 @@ const cmd_remove = @import("remove.zig");
 const cmd_cat = @import("cat.zig");
 const cmd_tui = @import("tui.zig");
 
-pub const Error = context.Error;
-
 pub fn run(
     gpa: std.mem.Allocator,
     io: Io,

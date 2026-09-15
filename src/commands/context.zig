@@ -152,13 +152,6 @@ pub fn requireInteraction(target: CommandTarget) !void {
     if (target.subpath.len != 0) return error.BadReference;
 }
 
-pub fn printCanonical(out: *Io.Writer, current: ?[]const u8, journal: []const u8, number: u32) !void {
-    if (current) |id| {
-        if (std.mem.eql(u8, id, journal)) return out.print("@{d}", .{number});
-    }
-    try out.print("@{s}.{d}", .{ journal, number });
-}
-
 /// The current journal held open for mutation: its root, its name, and the
 /// lock that serializes writers against it.
 pub const Mutation = struct {
@@ -258,51 +251,6 @@ pub fn selectedNumbers(
         if (range.contains(number)) try selected.append(gpa, number);
     }
     return selected.toOwnedSlice(gpa);
-}
-
-/// The read-only counterpart. Queries may name another journal, which
-/// mutations may not, so this resolves a journal alongside its entries.
-pub const QueryTargets = struct {
-    root: store.Dir,
-    journal: []u8,
-    numbers: []u32,
-
-    pub fn deinit(self: *QueryTargets, gpa: std.mem.Allocator, io: Io) void {
-        gpa.free(self.numbers);
-        gpa.free(self.journal);
-        self.root.close(io);
-        self.* = undefined;
-    }
-};
-
-pub fn openQueryTargets(
-    gpa: std.mem.Allocator,
-    io: Io,
-    home: ?[]const u8,
-    ref: []const u8,
-) !QueryTargets {
-    var root = try store.openRoot(io, home);
-    errdefer root.close(io);
-
-    if (try parseInteractionRange(ref)) |range| {
-        const current = try currentJournal();
-        const journal = try gpa.dupe(u8, current);
-        errdefer gpa.free(journal);
-        return .{
-            .root = root,
-            .journal = journal,
-            .numbers = try selectedNumbers(gpa, io, root, current, range),
-        };
-    }
-
-    const target = try locateCommandTarget(gpa, io, root, ref);
-    defer target.deinit(gpa);
-    try requireInteraction(target);
-    const journal = try gpa.dupe(u8, target.journal);
-    errdefer gpa.free(journal);
-    const numbers = try gpa.alloc(u32, 1);
-    numbers[0] = target.number;
-    return .{ .root = root, .journal = journal, .numbers = numbers };
 }
 
 pub const InteractionRange = struct {

@@ -4,7 +4,6 @@ const zecli = @import("zecli");
 
 const cli = @import("cli/tj.zig");
 const cli_spec = @import("cli/tj_spec.zig");
-const proxy = @import("terminal/proxy.zig");
 const commands = @import("commands/tj.zig");
 const frontend = @import("frontend.zig");
 const zooi = @import("zooi");
@@ -13,7 +12,6 @@ pub const version = frontend.version;
 pub const panic = std.debug.FullPanic(struct {
     fn restoreThenPanic(msg: []const u8, first_trace_addr: ?usize) noreturn {
         zooi.restore();
-        proxy.restoreOnPanic();
         std.debug.defaultPanic(msg, first_trace_addr);
     }
 }.restoreThenPanic);

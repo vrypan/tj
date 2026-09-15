@@ -1115,64 +1115,6 @@ pub const full_command_limit = 64 * 1024;
 /// A longer first line is truncated in listings only.
 pub const listing_command_limit = 4 * 1024;
 
-/// For callers that need an entry's numbers and status but never its command.
-pub const no_command = 0;
-
-/// Yields one interaction at a time in numeric order. Only the entry numbers
-/// stay resident, so peak memory does not grow with a journal's recorded
-/// command sizes. The caller owns each yielded value.
-pub const InteractionIterator = struct {
-    gpa: std.mem.Allocator,
-    io: Io,
-    root: Dir,
-    journal: []const u8,
-    numbers: []u32,
-    index: usize = 0,
-    command_limit: usize,
-
-    pub fn deinit(self: *InteractionIterator) void {
-        self.gpa.free(self.numbers);
-        self.* = undefined;
-    }
-
-    pub fn count(self: *const InteractionIterator) usize {
-        return self.numbers.len;
-    }
-
-    pub fn next(self: *InteractionIterator) !?InteractionInfo {
-        while (self.index < self.numbers.len) {
-            const number = self.numbers[self.index];
-            self.index += 1;
-            if (try readInteraction(
-                self.gpa,
-                self.io,
-                self.root,
-                self.journal,
-                number,
-                self.command_limit,
-            )) |info| return info;
-        }
-        return null;
-    }
-};
-
-pub fn iterateInteractions(
-    gpa: std.mem.Allocator,
-    io: Io,
-    root: Dir,
-    journal: []const u8,
-    command_limit: usize,
-) !InteractionIterator {
-    return .{
-        .gpa = gpa,
-        .io = io,
-        .root = root,
-        .journal = journal,
-        .numbers = try listNumbers(gpa, io, root, journal),
-        .command_limit = command_limit,
-    };
-}
-
 /// How many entries a journal still holds, without reading any of them.
 pub fn countInteractions(gpa: std.mem.Allocator, io: Io, root: Dir, journal: []const u8) !usize {
     const numbers = try listNumbers(gpa, io, root, journal);
@@ -1209,40 +1151,6 @@ pub fn journalEntrySpan(gpa: std.mem.Allocator, io: Io, root: Dir, journal: []co
         }
     }
     return span;
-}
-
-/// Interactions of one journal, in numeric order. Prefer `iterateInteractions`
-/// unless the whole set genuinely has to be resident at once.
-pub fn listInteractions(gpa: std.mem.Allocator, io: Io, root: Dir, journal: []const u8) ![]InteractionInfo {
-    var it = try iterateInteractions(gpa, io, root, journal, full_command_limit);
-    defer it.deinit();
-
-    var found: std.ArrayList(InteractionInfo) = .empty;
-    errdefer {
-        for (found.items) |info| info.deinit(gpa);
-        found.deinit(gpa);
-    }
-    while (try it.next()) |info| {
-        errdefer info.deinit(gpa);
-        try found.append(gpa, info);
-    }
-    return found.toOwnedSlice(gpa);
-}
-
-/// Reads only numeric directory names, for callers that need to align entry
-/// references without loading every command and output size first.
-pub fn highestEntryNumber(io: Io, root: Dir, journal: []const u8) !?u32 {
-    var dir = try root.openDir(io, journal, .{ .iterate = true });
-    defer dir.close(io);
-
-    var highest: ?u32 = null;
-    var it = dir.iterate();
-    while (try it.next(io)) |entry| {
-        if (entry.kind != .directory) continue;
-        const number = parseInteractionDirName(entry.name) orelse continue;
-        if (highest == null or number > highest.?) highest = number;
-    }
-    return highest;
 }
 
 /// The highest interaction that actually completed. `@-` resolves to this, so
@@ -1322,15 +1230,6 @@ test "timestamps format as UTC ISO 8601" {
 // --- resolving references --------------------------------------------------
 
 const reference = @import("reference.zig");
-
-pub const ResolveError = error{
-    /// `@42` and `@-` are relative to the journal you are in.
-    NotInJournal,
-    /// No journal directory ends with the given suffix.
-    NoSuchJournal,
-    /// `@-` used before anything has completed.
-    NothingCompleted,
-};
 
 pub const Resolved = struct {
     /// Always absolute, so the path keeps working wherever it is pasted.

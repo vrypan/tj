@@ -313,7 +313,7 @@ test "tj's own control sequences never reach the terminal" {
     try std.testing.expect(std.mem.indexOf(u8, out.items, "133;") != null);
 }
 
-test "title capture forwards a large foreign OSC byte for byte" {
+test "the proxy forwards a large foreign OSC byte for byte" {
     const gpa = std.testing.allocator;
     const io = std.testing.io;
     var scratch = try support.Scratch.open();

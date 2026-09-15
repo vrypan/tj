@@ -132,9 +132,8 @@ test "journal writers manage terminal titles without changing recorded bytes" {
     try std.testing.expectEqual(@as(u8, 0), try continued.finish(gpa, &continued_out, support.timeout_ms));
     try std.testing.expect(std.mem.indexOf(u8, continued_out.items, "TITLE_OPTIONS=INHERITED:$TJ_REF:%1~") != null);
 
-    // A fragmented foreign OSC must still pass through byte-identically: the
-    // marker no longer redraws asynchronously, but the decorator's own
-    // chunked forwarding still runs regardless of timing.
+    // A fragmented foreign OSC must still pass through byte-identically after
+    // the title-interception path was removed.
     const fragmented = try support.spawnTjctlWithSplash(gpa, &.{
         support.tjctl,                                                            "--home", scratch.path(), "new", "fragmented-title", "--no-splash", "--", "/bin/sh", "-c",
         "printf '\\033]777;PART'; sleep 0.08; printf 'IAL\\033\\\\'; sleep 0.03",
