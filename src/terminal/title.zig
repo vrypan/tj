@@ -1,7 +1,8 @@
 //! Terminal-title lifecycle and streaming OSC filtering.
 //!
-//! Writers use the title stack and fallback helpers. Replay uses the streaming
-//! scanner to omit recorded title changes without altering journal bytes.
+//! Writers use the title stack and an initial-title write; titles are
+//! otherwise left untouched. Replay uses the streaming scanner to omit
+//! recorded title changes without altering journal bytes.
 
 const std = @import("std");
 const c = std.c;
@@ -34,79 +35,8 @@ pub fn restoreFromSignal(fd: sys.Fd) void {
     _ = c.write(fd, pop_sequence.ptr, pop_sequence.len);
 }
 
-pub fn writeFallback(io: std.Io, fd: sys.Fd, journal: []const u8) void {
-    var buf: [128]u8 = undefined;
-    const sequence = std.fmt.bufPrint(&buf, "\x1b]0;{s}\x1b\\", .{journal}) catch return;
-    sys.writeAll(io, fd, sequence) catch {};
-}
-
 const State = enum { ground, escape, probe, title, pass };
 pub const Mode = enum { pass, omit, capture };
-
-const BoundaryState = enum {
-    ground,
-    escape,
-    csi,
-    osc,
-    osc_escape,
-    control_string,
-    control_string_escape,
-};
-
-/// Tracks whether a complete title sequence can be inserted without splitting
-/// a control sequence emitted by the child across PTY reads.
-const ControlBoundary = struct {
-    state: BoundaryState = .ground,
-
-    fn safe(self: *const ControlBoundary) bool {
-        return self.state == .ground;
-    }
-
-    fn feed(self: *ControlBoundary, bytes: []const u8) void {
-        for (bytes) |byte| self.feedByte(byte);
-    }
-
-    fn feedByte(self: *ControlBoundary, byte: u8) void {
-        if (self.state != .ground and (byte == 0x18 or byte == 0x1a)) {
-            self.state = .ground;
-            return;
-        }
-        if (byte == 0x9c) {
-            self.state = .ground;
-            return;
-        }
-
-        self.state = switch (self.state) {
-            .ground => switch (byte) {
-                esc => .escape,
-                0x9b => .csi,
-                0x9d => .osc,
-                0x90, 0x98, 0x9e, 0x9f => .control_string,
-                else => .ground,
-            },
-            .escape => switch (byte) {
-                '[' => .csi,
-                ']' => .osc,
-                'P', 'X', '^', '_' => .control_string,
-                0x20...0x2f => .escape,
-                else => .ground,
-            },
-            .csi => switch (byte) {
-                esc => .escape,
-                0x40...0x7e => .ground,
-                else => .csi,
-            },
-            .osc => switch (byte) {
-                esc => .osc_escape,
-                bel => .ground,
-                else => .osc,
-            },
-            .osc_escape => if (byte == '\\') .ground else if (byte == esc) .osc_escape else .osc,
-            .control_string => if (byte == esc) .control_string_escape else .control_string,
-            .control_string_escape => if (byte == '\\') .ground else if (byte == esc) .control_string_escape else .control_string,
-        };
-    }
-};
 
 pub const Decorator = struct {
     mode: Mode = .pass,
@@ -293,136 +223,19 @@ pub const Decorator = struct {
     }
 };
 
-/// Captures application titles and periodically redraws them with a fixed-width
-/// recording marker. The proxy owns all calls, so writes cannot interleave
-/// with bytes being forwarded from the child PTY.
-pub const Blinker = struct {
-    io: std.Io,
-    fd: sys.Fd,
-    interval_ms: u32,
-    next_tick_ms: i64,
-    filled: bool = true,
-    parser: Decorator = .{ .mode = .capture },
-    boundary: ControlBoundary = .{},
-    window: [max_title]u8 = undefined,
-    window_len: usize = 0,
-    icon: [max_title]u8 = undefined,
-    icon_len: usize = 0,
-    has_window: bool = false,
-    has_icon: bool = false,
-
-    pub fn init(io: std.Io, fd: sys.Fd, interval_ms: u32, now_ms: i64) Blinker {
-        std.debug.assert(interval_ms != 0);
-        return .{
-            .io = io,
-            .fd = fd,
-            .interval_ms = interval_ms,
-            .next_tick_ms = now_ms + @as(i64, interval_ms),
-        };
-    }
-
-    pub fn startJournal(self: *Blinker, journal: []const u8) !void {
-        const initial = std.fmt.bufPrint(&self.window, "{s}", .{journal}) catch return error.TitleTooLong;
-        self.window_len = initial.len;
-        @memcpy(self.icon[0..initial.len], initial);
-        self.icon_len = initial.len;
-        self.has_window = true;
-        self.has_icon = true;
-        try self.writeTitle('0', initial);
-    }
-
-    pub fn feed(self: *Blinker, bytes: []const u8) !void {
-        try self.parser.feed(bytes, self);
-    }
-
-    pub fn flush(self: *Blinker) !void {
-        try self.parser.flush(self);
-    }
-
-    /// Called by the capture parser for bytes that are not title sequences.
-    pub fn emit(self: *Blinker, bytes: []const u8) !void {
-        self.boundary.feed(bytes);
-        try sys.writeAll(self.io, self.fd, bytes);
-    }
-
-    /// Called only for a complete, bounded OSC 0, 1, or 2 title.
-    pub fn title(self: *Blinker, selector: u8, value: []const u8) !void {
-        switch (selector) {
-            '0' => {
-                self.storeTitle(&self.window, &self.window_len, &self.has_window, value);
-                self.storeTitle(&self.icon, &self.icon_len, &self.has_icon, value);
-            },
-            '1' => self.storeTitle(&self.icon, &self.icon_len, &self.has_icon, value),
-            '2' => self.storeTitle(&self.window, &self.window_len, &self.has_window, value),
-            else => unreachable,
-        }
-        try self.writeTitle(selector, value);
-    }
-
-    pub fn timeout(self: *const Blinker, now_ms: i64) c_int {
-        if (now_ms >= self.next_tick_ms) {
-            if (!self.boundary.safe()) return @intCast(self.interval_ms);
-            return 0;
-        }
-        return @intCast(self.next_tick_ms - now_ms);
-    }
-
-    pub fn tick(self: *Blinker, now_ms: i64) !void {
-        if (now_ms < self.next_tick_ms) return;
-        if (!self.boundary.safe()) return;
-        self.filled = !self.filled;
-        self.next_tick_ms = now_ms + @as(i64, self.interval_ms);
-
-        if (self.has_window and self.has_icon and
-            std.mem.eql(u8, self.window[0..self.window_len], self.icon[0..self.icon_len]))
-        {
-            try self.writeTitle('0', self.window[0..self.window_len]);
-            return;
-        }
-        if (self.has_icon) try self.writeTitle('1', self.icon[0..self.icon_len]);
-        if (self.has_window) try self.writeTitle('2', self.window[0..self.window_len]);
-    }
-
-    fn storeTitle(self: *Blinker, dest: *[max_title]u8, len: *usize, present: *bool, value: []const u8) void {
-        _ = self;
-        @memcpy(dest[0..value.len], value);
-        len.* = value.len;
-        present.* = true;
-    }
-
-    fn writeTitle(self: *Blinker, selector: u8, value: []const u8) !void {
-        const lead = [_]u8{ esc, ']', selector, ';' };
-        try sys.writeAll(self.io, self.fd, &lead);
-        try sys.writeAll(self.io, self.fd, if (self.filled) "● " else "○ ");
-        try sys.writeAll(self.io, self.fd, value);
-        try sys.writeAll(self.io, self.fd, &[_]u8{ esc, '\\' });
-    }
-};
+/// Writes an initial title before the shell (or a non-interactive child)
+/// ever sets one itself. Nothing else in the live session decorates or
+/// intercepts titles: the shell plugin evaluates `--title` on every prompt
+/// and writes it directly, and any program's own title changes reach the
+/// terminal unmodified.
+pub fn writeInitialTitle(io: std.Io, fd: sys.Fd, value: []const u8) void {
+    var buf: [128]u8 = undefined;
+    const sequence = std.fmt.bufPrint(&buf, "\x1b]0;{s}\x1b\\", .{value}) catch return;
+    sys.writeAll(io, fd, sequence) catch {};
+}
 
 fn isTitleSelector(byte: u8) bool {
     return byte == '0' or byte == '1' or byte == '2';
-}
-
-test "title insertion waits for split terminal control sequences" {
-    var boundary: ControlBoundary = .{};
-    for ([_]struct { first: []const u8, second: []const u8 }{
-        .{ .first = "\x1b[31", .second = "m" },
-        .{ .first = "\x1b]777;partial", .second = "\x1b\\" },
-        .{ .first = "\x1bPpayload", .second = "\x1b\\" },
-        .{ .first = "\x9b31", .second = "m" },
-    }) |sequence| {
-        boundary.feed(sequence.first);
-        try std.testing.expect(!boundary.safe());
-        boundary.feed(sequence.second);
-        try std.testing.expect(boundary.safe());
-    }
-
-    boundary.feed("\x1b]777;partial");
-    var blinker = Blinker.init(std.testing.io, -1, 100, 0);
-    blinker.boundary = boundary;
-    try std.testing.expectEqual(@as(c_int, 100), blinker.timeout(100));
-    try blinker.tick(100);
-    try std.testing.expectEqual(@as(i64, 100), blinker.next_tick_ms);
 }
 
 const TestSink = struct {

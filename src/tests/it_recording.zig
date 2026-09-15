@@ -183,7 +183,7 @@ test "new exports the journal environment" {
         "--",
         "/bin/sh",
         "-c",
-        "printf 'J=%s N=%s TJ=%s TJCTL=%s TITLE=%s BLINK=%s LIMIT=%s\\n' \"$TJ_JOURNAL\" \"$TJ_NEXT\" \"$TJ\" \"$TJCTL\" \"$TJ_TITLE\" \"$TJ_TITLE_BLINK\" \"$TJ_OUT_LIMIT\"",
+        "printf 'J=%s N=%s TJ=%s TJCTL=%s TITLE=%s LIMIT=%s\\n' \"$TJ_JOURNAL\" \"$TJ_NEXT\" \"$TJ\" \"$TJCTL\" \"$TJ_TITLE\" \"$TJ_OUT_LIMIT\"",
     }, 24, 80);
     defer r.out.deinit(gpa);
     try std.testing.expectEqual(@as(u8, 0), r.code);
@@ -191,7 +191,6 @@ test "new exports the journal environment" {
     try std.testing.expect(std.mem.indexOf(u8, r.out.items, support.tj) != null);
     try std.testing.expect(std.mem.indexOf(u8, r.out.items, support.tjctl) != null);
     try std.testing.expect(std.mem.indexOf(u8, r.out.items, "TITLE=none") != null);
-    try std.testing.expect(std.mem.indexOf(u8, r.out.items, "BLINK=0") != null);
     try std.testing.expect(std.mem.indexOf(u8, r.out.items, "LIMIT=1073741824") != null);
 }
 
@@ -327,7 +326,7 @@ test "title capture forwards a large foreign OSC byte for byte" {
         "i=0; while [ \"$i\" -lt 4096 ]; do printf 0123456789abcdef; i=$((i + 1)); done; " ++
         "printf '\\033\\\\AFTER\\033]133;D;0\\033\\\\'";
     const child = try support.spawnTjctlWithSplash(gpa, &.{
-        support.tjctl, "--home", scratch.path(), "new", "foreign-osc", "--no-splash", "--title-blink=1", "--", "/bin/sh", "-c", script,
+        support.tjctl, "--home", scratch.path(), "new", "foreign-osc", "--no-splash", "--", "/bin/sh", "-c", script,
     }, 24, 80);
     var terminal: std.ArrayList(u8) = .empty;
     defer terminal.deinit(gpa);

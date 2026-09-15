@@ -103,9 +103,8 @@ cooperating command.
 
 OSC ELLO messages are private instructions for TJ. The proxy consumes them, so
 they do not appear on screen or in `out`. OSC 133 command-boundary messages are
-observed by TJ and also forwarded to the terminal. Ordinary output remains
-ordinary terminal data. The proxy also observes OSC 0 and OSC 2 title changes
-so it can preserve the application's title while adding the recording marker.
+observed by TJ and also forwarded to the terminal. Ordinary output, including
+OSC 0 and OSC 2 title changes, passes through unmodified.
 
 ## Load the plugin
 
@@ -225,7 +224,6 @@ The writer exports these variables to its child:
 | `TJ_NEXT` | Next entry number |
 | `TJ_JOURNAL` | Complete journal name |
 | `TJ_TITLE` | Shell-evaluated title format, or `none` |
-| `TJ_TITLE_BLINK` | Title blink interval in milliseconds |
 | `TJ_OUT_LIMIT` | Maximum recorded bytes per entry; `0` means unlimited |
 | `TJ` | Path to the entry command, when discoverable |
 | `TJCTL` | Path to the journal command, when discoverable |
@@ -261,9 +259,8 @@ tjctl use project-work --title 'TJ | $TJ_REF | %3~'
 ```
 
 While another foreground program runs, the plugin allows that program to set
-the title. The proxy remembers OSC 0 and OSC 2 title changes and adds only the
-alternating recording marker. It restores the most recent underlying title on
-each update.
+the title. The proxy forwards OSC 0 and OSC 2 title changes unmodified; TJ
+only writes the journal name as the initial title, before the shell's first
+prompt.
 
-Use `--title none` to disable TJ title handling, or `--title-blink 0` to keep
-the title format without the alternating marker.
+Use `--title none` to disable TJ title handling entirely.

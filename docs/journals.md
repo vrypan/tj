@@ -85,17 +85,10 @@ tjctl use project-work --title 'recording | $TJ_REF | ${PWD:t}'
 TJ_TITLE='recording | %3~' tjctl use project-work
 ```
 
-Use `--title none` to leave titles to other shell configuration.
-
-While recording, TJ alternates a filled and empty circle in terminal titles.
-The default interval is 1500 milliseconds:
-
-```sh
-tjctl use project-work --title-blink 3000
-tjctl use project-work --title-blink 0     # disable blinking
-```
-
-`TJ_TITLE_BLINK` sets the default interval.
+Use `--title none` to leave titles to other shell configuration. TJ writes
+the journal name as the initial title, then leaves titles untouched: the
+shell plugin evaluates `--title` on every prompt, and any program's own
+title changes reach the terminal unmodified.
 
 ## Entry output limit
 

@@ -22,13 +22,6 @@ const title = zecli.FlagSpec{
     .description = "Override the shell-evaluated terminal-title format, or use none",
     .default_value = "TJ | %3~",
 };
-const title_blink = zecli.FlagSpec{
-    .name = "title-blink",
-    .value = .string,
-    .value_name = "MS",
-    .description = "Alternate the title recording marker every MS (0 disables)",
-    .default_value = "1500",
-};
 const out_limit = zecli.FlagSpec{
     .name = "out-limit",
     .value = .string,
@@ -36,8 +29,8 @@ const out_limit = zecli.FlagSpec{
     .description = "Maximum recorded output per entry (0 disables the limit)",
     .default_value = "1G",
 };
-const new_flags = [_]zecli.FlagSpec{ home_flag, keep_osc, no_splash, title, title_blink, out_limit, .{ .name = "temp", .description = "Remove the journal unless it is saved before exit" } };
-const use_flags = [_]zecli.FlagSpec{ home_flag, keep_osc, no_splash, title, title_blink, out_limit, .{ .name = "no-replay", .description = "Start without replaying the journal" } };
+const new_flags = [_]zecli.FlagSpec{ home_flag, keep_osc, no_splash, title, out_limit, .{ .name = "temp", .description = "Remove the journal unless it is saved before exit" } };
+const use_flags = [_]zecli.FlagSpec{ home_flag, keep_osc, no_splash, title, out_limit, .{ .name = "no-replay", .description = "Start without replaying the journal" } };
 const force_flags = [_]zecli.FlagSpec{.{ .name = "force", .description = "Skip confirmation or override pin protection" }};
 const ls_flags = [_]zecli.FlagSpec{
     .{ .name = "long", .short = 'l', .description = "Show activity details" },

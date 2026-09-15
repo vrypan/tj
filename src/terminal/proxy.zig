@@ -149,7 +149,6 @@ pub const Options = struct {
     replay_before_start: bool = false,
     splash: bool = false,
     title: []const u8 = "none",
-    title_blink_ms: u32 = 1500,
     home: ?[]const u8 = null,
     temporary: bool = false,
     out_limit_bytes: u64 = journal_store.default_out_limit,
@@ -246,18 +245,9 @@ pub fn run(gpa: std.mem.Allocator, io: std.Io, opts: Options) !Result {
     installSignalHandlers();
     // Activate only after fatal signals are under proxy control. Unsupported
     // terminals harmlessly ignore the xterm title-stack request.
-    var blinker_storage: terminal_title.Blinker = undefined;
-    var blinker: ?*terminal_title.Blinker = null;
     if (title_enabled) {
         terminal_title.push(io, stdout_fd);
-        if (opts.title_blink_ms == 0) {
-            terminal_title.writeFallback(io, stdout_fd, store.journalId());
-        } else {
-            const now_ms = std.Io.Clock.now(.awake, io).toMilliseconds();
-            blinker_storage = .init(io, stdout_fd, opts.title_blink_ms, now_ms);
-            blinker = &blinker_storage;
-            blinker_storage.startJournal(store.journalId()) catch {};
-        }
+        terminal_title.writeInitialTitle(io, stdout_fd, store.journalId());
     }
     // A fresh random token per writer, exported so `tjctl` inside the session
     // can authenticate SAVE and HANDOFF requests. Untrusted bytes that merely
@@ -266,7 +256,7 @@ pub fn run(gpa: std.mem.Allocator, io: std.Io, opts: Options) !Result {
     const session_token = generateSessionToken(io);
     var child_environment = try sys.environMap().clone(gpa);
     defer child_environment.deinit();
-    try exportEnvironment(&child_environment, &store, opts.title, opts.title_blink_ms, opts.out_limit_bytes, handoff_fds[1], &session_token);
+    try exportEnvironment(&child_environment, &store, opts.title, opts.out_limit_bytes, handoff_fds[1], &session_token);
     const default_argv = [_][]const u8{sys.env("SHELL") orelse "/bin/zsh"};
     var executable = try sys.Exec.init(gpa, if (opts.argv.len == 0) &default_argv else opts.argv, &child_environment);
     defer executable.deinit();
@@ -290,7 +280,7 @@ pub fn run(gpa: std.mem.Allocator, io: std.Io, opts: Options) !Result {
 
     var recorder: Recorder = .{
         .store = &store,
-        .blinker = blinker,
+        .title_enabled = title_enabled,
         .handoff_reply_fd = handoff_fds[0],
         .session_token = &session_token,
     };
@@ -298,7 +288,6 @@ pub fn run(gpa: std.mem.Allocator, io: std.Io, opts: Options) !Result {
     pump(gpa, io, opts.home, pty.master, sig_fds[0], pid, &recorder, &output) catch {};
     // Nothing may stay withheld inside the scanner once the stream is over.
     output.flush(&recorder);
-    if (blinker) |active| active.flush() catch {};
 
     sys.close(io, pty.master);
     sys.close(io, sig_fds[0]);
@@ -380,12 +369,11 @@ fn generateSessionToken(io: std.Io) [handoff.session_len]u8 {
 }
 
 /// Build the shell's environment without changing the proxy's own snapshot.
-fn exportEnvironment(environment: *std.process.Environ.Map, store: *Store, title: []const u8, title_blink_ms: u32, out_limit_bytes: u64, handoff_fd: sys.Fd, session_token: *const [handoff.session_len]u8) !void {
+fn exportEnvironment(environment: *std.process.Environ.Map, store: *Store, title: []const u8, out_limit_bytes: u64, handoff_fd: sys.Fd, session_token: *const [handoff.session_len]u8) !void {
     try environment.put("TJ_JOURNAL", store.journal);
     var number: [32]u8 = undefined;
     try environment.put("TJ_NEXT", try std.fmt.bufPrint(&number, "{d}", .{store.next_number.?}));
     try environment.put("TJ_TITLE", title);
-    try environment.put("TJ_TITLE_BLINK", try std.fmt.bufPrint(&number, "{d}", .{title_blink_ms}));
     try environment.put("TJ_OUT_LIMIT", try std.fmt.bufPrint(&number, "{d}", .{out_limit_bytes}));
     try environment.put("TJ_HANDOFF_FD", try std.fmt.bufPrint(&number, "{d}", .{handoff_fd}));
     try environment.put("TJ_SESSION_ID", session_token);
@@ -434,7 +422,7 @@ fn warnNothingRecorded(io: std.Io) void {
 /// terminal is meant to see. This is the only place the two jobs meet.
 const Recorder = struct {
     store: *Store,
-    blinker: ?*terminal_title.Blinker = null,
+    title_enabled: bool = false,
     /// The command line arrives just before the "command is running" boundary,
     /// so it waits here until the interaction actually opens.
     command: [scanner.max_osc]u8 = undefined,
@@ -463,13 +451,7 @@ const Recorder = struct {
     /// Bytes for the terminal that also belong in `out`.
     pub fn data(self: *Recorder, bytes: []const u8) void {
         self.store.append(bytes);
-        if (self.blinker) |active| {
-            active.feed(bytes) catch {
-                self.broken = true;
-            };
-        } else {
-            self.forward(bytes);
-        }
+        self.forward(bytes);
     }
 
     /// Bytes for the terminal only: tj's own sequences under `--keep-osc`,
@@ -602,11 +584,7 @@ fn pump(gpa: std.mem.Allocator, io: std.Io, home: ?[]const u8, master: sys.Fd, s
         // disk, so `tail -f` on `@N/out` shows progress.
         const recording = recorder.store.isRecording();
         const before_poll_ms = std.Io.Clock.now(.awake, io).toMilliseconds();
-        var timeout = flush_schedule.timeout(recording, before_poll_ms);
-        if (recorder.blinker) |active| {
-            const title_timeout = active.timeout(before_poll_ms);
-            if (timeout < 0 or title_timeout < timeout) timeout = title_timeout;
-        }
+        const timeout = flush_schedule.timeout(recording, before_poll_ms);
         _ = posix.poll(&fds, timeout) catch return;
 
         if (sig.revents & (posix.POLL.IN | posix.POLL.HUP) != 0) {
@@ -627,14 +605,6 @@ fn pump(gpa: std.mem.Allocator, io: std.Io, home: ?[]const u8, master: sys.Fd, s
 
         const after_output_ms = std.Io.Clock.now(.awake, io).toMilliseconds();
         if (flush_schedule.consume(recorder.store.isRecording(), after_output_ms)) recorder.store.tick();
-
-        if (recorder.blinker) |active| {
-            const now_ms = std.Io.Clock.now(.awake, io).toMilliseconds();
-            active.tick(now_ms) catch {
-                recorder.broken = true;
-            };
-            if (recorder.broken) return;
-        }
 
         if (!pending_input.isEmpty() and out.revents & posix.POLL.OUT != 0) {
             switch (sys.writeNonBlocking(master, pending_input.pending()) catch return) {
@@ -726,7 +696,7 @@ fn applyHandoff(gpa: std.mem.Allocator, io: std.Io, home: ?[]const u8, recorder:
     if (recorder.store.saved_temporary) warnStartup(io, "tjctl: saved journal {s}\n", .{recorder.store.journalId()});
     recorder.store.close();
     recorder.store.* = target;
-    if (recorder.blinker) |active| active.startJournal(recorder.store.journalId()) catch {};
+    if (recorder.title_enabled) terminal_title.writeInitialTitle(io, stdout_fd, recorder.store.journalId());
     recorder.handoff = null;
     handoffReply(recorder, 0);
 }

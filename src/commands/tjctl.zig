@@ -31,13 +31,6 @@ pub fn run(
         try parseOutLimit(parsed.last("out-limit").?)
     else
         0;
-    const title_blink_ms = if (which == .new or which == .use) blk: {
-        const configured = try parseTitleBlink(parsed.last("title-blink").?);
-        if (std.mem.eql(u8, title, "none")) {
-            break :blk 0;
-        }
-        break :blk configured;
-    } else 0;
     // Lifecycle commands are the recovery point for a temporary writer killed
     // before it could finish. Entry commands deliberately never do this work.
     if (which != .save and which != .current) try store.sweepTemporaryJournals(gpa, io, home);
@@ -49,7 +42,6 @@ pub fn run(
                 .keep_osc = parsed.enabled("keep-osc"),
                 .splash = splash_enabled,
                 .title = title,
-                .title_blink_ms = title_blink_ms,
                 .home = home,
                 .temporary = parsed.enabled("temp"),
                 .out_limit_bytes = out_limit_bytes,
@@ -73,7 +65,6 @@ pub fn run(
                 .replay_before_start = !parsed.enabled("no-replay"),
                 .splash = splash_enabled,
                 .title = title,
-                .title_blink_ms = title_blink_ms,
                 .home = home,
                 .out_limit_bytes = out_limit_bytes,
             };
@@ -140,7 +131,7 @@ fn emitHandoff(
     // would only take effect when starting a fresh writer are refused here
     // rather than silently ignored.
     if (root_home_explicit or parsed.present("home") or child.len != 0) return error.InsideJournalHandoffOptions;
-    for ([_][]const u8{ "keep-osc", "title", "title-blink", "no-splash", "out-limit" }) |flag| {
+    for ([_][]const u8{ "keep-osc", "title", "no-splash", "out-limit" }) |flag| {
         if (parsed.present(flag)) return error.InsideJournalHandoffOptions;
     }
     var resolved_selector: ?[]u8 = null;
@@ -251,12 +242,6 @@ fn writeShellExport(out: *Io.Writer, name: []const u8, value: []const u8, fish_s
     try out.writeAll("'\n");
 }
 
-fn parseTitleBlink(text: []const u8) !u32 {
-    const millis = std.fmt.parseInt(u32, text, 10) catch return error.BadTitleBlink;
-    if (millis > @as(u32, std.math.maxInt(i32))) return error.BadTitleBlink;
-    return millis;
-}
-
 fn parseOutLimit(text: []const u8) !u64 {
     if (text.len == 0) return error.BadOutLimit;
     var digits: usize = 0;
@@ -275,13 +260,6 @@ fn parseOutLimit(text: []const u8) !u64 {
     else
         return error.BadOutLimit;
     return std.math.mul(u64, value, multiplier) catch return error.BadOutLimit;
-}
-
-test "title blink intervals accept zero and fit poll timeouts" {
-    try std.testing.expectEqual(@as(u32, 0), try parseTitleBlink("0"));
-    try std.testing.expectEqual(@as(u32, 1500), try parseTitleBlink("1500"));
-    try std.testing.expectError(error.BadTitleBlink, parseTitleBlink("fast"));
-    try std.testing.expectError(error.BadTitleBlink, parseTitleBlink("2147483648"));
 }
 
 test "output limits accept binary size suffixes and zero" {

@@ -23,7 +23,6 @@ pub const Error = error{
     NoSuchResource,
     BadCount,
     BadReplayOption,
-    BadTitleBlink,
     InsideJournal,
     CrossJournalMutation,
     UnsupportedRemoval,
