@@ -64,13 +64,6 @@ pub fn main(init: std.process.Init) !u8 {
     const which = try command.as(cli.CommandName);
     const spec = command.spec;
 
-    cli.validateRemoveOrdering(which, command_args) catch {
-        try stderr.writeAll("tj: invalid arguments for this subcommand\n\n");
-        try zecli.printCommandHelp(arena, stderr, spec);
-        try stderr.flush();
-        return 2;
-    };
-
     var child: []const [:0]const u8 = &.{};
     if (which == .filter) {
         if (command.positionals().len != 0) {
@@ -80,11 +73,6 @@ pub fn main(init: std.process.Init) !u8 {
             return 2;
         }
         child = command.passthrough() orelse &.{};
-    } else if (which != .grep and command.passthrough() != null) {
-        try stderr.writeAll("tj: invalid arguments for this subcommand\n\n");
-        try zecli.printCommandHelp(arena, stderr, spec);
-        try stderr.flush();
-        return 2;
     }
 
     const status = commands.run(
@@ -104,7 +92,7 @@ pub fn main(init: std.process.Init) !u8 {
             try zecli.printCommandHelp(arena, stderr, spec);
         }
         try stderr.flush();
-        if (isUsageError(err) or err == error.NoSuchInteraction) return 2;
+        if (isUsageError(err)) return 2;
         if (which == .grep) return 2;
         return 1;
     };
@@ -166,6 +154,8 @@ fn commandErrorMessage(which: cli.CommandName, err: anyerror) []const u8 {
         error.InvalidMetadata => "tj: invalid entry metadata; refusing partial removal\n",
         error.InsideJournalRemoval => "tj: remove a whole journal only from outside a tj writer\n",
         error.FileNotFound => "tj: no journal yet\n",
+        error.InvalidStdinSelection => "tj: standard input must contain only positive entry numbers\n",
+        error.StdinSelectionTooLarge => "tj: standard input selection is too large\n",
         else => "tj: cannot read the journal\n",
     };
 }

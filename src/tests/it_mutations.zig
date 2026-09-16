@@ -8,6 +8,69 @@ const support = @import("it_support.zig");
 
 // Entry and journal mutation semantics.
 
+test "pin batches are deduplicated atomic and accept options after targets" {
+    if (!support.haveZsh()) return error.SkipZigTest;
+    const gpa = std.testing.allocator;
+    var journal = try support.Journal.open(gpa);
+    defer journal.close();
+    try support.recordJournal(gpa, &journal, &.{ "echo one", "echo two", "echo three", "echo four" });
+    try journal.enter(gpa);
+    const home = try journal.homeArg(gpa);
+    defer gpa.free(home);
+    const id = try journal.journalName(gpa);
+    defer gpa.free(id);
+
+    const set = try support.runNonTtyInJournal(
+        gpa,
+        &.{ "--home", home, "pin", "@3", "@1..@2", "@2" },
+        id,
+        "6",
+    );
+    defer gpa.free(set.stdout);
+    defer gpa.free(set.stderr);
+    try std.testing.expectEqual(@as(u8, 0), set.term.exited);
+    const listed = try support.runNonTtyInJournal(gpa, &.{ "--home", home, "pin", "--ids" }, id, "6");
+    defer gpa.free(listed.stdout);
+    defer gpa.free(listed.stderr);
+    try std.testing.expectEqualStrings("1 2 3\n", listed.stdout);
+
+    const remove = try support.runNonTtyInJournal(
+        gpa,
+        &.{ "--home", home, "pin", "@1", "@2", "--remove" },
+        id,
+        "6",
+    );
+    defer gpa.free(remove.stdout);
+    defer gpa.free(remove.stderr);
+    try std.testing.expectEqual(@as(u8, 0), remove.term.exited);
+
+    const invalid = try support.runNonTtyInJournal(
+        gpa,
+        &.{ "--home", home, "pin", "@1", "@999" },
+        id,
+        "6",
+    );
+    defer gpa.free(invalid.stdout);
+    defer gpa.free(invalid.stderr);
+    try std.testing.expectEqual(@as(u8, 1), invalid.term.exited);
+    const after_invalid = try support.runNonTtyInJournal(gpa, &.{ "--home", home, "pin", "--ids" }, id, "6");
+    defer gpa.free(after_invalid.stdout);
+    defer gpa.free(after_invalid.stderr);
+    try std.testing.expectEqualStrings("3\n", after_invalid.stdout);
+
+    const qualified_current = try std.fmt.allocPrint(gpa, "@{s}.4", .{id});
+    defer gpa.free(qualified_current);
+    const rejected = try support.runNonTtyInJournal(
+        gpa,
+        &.{ "--home", home, "pin", qualified_current },
+        id,
+        "6",
+    );
+    defer gpa.free(rejected.stdout);
+    defer gpa.free(rejected.stderr);
+    try std.testing.expectEqual(@as(u8, 1), rejected.term.exited);
+}
+
 test "entry mutations reject qualified journals while reads still work" {
     if (!support.haveZsh()) return error.SkipZigTest;
     const gpa = std.testing.allocator;
@@ -102,8 +165,8 @@ test "output and entry removal clean data without reusing numbers" {
     protected_dir.close(io);
 
     for ([_][]const []const u8{
-        &.{ "rm", "--force", "@1/out" },
-        &.{ "rm", "--force", "@2" },
+        &.{ "rm", "--include-pinned", "@1/out" },
+        &.{ "rm", "--include-pinned", "@2" },
     }) |command_args| {
         var argv: std.ArrayList([]const u8) = .empty;
         defer argv.deinit(gpa);
@@ -211,13 +274,13 @@ test "entry ranges remove existing entries across holes and reject the running b
     defer remaining_pins.out.deinit(gpa);
     try std.testing.expect(std.mem.indexOf(u8, remaining_pins.out.items, "@4") != null);
 
-    var forced = try support.run(gpa, &.{ "--home", home, "rm", "--force", "@4" }, 24, 100);
+    var forced = try support.run(gpa, &.{ "--home", home, "rm", "--include-pinned", "@4" }, 24, 100);
     defer forced.out.deinit(gpa);
     try std.testing.expectEqual(@as(u8, 0), forced.code);
     try std.testing.expectError(error.FileNotFound, dir.openDir(io, "4", .{}));
 }
 
-test "rm accepts mixed target lists and applies force to every target" {
+test "rm accepts mixed target lists and applies include-pinned to every target" {
     if (!support.haveZsh()) return error.SkipZigTest;
     const gpa = std.testing.allocator;
     const io = std.testing.io;
@@ -261,7 +324,7 @@ test "rm accepts mixed target lists and applies force to every target" {
     var six = try dir.openDir(io, "6", .{});
     six.close(io);
 
-    var forced = try support.run(gpa, &.{ "--home", home, "rm", "--force", "@3", "@6" }, 24, 100);
+    var forced = try support.run(gpa, &.{ "--home", home, "rm", "--include-pinned", "@3", "@6" }, 24, 100);
     defer forced.out.deinit(gpa);
     try std.testing.expectEqual(@as(u8, 0), forced.code);
     try std.testing.expectError(error.FileNotFound, dir.openDir(io, "3", .{}));
@@ -287,7 +350,7 @@ test "rm preserves ordered partial success for duplicate and overlapping targets
 
     var duplicate = try support.run(gpa, &.{ "--home", home, "rm", "@1", "@1" }, 24, 100);
     defer duplicate.out.deinit(gpa);
-    try std.testing.expectEqual(@as(u8, 2), duplicate.code);
+    try std.testing.expectEqual(@as(u8, 1), duplicate.code);
     var dir = try journal.journalDir();
     defer dir.close(io);
     try std.testing.expectError(error.FileNotFound, dir.openDir(io, "1", .{}));
@@ -302,6 +365,102 @@ test "rm preserves ordered partial success for duplicate and overlapping targets
     for ([_][]const u8{ "2", "3", "4" }) |number| {
         try std.testing.expectError(error.FileNotFound, dir.openDir(io, number, .{}));
     }
+}
+
+test "rm --ignore-missing tolerates duplicate targets and missing entries" {
+    if (!support.haveZsh()) return error.SkipZigTest;
+    const gpa = std.testing.allocator;
+    const io = std.testing.io;
+    var journal = try support.Journal.open(gpa);
+    defer journal.close();
+    try support.recordJournal(gpa, &journal, &.{
+        "echo one",
+        "echo two",
+        "echo three",
+    });
+    try journal.enter(gpa);
+    const home = try journal.homeArg(gpa);
+    defer gpa.free(home);
+
+    var duplicate = try support.run(gpa, &.{ "--home", home, "rm", "--ignore-missing", "@1", "@1" }, 24, 100);
+    defer duplicate.out.deinit(gpa);
+    try std.testing.expectEqual(@as(u8, 0), duplicate.code);
+    var dir = try journal.journalDir();
+    defer dir.close(io);
+    try std.testing.expectError(error.FileNotFound, dir.openDir(io, "1", .{}));
+
+    var missing = try support.run(gpa, &.{ "--home", home, "rm", "--ignore-missing", "@1", "@999" }, 24, 100);
+    defer missing.out.deinit(gpa);
+    try std.testing.expectEqual(@as(u8, 0), missing.code);
+
+    // Without --ignore-missing the same targets are an ordinary error.
+    var without = try support.run(gpa, &.{ "--home", home, "rm", "@1" }, 24, 100);
+    defer without.out.deinit(gpa);
+    try std.testing.expectEqual(@as(u8, 1), without.code);
+}
+
+test "rm - reads a batch of entry numbers from stdin" {
+    if (!support.haveZsh()) return error.SkipZigTest;
+    const gpa = std.testing.allocator;
+    const io = std.testing.io;
+    var journal = try support.Journal.open(gpa);
+    defer journal.close();
+    try support.recordJournal(gpa, &journal, &.{
+        "echo one",
+        "echo two",
+        "echo three",
+        "echo four",
+    });
+    try journal.enter(gpa);
+    const home = try journal.homeArg(gpa);
+    defer gpa.free(home);
+    const id = try journal.journalName(gpa);
+    defer gpa.free(id);
+
+    // Stdin can be consumed by only one - target.
+    const twice = try support.runNonTtyInJournal(gpa, &.{ "--home", home, "rm", "-", "-" }, id, "5");
+    defer gpa.free(twice.stdout);
+    defer gpa.free(twice.stderr);
+    try std.testing.expectEqual(@as(u8, 2), twice.term.exited);
+
+    // A target is still required; stdin is never read implicitly.
+    const missing_mode = try support.runNonTtyInJournal(gpa, &.{ "--home", home, "rm" }, id, "5");
+    defer gpa.free(missing_mode.stdout);
+    defer gpa.free(missing_mode.stderr);
+    try std.testing.expectEqual(@as(u8, 2), missing_mode.term.exited);
+
+    // Empty stdin behind - is a successful no-op.
+    var dir = try journal.journalDir();
+    defer dir.close(io);
+    const empty = try support.runNonTty(gpa, &.{ "--home", home, "rm", "-" });
+    defer gpa.free(empty.stdout);
+    defer gpa.free(empty.stderr);
+    try std.testing.expectEqual(@as(u8, 0), empty.term.exited);
+    var one = try dir.openDir(io, "1", .{});
+    one.close(io);
+
+    // A real batch removes exactly the given numbers, tolerating a stale one
+    // only under --ignore-missing.
+    const child = try support.spawnContinuedJournalZsh(gpa, &journal, id);
+    var terminal = support.TerminalSession.init(gpa, child);
+    defer terminal.deinit();
+    try terminal.setupZsh("");
+    const malformed = terminal.transcript.items.len;
+    try terminal.write("print -r -- '2 abc' | command \"$TJ\" rm -; print -r -- \"status=$?\"\n");
+    try terminal.expectFrom(malformed, "tj: standard input must contain only positive entry numbers");
+    try terminal.expectFrom(malformed, "status=1");
+    const from = terminal.transcript.items.len;
+    try terminal.write("print -r -- '1 999' | command \"$TJ\" rm --ignore-missing @3 -\n");
+    try terminal.expectPromptFrom(from);
+    try terminal.write("exit 0\n");
+    try std.testing.expectEqual(@as(u8, 0), try terminal.finish());
+
+    try std.testing.expectError(error.FileNotFound, dir.openDir(io, "1", .{}));
+    try std.testing.expectError(error.FileNotFound, dir.openDir(io, "3", .{}));
+    var two = try dir.openDir(io, "2", .{});
+    two.close(io);
+    var four = try dir.openDir(io, "4", .{});
+    four.close(io);
 }
 
 test "whole-journal removal is outside-writer only and refuses active journals" {

@@ -24,6 +24,16 @@ const hist_flags = [_]zecli.FlagSpec{
         .aliases = &.{"pin"},
         .description = "Show only pinned entries",
     },
+    .{ .name = "ids", .description = "Print only entry numbers" },
+    .{
+        .name = "color",
+        .aliases = &.{"colour"},
+        .value = .string,
+        .value_name = "WHEN",
+        .description = "Colour the listing",
+        .default_value = "auto",
+        .choices = &.{ "never", "auto", "always" },
+    },
 };
 
 const cat_flags = [_]zecli.FlagSpec{
@@ -45,20 +55,22 @@ const cat_flags = [_]zecli.FlagSpec{
     },
 };
 
-const remove_flag = [_]zecli.FlagSpec{
+const pin_flags = [_]zecli.FlagSpec{
     .{ .name = "remove", .description = "Unpin the selected entry" },
+    .{ .name = "ids", .description = "Print only pinned entry numbers" },
 };
 
-const force_flag = [_]zecli.FlagSpec{
-    .{ .name = "force", .description = "Override pin protection or skip confirmation" },
+const rm_flags = [_]zecli.FlagSpec{
+    .{ .name = "include-pinned", .short = 'p', .description = "Remove pinned entries instead of skipping them" },
+    .{ .name = "ignore-missing", .description = "Ignore targets that do not exist" },
 };
 
 const grep_flags = [_]zecli.FlagSpec{
-    .{ .name = "all", .short = 'a', .description = "Search every journal" },
-    .{ .name = "numbers", .description = "Print matching entry numbers" },
-    .{ .name = "cmd", .description = "Search commands" },
-    .{ .name = "out", .description = "Search output" },
-    .{ .name = "ignore-case", .short = 'i', .description = "Fold ASCII letter case" },
+    .{ .name = "all", .description = "Search across all journals" },
+    .{ .name = "ids", .description = "Print only matching entry numbers" },
+    .{ .name = "cmd", .description = "Search command lines" },
+    .{ .name = "out", .description = "Search command output" },
+    .{ .name = "ignore-case", .short = 'i', .description = "Case-insensitive search (only ASCII)" },
     .{
         .name = "color",
         .aliases = &.{"colour"},
@@ -78,8 +90,16 @@ const filter_flags = [_]zecli.FlagSpec{
 const commands = [_]zecli.CommandSpec{
     .{
         .name = "tui",
+        .aliases = &.{"t"},
         .description = "Browse, inspect, pin, and delete entries",
-        .usage = "tj tui",
+        .usage = "tj tui [TARGET...]",
+        .arguments = &.{.{
+            .name = "TARGET",
+            .description = "Entry reference or numeric range",
+            .repeatable = true,
+            .completion = reference_completion,
+        }},
+        .double_dash = .positionals,
         .extra_help = "With redirected standard input, show only the space-separated entry numbers it contains.\n",
     },
     .{
@@ -93,22 +113,27 @@ const commands = [_]zecli.CommandSpec{
         ++ "\n",
     },
     .{
-        .name = "hist",
-        .aliases = &.{"history"},
+        .name = "history",
+        .aliases = &.{"h"},
         .description = "List entries with pin status, size, and date",
-        .usage = "tj hist [options] [TARGET...]",
+        .usage = "tj history [options] [TARGET...]",
         .flags = &hist_flags,
         .arguments = &.{.{
             .name = "TARGET",
-            .description = "Entry reference, numeric range, or @journal-name.",
+            .description = "Entry reference, numeric range, @journal-name., or - for stdin",
             .repeatable = true,
             .completion = reference_completion,
         }},
-        .extra_help = "With no targets, list the current journal. A trailing dot selects an entire journal: @release-build.\n",
+        .double_dash = .positionals,
+        .extra_help =
+        \\With no targets, list the current journal. A trailing dot selects an entire journal: @release-build.
+        \\A - target reads whitespace-separated current-journal entry numbers from standard input.
+        ++ "\n",
     },
-    .{ .name = "last", .description = "Print the last completed entry", .usage = "tj last" },
+    .{ .name = "last", .description = "Print the last completed entry number", .usage = "tj last", .double_dash = .positionals },
     .{
         .name = "cat",
+        .aliases = &.{"c"},
         .description = "Print what one or more references name",
         .usage = "tj cat [options] <REF>...",
         .flags = &cat_flags,
@@ -119,48 +144,60 @@ const commands = [_]zecli.CommandSpec{
             .repeatable = true,
             .completion = reference_completion,
         }},
+        .double_dash = .positionals,
     },
     .{
         .name = "resolve",
         .description = "Print the filesystem path named by a reference",
         .usage = "tj resolve <REF>",
         .arguments = &.{.{ .name = "REF", .description = "Journal reference", .required = true, .completion = reference_completion }},
+        .double_dash = .positionals,
     },
     .{
         .name = "complete",
         .description = "Print candidates for a partial journal reference",
         .usage = "tj complete [REF]",
         .arguments = &.{.{ .name = "REF", .description = "Partial journal reference", .completion = reference_completion }},
+        .double_dash = .positionals,
     },
     .{
         .name = "pin",
         .description = "Pin, unpin, or list pinned entries",
-        .usage = "tj pin [--remove] [REF]",
-        .flags = &remove_flag,
-        .arguments = &.{.{ .name = "REF", .description = "Entry reference or numeric range", .completion = reference_completion }},
+        .usage = "tj pin [--remove] [TARGET...]",
+        .flags = &pin_flags,
+        .arguments = &.{.{ .name = "TARGET", .description = "Entry reference, numeric range, or - for stdin", .repeatable = true, .completion = reference_completion }},
+        .double_dash = .positionals,
+        .extra_help = "A - target reads whitespace-separated current-journal entry numbers from standard input.\n",
     },
     .{
         .name = "rm",
         .description = "Remove recorded entry data",
-        .usage = "tj rm [--force] <TARGET>...",
-        .flags = &force_flag,
+        .usage = "tj rm [options] <TARGET>...",
+        .flags = &rm_flags,
         .arguments = &.{.{
             .name = "TARGET",
-            .description = "Entry, out resource, or numeric range",
+            .description = "Entry, out resource, numeric range, or - for stdin",
             .required = true,
             .repeatable = true,
             .completion = reference_completion,
         }},
-        .extra_help = "Pinned targets are skipped unless --force is present.\n",
+        .double_dash = .positionals,
+        .extra_help =
+        \\Pinned targets are skipped unless --include-pinned is present. A - target
+        \\reads whitespace-separated current-journal entry numbers from standard
+        \\input and removes them as one batch.
+        ++ "\n",
     },
     .{
         .name = "grep",
         .description = "Search journal commands and output for a literal",
-        .usage = "tj grep [options] [--] <PATTERN>",
+        .usage = "tj grep [options] <PATTERN> [TARGET...]",
         .flags = &grep_flags,
-        // Application validation accepts this one value either before or
-        // after `--`; Zecli keeps those two namespaces separate.
-        .arguments = &.{.{ .name = "PATTERN", .description = "One non-empty literal byte string" }},
+        .arguments = &.{
+            .{ .name = "PATTERN", .description = "One non-empty literal byte string", .required = true },
+            .{ .name = "TARGET", .description = "Entry reference, numeric range, or @journal-name.", .repeatable = true, .completion = reference_completion },
+        },
+        .double_dash = .positionals,
     },
 };
 

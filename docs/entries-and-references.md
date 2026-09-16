@@ -7,10 +7,13 @@ resource and remains in the journal.
 ## List entries
 
 ```sh
-tj hist
-tj hist @42 @50..@60
-tj hist @release-build.
-tj hist --pinned
+tj history
+tj history @42 @50..@60
+tj history @release-build.
+tj history --pinned
+tj history --ids @42 @50..@60
+tj history --pinned --ids | tj tui
+tj grep error --ids | tj history -
 ```
 
 A trailing dot selects a journal.
@@ -18,9 +21,28 @@ A trailing dot selects a journal.
 History shows two flag positions: `*` for pinned and `!` for a nonzero exit
 status. It also shows the entry reference, output size, start date, command,
 and nonzero status. Long commands wrap to the terminal width. Redirected
-output uses the same fields without color or wrapping.
+output uses the same fields without wrapping.
 
-`tj last` prints the reference of the last entry that completed.
+Without targets, history lists the current journal regardless of where
+standard input comes from. A `-` target reads standard input as a
+whitespace-separated list of current-journal entry numbers, so
+`tj grep error --ids | tj history -` narrows history to grep's matches. `-`
+may be combined with other targets but given only once. Input is capped at
+4 MiB; malformed tokens and zero are rejected, and every number must exist
+before anything is printed. Empty input selects nothing.
+
+`tj last` prints the positive decimal number of the last entry that completed.
+
+`--ids` prints the unique selected entry numbers in ascending order as one
+space-separated line. It is current-journal-only, including when a target is
+explicitly qualified. An empty selection writes no bytes. Its output is
+always plain, regardless of any `--color` setting.
+
+`--color=auto|always|never` (or `--colour`) controls layout color; `auto` is
+the default and colors a real terminal unless `NO_COLOR` is set or `TERM` is
+unusable. `always` colors output even when piped; `never` disables it.
+`TJ_COLOR` sets the default between the command line and history's own
+default.
 
 ## Read entries
 
@@ -112,13 +134,27 @@ tjcd @release-build.42
 
 ```sh
 tj pin @42
-tj pin @40..@45
-tj pin --remove @42
+tj pin @40..@45 @50 @52
+tj pin --remove @42 @50..@52
+tj pin @42 --remove
 tj pin
+tj pin --ids
 ```
 
-Pinning and unpinning are idempotent. A pin protects an entry from ordinary
-removal. It does not currently define a retention policy.
+Pinning and unpinning are idempotent. Multiple references and ranges are
+deduplicated and applied in ascending numeric order. TJ validates the complete
+batch under one current-journal mutation guard before changing any markers. A
+pin protects an entry from ordinary removal. It does not currently define a
+retention policy.
+
+`tj pin --ids` is a listing mode equivalent to `tj history --pinned --ids`.
+It cannot be combined with targets or `--remove`.
+
+Without targets, `tj pin` lists the current journal's pinned entries. A `-`
+target reads standard input as a whitespace-separated list of current-journal
+entry numbers to pin (or unpin, with `--remove`), so
+`tj grep error --ids | tj pin -` pins grep's matches. Those numbers join the
+same validated batch as any other targets. Empty input changes nothing.
 
 Ranges are inclusive, apply only to the current journal, and skip numbering
 holes.
@@ -130,12 +166,28 @@ tj rm @42
 tj rm @42/out
 tj rm @2..@10
 tj rm @12 @15/out @20..@25
-tj rm --force @42
+tj rm --include-pinned @42
+tj rm --ignore-missing @2 @2
+echo '2 4' | tj rm -
 ```
 
 Removal only changes the current journal. Targets are processed from left to
-right. Pinned entries are skipped unless `--force` is present. The currently
-running entry cannot be removed.
+right. Pinned entries are skipped unless `--include-pinned` is present. The
+currently running entry cannot be removed.
+
+`--ignore-missing` makes a missing explicit entry or an entirely empty range
+harmless instead of an error, including a duplicate or overlapping operand
+that an earlier operand already removed. Other failures (permission,
+corruption, an invalid reference, an unsupported resource, a foreign journal,
+or the currently running entry) are still reported. `--include-pinned` is
+orthogonal and may be combined with it.
+
+A `-` target reads a whitespace-separated list of current-journal entry
+numbers from standard input (capped at 4 MiB, sorted and deduplicated) and
+removes them as one batch at that position, validating the whole batch before
+removing any of it; combine it with `--ignore-missing` to tolerate stale ids.
+Standard input is read only when `-` is given, so a stray pipe cannot select
+entries for removal.
 
 Removing an entry also removes its pin, output, resources, and metadata.
 Removing only `out` preserves the entry, command, exit status, and pin, but
@@ -144,7 +196,9 @@ Individual published resources cannot be removed separately.
 
 ## Interactive browser
 
-`tj tui` opens a full-screen browser for the current journal.
+`tj tui [TARGET...]` opens a full-screen browser for the current journal.
+Targets may be unqualified entry references or current-journal numeric ranges.
+They are validated before the terminal switches to its alternate screen.
 
 When standard input is redirected, it is read as a space-separated list of
 entry numbers and the browser shows only those entries. Numbers are sorted and
@@ -152,7 +206,12 @@ duplicates are ignored:
 
 ```sh
 echo 100 101 1002 | tj tui
+tj history --ids @100..@200 | tj tui
+tj pin --ids | tj tui
 ```
+
+Explicit target operands take precedence over redirected standard input. An
+empty explicit selection is an error rather than an unfiltered browser.
 
 | Key | Action |
 |---|---|

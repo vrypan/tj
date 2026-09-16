@@ -149,10 +149,11 @@ test "a malformed reference and a missing one are told apart" {
     try std.testing.expectEqual(@as(u8, 1), bad.code);
     try std.testing.expect(std.mem.indexOf(u8, bad.out.items, "tj: not a journal reference") != null);
 
-    // Well formed, but there is no interaction 999.
+    // Well formed, but there is no interaction 999: a data failure, not a
+    // usage error, so it exits 1 like other missing-journal/resource cases.
     var missing = try support.run(gpa, &.{ "--home", home, "resolve", "@999/out" }, 24, 80);
     defer missing.out.deinit(gpa);
-    try std.testing.expectEqual(@as(u8, 2), missing.code);
+    try std.testing.expectEqual(@as(u8, 1), missing.code);
     try std.testing.expect(std.mem.indexOf(u8, missing.out.items, "tj: no such entry") != null);
 }
 

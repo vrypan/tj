@@ -129,6 +129,34 @@ test "tui filters entries from a space-separated stdin list" {
     try terminal.expectPromptFrom(from);
 
     from = transcript.items.len;
+    try terminal.write("print -r -- 'not numeric' | command \"$TJ\" tui '@4' '@1..@3' '@1'\n");
+    try terminal.expectFrom(from, "4 entries");
+    try terminal.expectFrom(from, "FILTER_KEEP_ONE");
+    try terminal.expectFrom(from, "FILTER_DROP_TWO");
+    try terminal.expectFrom(from, "FILTER_KEEP_THREE");
+    try terminal.expectFrom(from, "FILTER_KEEP_FOUR");
+    try terminal.write("q");
+    try terminal.expectPromptFrom(from);
+
+    from = transcript.items.len;
+    try terminal.write("command \"$TJ\" history --ids '@1' '@3' | command \"$TJ\" tui\n");
+    try terminal.expectFrom(from, "2 entries");
+    try terminal.write("q");
+    try terminal.expectPromptFrom(from);
+
+    from = transcript.items.len;
+    try terminal.write("command \"$TJ\" pin '@1' '@3'; command \"$TJ\" pin --ids | command \"$TJ\" tui\n");
+    try terminal.expectFrom(from, "2 entries");
+    try terminal.write("q");
+    try terminal.expectPromptFrom(from);
+
+    from = transcript.items.len;
+    try terminal.write("command \"$TJ\" tui '@999'\n");
+    try terminal.expectFrom(from, "cannot open the journal browser");
+    try terminal.expectPromptFrom(from);
+    try std.testing.expect(std.mem.indexOf(u8, transcript.items[from..], "\x1b[?1049h") == null);
+
+    from = transcript.items.len;
     try terminal.write("print -r -- '1 nope' | command \"$TJ\" tui\n");
     try terminal.expectFrom(from, "tui stdin must contain space-separated entry numbers");
     try terminal.expectPromptFrom(from);
@@ -278,10 +306,10 @@ test "tui shows details, confirms deletion, and shares pin semantics" {
     defer gpa.free(home);
     const id = try journal.journalName(gpa);
     defer gpa.free(id);
-    const pinned = try support.runNonTtyInJournal(gpa, &.{ "--home", home, "pin" }, id, "");
+    const pinned = try support.runNonTtyInJournal(gpa, &.{ "--home", home, "pin", "--ids" }, id, "");
     defer gpa.free(pinned.stdout);
     defer gpa.free(pinned.stderr);
-    try std.testing.expect(std.mem.indexOf(u8, pinned.stdout, "@1") != null);
+    try std.testing.expect(std.mem.indexOf(u8, pinned.stdout, "1") != null);
     try std.testing.expectError(error.FileNotFound, journal.read(gpa, "2/cmd"));
     try std.testing.expectError(error.FileNotFound, journal.read(gpa, "3/cmd"));
     try std.testing.expectError(error.FileNotFound, journal.read(gpa, "4/cmd"));
@@ -317,7 +345,7 @@ test "grep numbers compose with tui and deduplicate matching entries" {
     try terminal.expectPromptFrom(from);
 
     from = transcript.items.len;
-    try terminal.write("command \"$TJ\" grep DEDUP_TUI_HIT --numbers | command \"$TJ\" tui\n");
+    try terminal.write("command \"$TJ\" grep DEDUP_TUI_HIT --ids | command \"$TJ\" tui\n");
     try terminal.expectFrom(from, "2 entries");
     const browser = transcript.items[from..];
     try std.testing.expect(std.mem.indexOf(u8, browser, "UNRELATED_TUI_ENTRY") == null);

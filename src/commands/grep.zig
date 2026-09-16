@@ -10,6 +10,7 @@ const pins = @import("../journal/pins.zig");
 const search = @import("../journal/search.zig");
 const report = @import("../presentation/report.zig");
 const cmd_context = @import("context.zig");
+const cmd_history = @import("history.zig");
 const presentation = @import("../presentation/entry.zig");
 
 pub fn grepRequestFromArgs(args: []const [:0]const u8) !GrepRequest {
@@ -27,7 +28,9 @@ pub const GrepRequest = struct {
     output: bool = true,
     ignore_case: bool = false,
     color: ColorWhen = .never,
+    color_supplied: bool = false,
     pattern: []const u8 = "",
+    targets: []const []const u8 = &.{},
 };
 
 pub const GrepStats = struct {
@@ -87,7 +90,7 @@ pub fn grepStatsSnapshot(stats: *const GrepStats) GrepStatsSnapshot {
 pub fn grepRequest(parsed: *const zecli.Parsed) !GrepRequest {
     var request: GrepRequest = .{
         .all = parsed.enabled("all"),
-        .numbers = parsed.enabled("numbers"),
+        .numbers = parsed.enabled("ids"),
         .ignore_case = parsed.enabled("ignore-case"),
     };
     if (parsed.enabled("cmd") or parsed.enabled("out")) {
@@ -96,16 +99,19 @@ pub fn grepRequest(parsed: *const zecli.Parsed) !GrepRequest {
     }
     if (parsed.last("color")) |value| {
         request.color = std.meta.stringToEnum(ColorWhen, value) orelse return error.BadArguments;
+        var i = parsed.flags.items.len;
+        while (i > 0) {
+            i -= 1;
+            const flag = parsed.flags.items[i];
+            if (!std.mem.eql(u8, flag.name, "color")) continue;
+            request.color_supplied = flag.source != .default;
+            break;
+        }
     }
     const positionals = parsed.positionals.items;
-    const passthrough = if (parsed.has_passthrough) parsed.passthrough.items else null;
-    request.pattern = if (passthrough) |literal| blk: {
-        if (positionals.len != 0 or literal.len != 1) return error.BadArguments;
-        break :blk literal[0];
-    } else blk: {
-        if (positionals.len != 1) return error.BadArguments;
-        break :blk positionals[0];
-    };
+    if (positionals.len == 0) return error.BadArguments;
+    request.pattern = positionals[0];
+    request.targets = positionals[1..];
     if (request.pattern.len == 0 or std.mem.indexOfScalar(u8, request.pattern, '\n') != null) {
         return error.BadArguments;
     }
@@ -116,11 +122,7 @@ pub fn colorEnabled(io: Io, when: ColorWhen) bool {
     return switch (when) {
         .never => false,
         .always => true,
-        .auto => blk: {
-            if (!sys.isTty(io, 1)) break :blk false;
-            const term = sys.env("TERM") orelse break :blk false;
-            break :blk term.len != 0 and !std.mem.eql(u8, term, "dumb");
-        },
+        .auto => report.layoutColorEnabled(io),
     };
 }
 
@@ -490,12 +492,17 @@ pub fn grepCommand(
 ) !u8 {
     const request = try grepRequest(parsed);
 
-    if (request.numbers and (request.all or parsed.present("color"))) return error.BadArguments;
+    if (request.all and request.targets.len != 0) return error.BadArguments;
+    if (request.numbers and request.all) return error.BadArguments;
 
     const current = sys.env("TJ_JOURNAL");
-    if (!request.all and (current == null or current.?.len == 0)) {
+    if (request.numbers and (current == null or current.?.len == 0)) {
+        cmd_context.note(io, "tj grep --ids: no current journal\n", .{});
+        return 2;
+    }
+    if (!request.all and request.targets.len == 0 and (current == null or current.?.len == 0)) {
         if (request.numbers) {
-            cmd_context.note(io, "tj grep --numbers: no current journal\n", .{});
+            cmd_context.note(io, "tj grep --ids: no current journal\n", .{});
         } else {
             cmd_context.note(io, "tj grep: no current journal; use --all\n", .{});
         }
@@ -511,7 +518,16 @@ pub fn grepCommand(
     if (request.numbers) {
         var numbers: std.ArrayList(u32) = .empty;
         defer numbers.deinit(gpa);
-        const entries = try listGrepNumbers(gpa, io, root, current.?, null);
+        const entries = if (request.targets.len == 0)
+            try listGrepNumbers(gpa, io, root, current.?, null)
+        else blk: {
+            var scope = try cmd_history.selectHistoryScope(gpa, io, root, request.targets, false, null);
+            defer scope.deinit(gpa);
+            for (scope.journals.items) |journal| {
+                if (!std.mem.eql(u8, journal.name, current.?)) return error.BadArguments;
+            }
+            break :blk try scope.selectedUniqueNumbers(gpa, 0);
+        };
         defer gpa.free(entries);
         try collectMatchingEntries(gpa, io, root, current.?, entries, request, active, &matcher, &numbers);
         if (numbers.items.len == 0) return 1;
@@ -521,11 +537,7 @@ pub fn grepCommand(
         };
         defer noout_region.finish();
         try noout_region.begin();
-        for (numbers.items, 0..) |number, index| {
-            if (index != 0) try out.writeByte(' ');
-            try out.print("{d}", .{number});
-        }
-        try out.writeByte('\n');
+        try cmd_context.writeNumbers(out, numbers.items);
         return 0;
     }
 
@@ -537,9 +549,9 @@ pub fn grepCommand(
             .out = out,
             .enabled = current != null and current.?.len != 0 and sys.isTty(io, 1),
         },
-        .match_sgr = if (colorEnabled(io, request.color)) selectedMatchSgr(sys.env("GREP_COLORS")) else "",
+        .match_sgr = if (request.color_supplied and colorEnabled(io, request.color)) selectedMatchSgr(sys.env("GREP_COLORS")) else "",
         .terminal_columns = terminal_columns,
-        .layout_color = report.layoutColorEnabled(io),
+        .layout_color = if (request.color_supplied) colorEnabled(io, request.color) else report.layoutColorEnabled(io),
         .reference_width = 1,
     };
     defer output.noout_region.finish();
@@ -566,7 +578,39 @@ pub fn grepCommand(
         }
         output.reference_width = grepReferenceWidth(entries.items, true);
         for (entries.items) |journal| {
-            try grepJournal(gpa, io, root, journal.name, journal.numbers, request, active, &matcher, &output, &total, null);
+            try grepJournal(gpa, io, root, journal.name, journal.numbers, true, request, active, &matcher, &output, &total, null);
+        }
+    } else if (request.targets.len != 0) {
+        var scope = try cmd_history.selectHistoryScope(gpa, io, root, request.targets, false, null);
+        defer scope.deinit(gpa);
+        var entries: std.ArrayList(JournalEntries) = .empty;
+        defer {
+            for (entries.items) |item| gpa.free(item.numbers);
+            entries.deinit(gpa);
+        }
+        var any_qualified = false;
+        for (scope.journals.items, 0..) |journal, journal_index| {
+            const numbers = try scope.selectedUniqueNumbers(gpa, journal_index);
+            errdefer gpa.free(numbers);
+            try entries.append(gpa, .{ .name = journal.name, .numbers = numbers });
+            any_qualified = any_qualified or scope.journalQualified(journal_index, current);
+        }
+        output.reference_width = grepReferenceWidth(entries.items, any_qualified);
+        for (entries.items, 0..) |journal, journal_index| {
+            try grepJournal(
+                gpa,
+                io,
+                root,
+                journal.name,
+                journal.numbers,
+                scope.journalQualified(journal_index, current),
+                request,
+                active,
+                &matcher,
+                &output,
+                &total,
+                null,
+            );
         }
     } else {
         const numbers = listGrepNumbers(gpa, io, root, current.?, null) catch |err| switch (err) {
@@ -575,7 +619,7 @@ pub fn grepCommand(
         };
         defer gpa.free(numbers);
         output.reference_width = grepReferenceWidth(&.{.{ .name = current.?, .numbers = numbers }}, false);
-        try grepJournal(gpa, io, root, current.?, numbers, request, active, &matcher, &output, &total, null);
+        try grepJournal(gpa, io, root, current.?, numbers, false, request, active, &matcher, &output, &total, null);
     }
     return if (total == 0) 1 else 0;
 }
@@ -1115,7 +1159,7 @@ test "grep traversal defers metadata and lists journal numbers once" {
         .stats = &no_match_stats,
     };
     var total: u64 = 0;
-    try grepJournal(gpa, io, tmp.dir, "work", listed, request, null, &absent, &no_match_output, &total, &no_match_stats);
+    try grepJournal(gpa, io, tmp.dir, "work", listed, false, request, null, &absent, &no_match_output, &total, &no_match_stats);
     const no_match_snapshot = grepStatsSnapshot(&no_match_stats);
     try std.testing.expectEqual(@as(usize, 0), no_match_snapshot.rc_probes);
     try std.testing.expectEqual(@as(usize, 0), no_match_snapshot.pin_probes);
@@ -1124,7 +1168,7 @@ test "grep traversal defers metadata and lists journal numbers once" {
     var match_output = no_match_output;
     match_output.stats = &match_stats;
     total = 0;
-    try grepJournal(gpa, io, tmp.dir, "work", listed, request, null, &matcher, &match_output, &total, &match_stats);
+    try grepJournal(gpa, io, tmp.dir, "work", listed, false, request, null, &matcher, &match_output, &total, &match_stats);
     const match_snapshot = grepStatsSnapshot(&match_stats);
     try std.testing.expectEqual(@as(u64, 4), total);
     try std.testing.expectEqual(@as(usize, 1), match_snapshot.rc_probes);
@@ -1138,6 +1182,7 @@ pub fn grepJournal(
     root: store.Dir,
     journal: []const u8,
     entry_numbers: []const u32,
+    qualified: bool,
     request: GrepRequest,
     active: ?cmd_context.ActiveInteraction,
     matcher: *const search.Matcher,
@@ -1147,7 +1192,7 @@ pub fn grepJournal(
 ) !void {
     var visitor: FormattedMatchVisitor = .{
         .output = output,
-        .qualified = request.all,
+        .qualified = qualified,
         .total = total,
         .stats = stats,
     };
@@ -1166,22 +1211,34 @@ test "grep arguments select resources and preserve literal syntax" {
     try std.testing.expectEqualStrings("-needle", leading.pattern);
 
     try std.testing.expectEqual(ColorWhen.never, (try grepRequestFromArgs(&.{"x"})).color);
-    try std.testing.expect((try grepRequestFromArgs(&.{ "x", "--numbers" })).numbers);
+    try std.testing.expect((try grepRequestFromArgs(&.{ "x", "--ids" })).numbers);
     const automatic = try grepRequestFromArgs(&.{ "--color", "auto", "x" });
     try std.testing.expectEqual(ColorWhen.auto, automatic.color);
     try std.testing.expectEqualStrings("x", automatic.pattern);
     try std.testing.expectEqual(ColorWhen.always, (try grepRequestFromArgs(&.{ "--color", "always", "x" })).color);
     try std.testing.expectEqual(ColorWhen.always, (try grepRequestFromArgs(&.{ "--colour=always", "x" })).color);
     try std.testing.expectEqual(ColorWhen.never, (try grepRequestFromArgs(&.{ "--color=never", "x" })).color);
+
+    // --ids output is always plain; combining it with any --color setting is
+    // accepted rather than rejected as a usage error.
+    const ids_with_color = try grepRequestFromArgs(&.{ "x", "--ids", "--color=always" });
+    try std.testing.expect(ids_with_color.numbers);
+    try std.testing.expectEqual(ColorWhen.always, ids_with_color.color);
 }
 
 test "grep rejects missing multiline extra and unknown patterns" {
-    try std.testing.expectError(error.BadArguments, grepRequestFromArgs(&.{}));
+    try std.testing.expectError(error.ReportedCliError, grepRequestFromArgs(&.{}));
     try std.testing.expectError(error.BadArguments, grepRequestFromArgs(&.{""}));
     try std.testing.expectError(error.BadArguments, grepRequestFromArgs(&.{"a\nb"}));
-    try std.testing.expectError(error.ReportedCliError, grepRequestFromArgs(&.{ "a", "b" }));
-    try std.testing.expectError(error.BadArguments, grepRequestFromArgs(&.{ "--", "a", "b" }));
-    try std.testing.expectError(error.BadArguments, grepRequestFromArgs(&.{ "a", "--", "b" }));
+    for ([_][]const [:0]const u8{
+        &.{ "a", "b" },
+        &.{ "--", "a", "b" },
+        &.{ "a", "--", "b" },
+    }) |args| {
+        var parsed = try cmd_context.parseTestCommand(.grep, args);
+        defer parsed.deinit(std.testing.allocator);
+        try std.testing.expectEqualStrings("b", (try grepRequest(&parsed)).targets[0]);
+    }
     try std.testing.expectError(error.ReportedCliError, grepRequestFromArgs(&.{ "--wat", "a" }));
     try std.testing.expectError(error.ReportedCliError, grepRequestFromArgs(&.{"--color"}));
     try std.testing.expectError(error.ReportedCliError, grepRequestFromArgs(&.{ "--color", "a" }));

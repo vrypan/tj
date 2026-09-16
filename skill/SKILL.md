@@ -30,10 +30,11 @@ the plain name.
 ## Start with the index, not the output
 
 ```sh
-tj hist
-tj hist @242
-tj hist @2..@10 @15
-tj hist @release-build.
+tj history
+tj history @242
+tj history @2..@10 @15
+tj history @release-build.
+tj history --ids @2..@10 | tj tui
 ```
 
 ```
@@ -49,7 +50,7 @@ The whole index is a few hundred tokens even for a long journal. The output
 of a single entry can be 50K. **Read the index first and fetch
 deliberately.**
 
-`tj hist` with no target lists the current journal. Pass one or more entry
+`tj history` with no target lists the current journal. Pass one or more entry
 references or inclusive numeric ranges to inspect exact entries. Use
 `@SUFFIX.` (including the trailing dot) to select an entire journal; bare
 journal suffixes are not accepted.
@@ -69,6 +70,7 @@ search narrowly instead of opening many outputs:
 ```sh
 tj grep --out 'connection refused'
 tj grep --cmd 'docker compose'
+tj grep 'connection refused' @2..@10 @release-build.42
 ```
 
 Results use history-like rows: two status flags, entry reference, `>` for
@@ -80,7 +82,7 @@ Displayed matching lines collapse horizontal whitespace; use `tj cat` for the
 original indentation or layout.
 
 Native grep is fixed-string search; it does not interpret regular expressions.
-Use `tj hist` to browse, and use `tj grep --all LITERAL` only when evidence from
+Use `tj history` to browse, and use `tj grep --all LITERAL` only when evidence from
 other journals is relevant. Search results are deliberately omitted from the
 current entry when displayed in its terminal, so they do not become the
 next search's output matches.
@@ -130,7 +132,7 @@ Do not do this blindly. If the question stands on its own, answer it. Fetch
 
 ## Reading exit status correctly
 
-- `tj hist` shows only nonzero statuses, as `!N`. No status means either
+- `tj history` shows only nonzero statuses, as `!N`. No status means either
   success or an unfinished entry; inspect the entry's `rc` resource when that
   distinction matters.
 - `rc` is the shell's status for the **whole line**. On a pipeline that is
@@ -181,19 +183,28 @@ complete names.
 Words such as `@handle` are not entry references and remain literal in an
 interactive command.
 
-Use `tj hist --pinned` (or `--pin`) to show only pinned entries.
+Use `tj history --pinned` (or `--pin`) to show only pinned entries.
+Use `tj history --pinned --ids` or the equivalent `tj pin --ids` when
+the selected IDs should feed `tj tui`. Numeric output is an ascending,
+deduplicated, current-journal-only space-separated line with no formatting.
 Direct terminal history is deliberately omitted from the entry recording with
 `<tj:noout>` so browsing the index does not duplicate it into the journal.
 Piped or redirected history remains ordinary output.
 Pins imply no retention policy, but protect an entry and its output from
-`tj rm`. Removal ranges skip pinned entries; use `tj rm --force REF` only
-when overriding that protection is deliberate. Whole-journal removal likewise
-requires `--force` while any pins remain.
+`tj rm`. Removal ranges skip pinned entries; use `tj rm --include-pinned REF`
+only when overriding that protection is deliberate. Whole-journal removal
+(`tjctl rm`) likewise requires `--force` while any pins remain.
 `tj rm` accepts multiple entry, output, and range targets in one invocation;
-targets are processed from left to right and one `--force` applies to all.
+targets are processed from left to right and one `--include-pinned` applies
+to all. A `-` target reads current-journal entry numbers from standard input
+(`tj grep err --ids | tj pin -`) for `history`, `pin`, and `rm`;
+`--ignore-missing` makes a missing target or an empty range harmless instead
+of an error.
 
 Do not add or remove pins unless the user asks. Pin updates and entry/output
 deletion are current-journal-only; qualified references are read-only.
+When asked, `tj pin` and `tj pin --remove` accept multiple unqualified entry
+references and ranges and validate the whole batch before changing markers.
 
 ## Published resources
 
@@ -204,7 +215,7 @@ under the entry:
 tj cat @42/files/data.csv
 ```
 
-`tj hist` does not list these. Check `@42/meta.json` for a `resources` map,
+`tj history` does not list these. Check `@42/meta.json` for a `resources` map,
 or run `tj complete '@42/'` to see what an entry holds.
 
 ## Output the user may want to reuse

@@ -35,7 +35,80 @@ pub const Error = error{
     BadArguments,
     InvalidMetadata,
     InsideJournalRemoval,
+    InvalidStdinSelection,
+    StdinSelectionTooLarge,
 };
+
+/// A batch entry-number selection read from redirected standard input, used
+/// where a command accepts explicit target operands or, in their absence,
+/// a piped list of current-journal entry numbers (`tj grep ... --ids | tj
+/// pin`). Mirrors the TUI's own filter-input parser: ASCII whitespace
+/// separators, no zero or malformed tokens, sorted and deduplicated, capped
+/// so a runaway pipe cannot exhaust memory.
+pub const max_stdin_selection_bytes = 4 * 1024 * 1024;
+
+pub fn readNumberSelection(gpa: std.mem.Allocator, io: Io) ![]u32 {
+    var reader_buffer: [4096]u8 = undefined;
+    var reader = Io.File.stdin().readerStreaming(io, &reader_buffer);
+    const input = reader.interface.allocRemaining(gpa, .limited(max_stdin_selection_bytes)) catch |err| switch (err) {
+        error.StreamTooLong => return error.StdinSelectionTooLarge,
+        else => return err,
+    };
+    defer gpa.free(input);
+    return parseNumberSelection(gpa, input);
+}
+
+pub const stdin_operand = "-";
+
+pub fn isStdinOperand(text: []const u8) bool {
+    return std.mem.eql(u8, text, stdin_operand);
+}
+
+/// Reads the entry-number selection a `-` operand names, or returns null when
+/// no operand is `-`. Standard input can be consumed only once.
+pub fn readStdinOperand(gpa: std.mem.Allocator, io: Io, operands: []const []const u8) !?[]u32 {
+    var count: usize = 0;
+    for (operands) |operand| {
+        if (isStdinOperand(operand)) count += 1;
+    }
+    if (count == 0) return null;
+    if (count > 1) return error.BadArguments;
+    return try readNumberSelection(gpa, io);
+}
+
+pub fn parseNumberSelection(gpa: std.mem.Allocator, input: []const u8) ![]u32 {
+    var numbers: std.ArrayList(u32) = .empty;
+    defer numbers.deinit(gpa);
+
+    var tokens = std.mem.tokenizeAny(u8, input, " \t\r\n\x0b\x0c");
+    while (tokens.next()) |token| {
+        const number = std.fmt.parseInt(u32, token, 10) catch return error.InvalidStdinSelection;
+        if (number == 0) return error.InvalidStdinSelection;
+        try numbers.append(gpa, number);
+    }
+
+    std.mem.sort(u32, numbers.items, {}, std.sort.asc(u32));
+    var unique: usize = 0;
+    for (numbers.items) |number| {
+        if (unique != 0 and numbers.items[unique - 1] == number) continue;
+        numbers.items[unique] = number;
+        unique += 1;
+    }
+    numbers.items.len = unique;
+    return numbers.toOwnedSlice(gpa);
+}
+
+test "number selection parsing is sorted, deduplicated, and rejects malformed tokens" {
+    const gpa = std.testing.allocator;
+    const numbers = try parseNumberSelection(gpa, "1002  100\n101\t1002\n");
+    defer gpa.free(numbers);
+    try std.testing.expectEqualSlices(u32, &.{ 100, 101, 1002 }, numbers);
+    try std.testing.expectError(error.InvalidStdinSelection, parseNumberSelection(gpa, "1 @2"));
+    try std.testing.expectError(error.InvalidStdinSelection, parseNumberSelection(gpa, "0"));
+    const empty = try parseNumberSelection(gpa, "   \n\t  ");
+    defer gpa.free(empty);
+    try std.testing.expectEqual(@as(usize, 0), empty.len);
+}
 
 pub fn parseTestCommand(which: cli.CommandName, args: []const [:0]const u8) !zecli.Parsed {
     var discard_buf: [1024]u8 = undefined;
@@ -233,6 +306,83 @@ pub fn openMutationTargets(
     return .{ .mutation = mutation, .numbers = numbers };
 }
 
+/// Resolve a batch of current-journal entry selectors under one mutation
+/// guard. The returned numbers are sorted and deduplicated, and no marker is
+/// changed until every operand has been validated.
+pub fn openMutationTargetList(
+    gpa: std.mem.Allocator,
+    io: Io,
+    home: ?[]const u8,
+    refs: []const []const u8,
+    stdin_numbers: ?[]const u32,
+) !MutationTargets {
+    var mutation = try openCurrentMutation(gpa, io, home, .exclusive);
+    errdefer mutation.deinit(io);
+    const numbers = try selectCurrentNumbers(gpa, io, mutation.root, mutation.journal, refs, stdin_numbers);
+    return .{ .mutation = mutation, .numbers = numbers };
+}
+
+/// Resolve only unqualified current-journal entry references and ranges.
+/// Paths, resources, qualified references, and empty ranges are rejected.
+/// A `-` operand contributes `stdin_numbers`, which must all exist.
+pub fn selectCurrentNumbers(
+    gpa: std.mem.Allocator,
+    io: Io,
+    root: store.Dir,
+    journal: []const u8,
+    refs: []const []const u8,
+    stdin_numbers: ?[]const u32,
+) ![]u32 {
+    const existing = try store.listNumbers(gpa, io, root, journal);
+    defer gpa.free(existing);
+
+    var selected: std.ArrayList(u32) = .empty;
+    defer selected.deinit(gpa);
+    for (refs) |text| {
+        if (isStdinOperand(text)) {
+            const numbers = stdin_numbers orelse return error.BadReference;
+            for (numbers) |number| {
+                if (std.mem.indexOfScalar(u32, existing, number) == null) return error.NoSuchInteraction;
+                try selected.append(gpa, number);
+            }
+            continue;
+        }
+        if (try parseInteractionRange(text)) |range| {
+            if (!rangeSelectsAny(existing, range)) return error.NoSuchInteraction;
+            for (existing) |number| if (range.contains(number)) try selected.append(gpa, number);
+            continue;
+        }
+
+        const parsed_ref = reference.parse(text) catch |err| switch (err) {
+            error.Malformed, error.NotAReference => return error.BadReference,
+        };
+        switch (parsed_ref.body) {
+            .qualified => return error.CrossJournalMutation,
+            else => {},
+        }
+        if (parsed_ref.subpath.len != 0 or parsed_ref.trailing_slash) return error.BadReference;
+
+        const target = try locateCommandTarget(gpa, io, root, text);
+        defer target.deinit(gpa);
+        if (target.syntactically_qualified or !std.mem.eql(u8, target.journal, journal)) {
+            return error.CrossJournalMutation;
+        }
+        try requireInteraction(target);
+        if (std.mem.indexOfScalar(u32, existing, target.number) == null) return error.NoSuchInteraction;
+        try selected.append(gpa, target.number);
+    }
+
+    std.mem.sort(u32, selected.items, {}, std.sort.asc(u32));
+    var unique: usize = 0;
+    for (selected.items) |number| {
+        if (unique != 0 and selected.items[unique - 1] == number) continue;
+        selected.items[unique] = number;
+        unique += 1;
+    }
+    selected.items.len = unique;
+    return selected.toOwnedSlice(gpa);
+}
+
 /// The existing entries a range covers, refusing a range that selects none.
 pub fn selectedNumbers(
     gpa: std.mem.Allocator,
@@ -289,6 +439,14 @@ pub fn parseInteractionRangeEndpoint(text: []const u8) !u32 {
 pub fn rangeSelectsAny(numbers: []const u32, range: InteractionRange) bool {
     for (numbers) |number| if (range.contains(number)) return true;
     return false;
+}
+
+pub fn writeNumbers(out: *Io.Writer, numbers: []const u32) !void {
+    for (numbers, 0..) |number, index| {
+        if (index != 0) try out.writeByte(' ');
+        try out.print("{d}", .{number});
+    }
+    if (numbers.len != 0) try out.writeByte('\n');
 }
 
 test "entry ranges are inclusive numeric current-journal references" {

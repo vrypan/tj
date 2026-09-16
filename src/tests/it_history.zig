@@ -20,7 +20,7 @@ test "history wraps to terminal width and pipes remain one entry per line" {
     const home = try journal.homeArg(gpa);
     defer gpa.free(home);
 
-    var wrapped = try support.run(gpa, &.{ "--home", home, "hist" }, 24, 48);
+    var wrapped = try support.run(gpa, &.{ "--home", home, "history" }, 24, 48);
     defer wrapped.out.deinit(gpa);
     try std.testing.expectEqual(@as(u8, 0), wrapped.code);
     const begin_at = std.mem.indexOf(u8, wrapped.out.items, noout.begin_marker) orelse return error.TestUnexpectedResult;
@@ -41,7 +41,28 @@ test "history wraps to terminal width and pipes remain one entry per line" {
 
     const id = try journal.journalName(gpa);
     defer gpa.free(id);
-    const piped = try support.runNonTtyInJournal(gpa, &.{ "--home", home, "hist" }, id, "3");
+
+    const cat_after_separator = try support.runNonTtyInJournal(
+        gpa,
+        &.{ "--home", home, "cat", "--", "@1/out" },
+        id,
+        "6",
+    );
+    defer gpa.free(cat_after_separator.stdout);
+    defer gpa.free(cat_after_separator.stderr);
+    try std.testing.expectEqual(@as(u8, 0), cat_after_separator.term.exited);
+    try std.testing.expect(std.mem.indexOf(u8, cat_after_separator.stdout, "one two three") != null);
+    const resolve_after_separator = try support.runNonTtyInJournal(
+        gpa,
+        &.{ "--home", home, "resolve", "--", "@1" },
+        id,
+        "6",
+    );
+    defer gpa.free(resolve_after_separator.stdout);
+    defer gpa.free(resolve_after_separator.stderr);
+    try std.testing.expectEqual(@as(u8, 0), resolve_after_separator.term.exited);
+    try std.testing.expect(std.mem.endsWith(u8, resolve_after_separator.stdout, "/1\n"));
+    const piped = try support.runNonTtyInJournal(gpa, &.{ "--home", home, "history", "@1..@999999" }, id, "3");
     defer gpa.free(piped.stdout);
     defer gpa.free(piped.stderr);
     try std.testing.expectEqual(@as(u8, 0), piped.term.exited);
@@ -68,12 +89,12 @@ test "terminal history omits its listing while piped history remains recordable"
     try terminal.expectPromptFrom(from);
 
     from = transcript.items.len;
-    try terminal.write("command \"$TJ\" hist\n");
+    try terminal.write("command \"$TJ\" history\n");
     try terminal.expectFrom(from, "HIST_NOOUT_PAYLOAD_012");
     try terminal.expectPromptFrom(from);
 
     from = transcript.items.len;
-    try terminal.write("command \"$TJ\" hist | cat\n");
+    try terminal.write("command \"$TJ\" history | cat\n");
     try terminal.expectFrom(from, "HIST_NOOUT_PAYLOAD_012");
     try terminal.expectPromptFrom(from);
     try terminal.write("exit 0\n");
@@ -125,7 +146,7 @@ test "history shows pin and failure flags size UTC date and wrapped commands" {
 
     const id = try journal.journalName(gpa);
     defer gpa.free(id);
-    const plain_result = try support.runNonTtyInJournal(gpa, &.{ "--home", home, "hist" }, id, "4");
+    const plain_result = try support.runNonTtyInJournal(gpa, &.{ "--home", home, "history", "@1..@999999" }, id, "4");
     defer gpa.free(plain_result.stdout);
     defer gpa.free(plain_result.stderr);
     try std.testing.expectEqual(@as(u8, 0), plain_result.term.exited);
@@ -137,7 +158,7 @@ test "history shows pin and failure flags size UTC date and wrapped commands" {
     // Keep this child raw: the PTY-rendered byte stream itself is the subject,
     // not an interactive journal shell that needs setup or prompt handling.
     const terminal_child = try support.spawnTj(gpa, &.{
-        "/usr/bin/env", "-u", "NO_COLOR", "TERM=xterm-256color", support.tj, "--home", home, "hist",
+        "/usr/bin/env", "-u", "NO_COLOR", "TERM=xterm-256color", support.tj, "--home", home, "history",
     }, 24, 48);
     var terminal: std.ArrayList(u8) = .empty;
     defer terminal.deinit(gpa);
@@ -156,18 +177,61 @@ test "history shows pin and failure flags size UTC date and wrapped commands" {
     try std.testing.expect(visible.len >= continuation + 23);
     for (visible[continuation .. continuation + 23]) |byte| try std.testing.expectEqual(@as(u8, ' '), byte);
 
-    var filtered = try support.run(gpa, &.{ "--home", home, "hist", "--pinned" }, 24, 120);
+    var filtered = try support.run(gpa, &.{ "--home", home, "history", "--pinned" }, 24, 120);
     defer filtered.out.deinit(gpa);
     try std.testing.expectEqual(@as(u8, 0), filtered.code);
     try std.testing.expect(std.mem.indexOf(u8, filtered.out.items, "printf 1234567890") != null);
     try std.testing.expect(std.mem.indexOf(u8, filtered.out.items, "false") == null);
 
-    const pinned = try support.runNonTtyInJournal(gpa, &.{ "--home", home, "hist", "--pinned" }, id, "4");
+    const pinned = try support.runNonTtyInJournal(gpa, &.{ "--home", home, "history", "--pinned", "@1..@999999" }, id, "4");
     defer gpa.free(pinned.stdout);
     defer gpa.free(pinned.stderr);
     try std.testing.expectEqual(@as(u8, 0), pinned.term.exited);
     try std.testing.expect(std.mem.indexOf(u8, pinned.stdout, "printf 1234567890") != null);
     try std.testing.expect(std.mem.indexOf(u8, pinned.stdout, "false") == null);
+
+    const numeric = try support.runNonTtyInJournal(
+        gpa,
+        &.{ "--home", home, "history", "--ids", "@2", "@1..@2", "@1" },
+        id,
+        "4",
+    );
+    defer gpa.free(numeric.stdout);
+    defer gpa.free(numeric.stderr);
+    try std.testing.expectEqual(@as(u8, 0), numeric.term.exited);
+    try std.testing.expectEqualStrings("1 2\n", numeric.stdout);
+    try std.testing.expectEqualStrings("", numeric.stderr);
+    try std.testing.expect(std.mem.indexOfScalar(u8, numeric.stdout, 0x1b) == null);
+
+    const qualified_current = try std.fmt.allocPrint(gpa, "@{s}.1", .{id});
+    defer gpa.free(qualified_current);
+    const qualified_numeric = try support.runNonTtyInJournal(
+        gpa,
+        &.{ "--home", home, "history", "--ids", qualified_current },
+        id,
+        "4",
+    );
+    defer gpa.free(qualified_numeric.stdout);
+    defer gpa.free(qualified_numeric.stderr);
+    try std.testing.expectEqualStrings("1\n", qualified_numeric.stdout);
+
+    const history_pins = try support.runNonTtyInJournal(
+        gpa,
+        &.{ "--home", home, "history", "--pinned", "--ids", "@1..@999999" },
+        id,
+        "4",
+    );
+    defer gpa.free(history_pins.stdout);
+    defer gpa.free(history_pins.stderr);
+    const pin_numbers = try support.runNonTtyInJournal(gpa, &.{ "--home", home, "pin", "--ids" }, id, "4");
+    defer gpa.free(pin_numbers.stdout);
+    defer gpa.free(pin_numbers.stderr);
+    try std.testing.expectEqual(@as(u8, 0), history_pins.term.exited);
+    try std.testing.expectEqualStrings("", history_pins.stderr);
+    try std.testing.expectEqual(@as(u8, 0), pin_numbers.term.exited);
+    try std.testing.expectEqualStrings("", pin_numbers.stderr);
+    try std.testing.expectEqualStrings("1\n", history_pins.stdout);
+    try std.testing.expectEqualStrings(history_pins.stdout, pin_numbers.stdout);
 
     // Columns are fixed rather than fitted to whatever a filter matched, so a
     // narrowed listing lines up with the full one instead of shifting left.
@@ -175,14 +239,28 @@ test "history shows pin and failure flags size UTC date and wrapped commands" {
     try std.testing.expect(std.mem.indexOf(u8, plain_result.stdout, whole_line) != null);
     try std.testing.expect(std.mem.indexOf(u8, pinned.stdout, whole_line) != null);
     for ([_][]const []const u8{
-        &.{ "--home", home, "hist", "@1" },
-        &.{ "--home", home, "hist", "@1..@1" },
+        &.{ "--home", home, "history", "@1" },
+        &.{ "--home", home, "history", "@1..@1" },
     }) |args| {
         const narrowed = try support.runNonTtyInJournal(gpa, args, id, "4");
         defer gpa.free(narrowed.stdout);
         defer gpa.free(narrowed.stderr);
         try std.testing.expect(std.mem.indexOf(u8, narrowed.stdout, whole_line) != null);
     }
+
+    const unpin_after_target = try support.runNonTtyInJournal(
+        gpa,
+        &.{ "--home", home, "pin", "@1", "--remove" },
+        id,
+        "4",
+    );
+    defer gpa.free(unpin_after_target.stdout);
+    defer gpa.free(unpin_after_target.stderr);
+    try std.testing.expectEqual(@as(u8, 0), unpin_after_target.term.exited);
+    const empty_pins = try support.runNonTtyInJournal(gpa, &.{ "--home", home, "pin", "--ids" }, id, "4");
+    defer gpa.free(empty_pins.stdout);
+    defer gpa.free(empty_pins.stderr);
+    try std.testing.expectEqualStrings("", empty_pins.stdout);
 }
 
 test "history accepts ordered entry ranges and trailing-dot journal selectors" {
@@ -209,7 +287,7 @@ test "history accepts ordered entry ranges and trailing-dot journal selectors" {
 
     const selected = try support.runNonTtyInJournal(
         gpa,
-        &.{ "--home", home, "hist", "@4", "@1..@3" },
+        &.{ "--home", home, "history", "@4", "@1..@3" },
         id,
         "5",
     );
@@ -240,7 +318,7 @@ test "history accepts ordered entry ranges and trailing-dot journal selectors" {
     defer gpa.free(journal_selector);
     const mixed = try support.runNonTtyInJournal(
         gpa,
-        &.{ "--home", home, "hist", "@2", journal_selector, "@1" },
+        &.{ "--home", home, "history", "@2", journal_selector, "@1" },
         id,
         "5",
     );
@@ -255,7 +333,18 @@ test "history accepts ordered entry ranges and trailing-dot journal selectors" {
     defer gpa.free(qualified);
     try std.testing.expect(std.mem.indexOf(u8, mixed.stdout, qualified) != null);
 
-    const bare = try support.runNonTtyInJournal(gpa, &.{ "--home", home, "hist", suffix }, id, "5");
+    const foreign_numeric = try support.runNonTtyInJournal(
+        gpa,
+        &.{ "--home", home, "history", "--ids", "@1", journal_selector },
+        id,
+        "5",
+    );
+    defer gpa.free(foreign_numeric.stdout);
+    defer gpa.free(foreign_numeric.stderr);
+    try std.testing.expectEqual(@as(u8, 2), foreign_numeric.term.exited);
+    try std.testing.expectEqualStrings("", foreign_numeric.stdout);
+
+    const bare = try support.runNonTtyInJournal(gpa, &.{ "--home", home, "history", suffix }, id, "5");
     defer gpa.free(bare.stdout);
     defer gpa.free(bare.stderr);
     try std.testing.expectEqual(@as(u8, 1), bare.term.exited);
@@ -322,4 +411,148 @@ test "pin and cat ranges are inclusive and skip numbering holes" {
     try std.testing.expectEqual(@as(u8, 1), recursive.term.exited);
     try std.testing.expectEqualStrings("", recursive.stdout);
     try std.testing.expect(std.mem.indexOf(u8, recursive.stderr, "currently running entry") != null);
+}
+
+test "history and pin read entry numbers from stdin only through a - target" {
+    if (!support.haveZsh()) return error.SkipZigTest;
+    const gpa = std.testing.allocator;
+    var journal = try support.Journal.open(gpa);
+    defer journal.close();
+
+    const child = try support.spawnJournalZsh(gpa, &journal);
+    var terminal = support.TerminalSession.init(gpa, child);
+    defer terminal.deinit();
+    const transcript = &terminal.transcript;
+    try terminal.setupZsh("");
+
+    for ([_][]const u8{
+        "echo STDIN_SELECT_ONE\n",
+        "echo STDIN_SELECT_TWO\n",
+        "echo STDIN_SELECT_THREE\n",
+    }) |command| {
+        const from = transcript.items.len;
+        try terminal.write(command);
+        try terminal.expectPromptFrom(from);
+    }
+
+    try journal.enter(gpa);
+    const home = try journal.homeArg(gpa);
+    defer gpa.free(home);
+    const id = try journal.journalName(gpa);
+    defer gpa.free(id);
+
+    // A - target selects the current-journal entries named on stdin.
+    var from = transcript.items.len;
+    try terminal.write("print -r -- '3 1' | command \"$TJ\" history -\n");
+    try terminal.expectFrom(from, "STDIN_SELECT_ONE");
+    try terminal.expectFrom(from, "STDIN_SELECT_THREE");
+    try terminal.expectPromptFrom(from);
+    try std.testing.expect(std.mem.indexOf(u8, transcript.items[from..], "STDIN_SELECT_TWO") == null);
+
+    // A piped stdin without - is ignored: history still lists the journal.
+    from = transcript.items.len;
+    try terminal.write("print -r -- '1' | command \"$TJ\" history --ids; print -r -- \"STDIN_IGNORED_RC=$?\"\n");
+    try terminal.expectFrom(from, "1 2 3");
+    try terminal.expectFrom(from, "STDIN_IGNORED_RC=0");
+    try terminal.expectPromptFrom(from);
+
+    // A stale id is rejected before anything is printed.
+    from = transcript.items.len;
+    try terminal.write("print -r -- '999' | command \"$TJ\" history -; print -r -- \"STDIN_HISTORY_RC=$?\"\n");
+    try terminal.expectFrom(from, "STDIN_HISTORY_RC=1");
+    try std.testing.expect(std.mem.indexOf(u8, transcript.items[from..], "STDIN_SELECT_ONE") == null);
+    try terminal.expectPromptFrom(from);
+
+    // Empty input behind - selects nothing rather than everything.
+    from = transcript.items.len;
+    try terminal.write("command \"$TJ\" history - </dev/null; print -r -- \"STDIN_EMPTY_RC=$?\"\n");
+    try terminal.expectFrom(from, "STDIN_EMPTY_RC=0");
+    try std.testing.expect(std.mem.indexOf(u8, transcript.items[from..], "STDIN_SELECT_ONE") == null);
+    try terminal.expectPromptFrom(from);
+
+    // Pin combines - with ordinary targets in one batch.
+    from = transcript.items.len;
+    try terminal.write("print -r -- '2' | command \"$TJ\" pin '@3' -; print -r -- \"PIN_RC=$?\"\n");
+    try terminal.expectFrom(from, "PIN_RC=0");
+    try terminal.expectPromptFrom(from);
+    try terminal.write("exit 0\n");
+    try std.testing.expectEqual(@as(u8, 0), try terminal.finish());
+
+    const pinned = try support.runNonTtyInJournal(gpa, &.{ "--home", home, "pin", "--ids" }, id, "4");
+    defer gpa.free(pinned.stdout);
+    defer gpa.free(pinned.stderr);
+    try std.testing.expectEqualStrings("2 3\n", pinned.stdout);
+
+    // With non-terminal stdin and no targets, history and pin still list.
+    const listed = try support.runNonTtyInJournal(gpa, &.{ "--home", home, "history", "--ids" }, id, "4");
+    defer gpa.free(listed.stdout);
+    defer gpa.free(listed.stderr);
+    try std.testing.expectEqual(@as(u8, 0), listed.term.exited);
+    try std.testing.expect(std.mem.startsWith(u8, listed.stdout, "1 2 3 4 "));
+    const pins_listed = try support.runNonTtyInJournal(gpa, &.{ "--home", home, "pin" }, id, "4");
+    defer gpa.free(pins_listed.stdout);
+    defer gpa.free(pins_listed.stderr);
+    try std.testing.expectEqualStrings("@2\n@3\n", pins_listed.stdout);
+
+    // Empty input behind - changes no pins, and - may be given only once.
+    const empty_stdin = try support.runNonTtyInJournal(gpa, &.{ "--home", home, "pin", "--remove", "-" }, id, "4");
+    defer gpa.free(empty_stdin.stdout);
+    defer gpa.free(empty_stdin.stderr);
+    try std.testing.expectEqual(@as(u8, 0), empty_stdin.term.exited);
+    const twice = try support.runNonTtyInJournal(gpa, &.{ "--home", home, "history", "-", "-" }, id, "4");
+    defer gpa.free(twice.stdout);
+    defer gpa.free(twice.stderr);
+    try std.testing.expectEqual(@as(u8, 2), twice.term.exited);
+    const after = try support.runNonTtyInJournal(gpa, &.{ "--home", home, "pin", "--ids" }, id, "4");
+    defer gpa.free(after.stdout);
+    defer gpa.free(after.stderr);
+    try std.testing.expectEqualStrings("2 3\n", after.stdout);
+}
+
+test "history colors auto-detect, obey TJ_COLOR, and stay plain under --ids" {
+    if (!support.haveZsh()) return error.SkipZigTest;
+    const gpa = std.testing.allocator;
+    var journal = try support.Journal.open(gpa);
+    defer journal.close();
+    try support.recordJournal(gpa, &journal, &.{"echo COLOR_TEST"});
+    try journal.enter(gpa);
+    const home = try journal.homeArg(gpa);
+    defer gpa.free(home);
+
+    // Auto: a real terminal gets colored output by default.
+    const terminal_child = try support.spawnTj(gpa, &.{
+        "/usr/bin/env", "-u", "NO_COLOR", "TERM=xterm-256color", support.tj, "--home", home, "history",
+    }, 24, 80);
+    var terminal_out: std.ArrayList(u8) = .empty;
+    defer terminal_out.deinit(gpa);
+    try std.testing.expectEqual(@as(u8, 0), try terminal_child.finish(gpa, &terminal_out, support.timeout_ms));
+    try std.testing.expect(std.mem.indexOfScalar(u8, terminal_out.items, 0x1b) != null);
+
+    // Explicit --color=always colors even a redirected pipe.
+    const forced = try support.runNonTty(gpa, &.{ "--home", home, "history", "--color=always", "@1" });
+    defer gpa.free(forced.stdout);
+    defer gpa.free(forced.stderr);
+    try std.testing.expect(std.mem.indexOfScalar(u8, forced.stdout, 0x1b) != null);
+
+    // TJ_COLOR sits between the command line and the command's own default.
+    var environ = try support.sys.environMap().clone(gpa);
+    defer environ.deinit();
+    try environ.put("TJ_COLOR", "always");
+    const via_env = try std.process.run(gpa, std.testing.io, .{
+        .argv = &.{ support.tj, "--home", home, "history", "@1" },
+        .environ_map = &environ,
+        .stdout_limit = .limited(1 << 20),
+        .stderr_limit = .limited(1 << 20),
+    });
+    defer gpa.free(via_env.stdout);
+    defer gpa.free(via_env.stderr);
+    try std.testing.expect(std.mem.indexOfScalar(u8, via_env.stdout, 0x1b) != null);
+
+    // --ids output stays plain no matter what color setting is combined with
+    // it: the flag is accepted rather than rejected as a usage error.
+    const ids_with_color = try support.runNonTty(gpa, &.{ "--home", home, "history", "--ids", "--color=always", "@1" });
+    defer gpa.free(ids_with_color.stdout);
+    defer gpa.free(ids_with_color.stderr);
+    try std.testing.expectEqual(@as(u8, 0), ids_with_color.term.exited);
+    try std.testing.expectEqualStrings("1\n", ids_with_color.stdout);
 }

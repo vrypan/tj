@@ -6,7 +6,7 @@ An agent started inside a journal inherits `TJ_JOURNAL`, `TJ_HOME`, `TJ`, and
 `TJCTL`. It can inspect recent work with small, explicit reads:
 
 ```sh
-tj hist
+tj history
 tj cat --tail 40 @42
 tj cat @42/cmd @42/rc
 ```

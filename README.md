@@ -11,7 +11,7 @@ again.
 ```sh
 curl -s https://example.com/data.json   # recorded as entry 1
 jq .items "$(tj @1/out)"
-tj hist
+tj history
 tj cat @1
 tj grep error
 tj tui
@@ -126,12 +126,14 @@ titles, and deletion.
 Inside a journal:
 
 ```sh
-tj hist                       # list entries
-tj hist @12                   # show details for one entry
+tj history                    # list entries
+tj history @12                # show details for one entry
+tj history --ids @10..@20     # print IDs for a pipeline
 tj cat @12                    # show recorded output
 tj cat @12/out                # show only recorded output
-tj grep 'connection refused'  # search commands and output
-tj pin @12
+tj grep 'connection refused' @10..@20 # search selected entries
+tj pin @12 @15..@18
+tj pin --ids | tj tui
 tj rm @15..@18
 ```
 
