@@ -58,6 +58,24 @@ pub fn readNumberSelection(gpa: std.mem.Allocator, io: Io) ![]u32 {
     return parseNumberSelection(gpa, input);
 }
 
+pub const stdin_operand = "-";
+
+pub fn isStdinOperand(text: []const u8) bool {
+    return std.mem.eql(u8, text, stdin_operand);
+}
+
+/// Reads the entry-number selection a `-` operand names, or returns null when
+/// no operand is `-`. Standard input can be consumed only once.
+pub fn readStdinOperand(gpa: std.mem.Allocator, io: Io, operands: []const []const u8) !?[]u32 {
+    var count: usize = 0;
+    for (operands) |operand| {
+        if (isStdinOperand(operand)) count += 1;
+    }
+    if (count == 0) return null;
+    if (count > 1) return error.BadArguments;
+    return try readNumberSelection(gpa, io);
+}
+
 pub fn parseNumberSelection(gpa: std.mem.Allocator, input: []const u8) ![]u32 {
     var numbers: std.ArrayList(u32) = .empty;
     defer numbers.deinit(gpa);
@@ -296,21 +314,24 @@ pub fn openMutationTargetList(
     io: Io,
     home: ?[]const u8,
     refs: []const []const u8,
+    stdin_numbers: ?[]const u32,
 ) !MutationTargets {
     var mutation = try openCurrentMutation(gpa, io, home, .exclusive);
     errdefer mutation.deinit(io);
-    const numbers = try selectCurrentNumbers(gpa, io, mutation.root, mutation.journal, refs);
+    const numbers = try selectCurrentNumbers(gpa, io, mutation.root, mutation.journal, refs, stdin_numbers);
     return .{ .mutation = mutation, .numbers = numbers };
 }
 
 /// Resolve only unqualified current-journal entry references and ranges.
 /// Paths, resources, qualified references, and empty ranges are rejected.
+/// A `-` operand contributes `stdin_numbers`, which must all exist.
 pub fn selectCurrentNumbers(
     gpa: std.mem.Allocator,
     io: Io,
     root: store.Dir,
     journal: []const u8,
     refs: []const []const u8,
+    stdin_numbers: ?[]const u32,
 ) ![]u32 {
     const existing = try store.listNumbers(gpa, io, root, journal);
     defer gpa.free(existing);
@@ -318,6 +339,14 @@ pub fn selectCurrentNumbers(
     var selected: std.ArrayList(u32) = .empty;
     defer selected.deinit(gpa);
     for (refs) |text| {
+        if (isStdinOperand(text)) {
+            const numbers = stdin_numbers orelse return error.BadReference;
+            for (numbers) |number| {
+                if (std.mem.indexOfScalar(u32, existing, number) == null) return error.NoSuchInteraction;
+                try selected.append(gpa, number);
+            }
+            continue;
+        }
         if (try parseInteractionRange(text)) |range| {
             if (!rangeSelectsAny(existing, range)) return error.NoSuchInteraction;
             for (existing) |number| if (range.contains(number)) try selected.append(gpa, number);

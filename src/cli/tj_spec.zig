@@ -63,7 +63,6 @@ const pin_flags = [_]zecli.FlagSpec{
 const rm_flags = [_]zecli.FlagSpec{
     .{ .name = "include-pinned", .short = 'p', .description = "Remove pinned entries instead of skipping them" },
     .{ .name = "ignore-missing", .description = "Ignore targets that do not exist" },
-    .{ .name = "stdin", .description = "Read targets as entry numbers from standard input" },
 };
 
 const grep_flags = [_]zecli.FlagSpec{
@@ -121,12 +120,15 @@ const commands = [_]zecli.CommandSpec{
         .flags = &hist_flags,
         .arguments = &.{.{
             .name = "TARGET",
-            .description = "Entry reference, numeric range, or @journal-name.",
+            .description = "Entry reference, numeric range, @journal-name., or - for stdin",
             .repeatable = true,
             .completion = reference_completion,
         }},
         .double_dash = .positionals,
-        .extra_help = "With no targets, list the current journal. A trailing dot selects an entire journal: @release-build.\n",
+        .extra_help =
+        \\With no targets, list the current journal. A trailing dot selects an entire journal: @release-build.
+        \\A - target reads whitespace-separated current-journal entry numbers from standard input.
+        ++ "\n",
     },
     .{ .name = "last", .description = "Print the last completed entry number", .usage = "tj last", .double_dash = .positionals },
     .{
@@ -163,25 +165,27 @@ const commands = [_]zecli.CommandSpec{
         .description = "Pin, unpin, or list pinned entries",
         .usage = "tj pin [--remove] [TARGET...]",
         .flags = &pin_flags,
-        .arguments = &.{.{ .name = "TARGET", .description = "Entry reference or numeric range", .repeatable = true, .completion = reference_completion }},
+        .arguments = &.{.{ .name = "TARGET", .description = "Entry reference, numeric range, or - for stdin", .repeatable = true, .completion = reference_completion }},
         .double_dash = .positionals,
+        .extra_help = "A - target reads whitespace-separated current-journal entry numbers from standard input.\n",
     },
     .{
         .name = "rm",
         .description = "Remove recorded entry data",
-        .usage = "tj rm [options] (<TARGET>... | --stdin)",
+        .usage = "tj rm [options] <TARGET>...",
         .flags = &rm_flags,
         .arguments = &.{.{
             .name = "TARGET",
-            .description = "Entry, out resource, or numeric range",
+            .description = "Entry, out resource, numeric range, or - for stdin",
+            .required = true,
             .repeatable = true,
             .completion = reference_completion,
         }},
         .double_dash = .positionals,
         .extra_help =
-        \\Pinned targets are skipped unless --include-pinned is present. Exactly
-        \\one of explicit TARGET operands or --stdin is required; --stdin reads
-        \\whitespace-separated current-journal entry numbers.
+        \\Pinned targets are skipped unless --include-pinned is present. A - target
+        \\reads whitespace-separated current-journal entry numbers from standard
+        \\input and removes them as one batch.
         ++ "\n",
     },
     .{

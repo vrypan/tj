@@ -413,7 +413,7 @@ test "pin and cat ranges are inclusive and skip numbering holes" {
     try std.testing.expect(std.mem.indexOf(u8, recursive.stderr, "currently running entry") != null);
 }
 
-test "history and pin select entries from redirected stdin when no targets are given" {
+test "history and pin read entry numbers from stdin only through a - target" {
     if (!support.haveZsh()) return error.SkipZigTest;
     const gpa = std.testing.allocator;
     var journal = try support.Journal.open(gpa);
@@ -441,32 +441,39 @@ test "history and pin select entries from redirected stdin when no targets are g
     const id = try journal.journalName(gpa);
     defer gpa.free(id);
 
-    // A redirected, non-empty stdin selects those current-journal entries
-    // instead of the terminal-stdin default of the whole journal.
+    // A - target selects the current-journal entries named on stdin.
     var from = transcript.items.len;
-    try terminal.write("print -r -- '3 1' | command \"$TJ\" history\n");
+    try terminal.write("print -r -- '3 1' | command \"$TJ\" history -\n");
     try terminal.expectFrom(from, "STDIN_SELECT_ONE");
     try terminal.expectFrom(from, "STDIN_SELECT_THREE");
     try terminal.expectPromptFrom(from);
     try std.testing.expect(std.mem.indexOf(u8, transcript.items[from..], "STDIN_SELECT_TWO") == null);
 
+    // A piped stdin without - is ignored: history still lists the journal.
+    from = transcript.items.len;
+    try terminal.write("print -r -- '1' | command \"$TJ\" history --ids; print -r -- \"STDIN_IGNORED_RC=$?\"\n");
+    try terminal.expectFrom(from, "1 2 3");
+    try terminal.expectFrom(from, "STDIN_IGNORED_RC=0");
+    try terminal.expectPromptFrom(from);
+
     // A stale id is rejected before anything is printed.
     from = transcript.items.len;
-    try terminal.write("print -r -- '999' | command \"$TJ\" history; print -r -- \"STDIN_HISTORY_RC=$?\"\n");
+    try terminal.write("print -r -- '999' | command \"$TJ\" history -; print -r -- \"STDIN_HISTORY_RC=$?\"\n");
     try terminal.expectFrom(from, "STDIN_HISTORY_RC=1");
     try std.testing.expect(std.mem.indexOf(u8, transcript.items[from..], "STDIN_SELECT_ONE") == null);
     try terminal.expectPromptFrom(from);
 
-    // Empty redirected input selects nothing rather than everything.
+    // Empty input behind - selects nothing rather than everything.
     from = transcript.items.len;
-    try terminal.write("command \"$TJ\" history </dev/null; print -r -- \"STDIN_EMPTY_RC=$?\"\n");
+    try terminal.write("command \"$TJ\" history - </dev/null; print -r -- \"STDIN_EMPTY_RC=$?\"\n");
     try terminal.expectFrom(from, "STDIN_EMPTY_RC=0");
     try std.testing.expect(std.mem.indexOf(u8, transcript.items[from..], "STDIN_SELECT_ONE") == null);
     try terminal.expectPromptFrom(from);
 
-    // Pin reads the same kind of selection and mutates exactly those entries.
+    // Pin combines - with ordinary targets in one batch.
     from = transcript.items.len;
-    try terminal.write("print -r -- '2' | command \"$TJ\" pin\n");
+    try terminal.write("print -r -- '2' | command \"$TJ\" pin '@3' -; print -r -- \"PIN_RC=$?\"\n");
+    try terminal.expectFrom(from, "PIN_RC=0");
     try terminal.expectPromptFrom(from);
     try terminal.write("exit 0\n");
     try std.testing.expectEqual(@as(u8, 0), try terminal.finish());
@@ -474,21 +481,32 @@ test "history and pin select entries from redirected stdin when no targets are g
     const pinned = try support.runNonTtyInJournal(gpa, &.{ "--home", home, "pin", "--ids" }, id, "4");
     defer gpa.free(pinned.stdout);
     defer gpa.free(pinned.stderr);
-    try std.testing.expectEqualStrings("2\n", pinned.stdout);
+    try std.testing.expectEqualStrings("2 3\n", pinned.stdout);
 
-    // Empty redirected stdin is a no-op for pin, not a mutation of everything.
-    const before = try support.runNonTtyInJournal(gpa, &.{ "--home", home, "pin", "@1" }, id, "4");
-    defer gpa.free(before.stdout);
-    defer gpa.free(before.stderr);
-    try std.testing.expectEqual(@as(u8, 0), before.term.exited);
-    const empty_stdin = try support.runNonTty(gpa, &.{ "--home", home, "pin" });
+    // With non-terminal stdin and no targets, history and pin still list.
+    const listed = try support.runNonTtyInJournal(gpa, &.{ "--home", home, "history", "--ids" }, id, "4");
+    defer gpa.free(listed.stdout);
+    defer gpa.free(listed.stderr);
+    try std.testing.expectEqual(@as(u8, 0), listed.term.exited);
+    try std.testing.expect(std.mem.startsWith(u8, listed.stdout, "1 2 3 4 "));
+    const pins_listed = try support.runNonTtyInJournal(gpa, &.{ "--home", home, "pin" }, id, "4");
+    defer gpa.free(pins_listed.stdout);
+    defer gpa.free(pins_listed.stderr);
+    try std.testing.expectEqualStrings("@2\n@3\n", pins_listed.stdout);
+
+    // Empty input behind - changes no pins, and - may be given only once.
+    const empty_stdin = try support.runNonTtyInJournal(gpa, &.{ "--home", home, "pin", "--remove", "-" }, id, "4");
     defer gpa.free(empty_stdin.stdout);
     defer gpa.free(empty_stdin.stderr);
     try std.testing.expectEqual(@as(u8, 0), empty_stdin.term.exited);
+    const twice = try support.runNonTtyInJournal(gpa, &.{ "--home", home, "history", "-", "-" }, id, "4");
+    defer gpa.free(twice.stdout);
+    defer gpa.free(twice.stderr);
+    try std.testing.expectEqual(@as(u8, 2), twice.term.exited);
     const after = try support.runNonTtyInJournal(gpa, &.{ "--home", home, "pin", "--ids" }, id, "4");
     defer gpa.free(after.stdout);
     defer gpa.free(after.stderr);
-    try std.testing.expectEqualStrings("1 2\n", after.stdout);
+    try std.testing.expectEqualStrings("2 3\n", after.stdout);
 }
 
 test "history colors auto-detect, obey TJ_COLOR, and stay plain under --ids" {

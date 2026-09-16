@@ -207,6 +207,7 @@ pub fn selectHistoryScope(
     root: store.Dir,
     targets: []const []const u8,
     default_current: bool,
+    stdin_numbers: ?[]const u32,
 ) !HistoryScope {
     var scope: HistoryScope = .{};
     errdefer scope.deinit(gpa);
@@ -219,6 +220,21 @@ pub fn selectHistoryScope(
     }
 
     for (targets) |text| {
+        if (context.isStdinOperand(text)) {
+            const numbers = stdin_numbers orelse return error.BadReference;
+            if (numbers.len == 0) continue;
+            const journal_index = try loadHistoryJournal(gpa, io, root, &scope.journals, try context.currentJournal());
+            for (numbers) |number| {
+                if (!scope.journals.items[journal_index].has(number)) return error.NoSuchInteraction;
+                try scope.selections.append(gpa, .{
+                    .journal_index = journal_index,
+                    .qualified = false,
+                    .what = .{ .single = number },
+                });
+            }
+            continue;
+        }
+
         if (parseHistoryJournalSelector(text)) |suffix| {
             const journal = try store.findUniqueJournal(gpa, io, root, suffix);
             defer gpa.free(journal);
@@ -259,34 +275,6 @@ pub fn selectHistoryScope(
     return scope;
 }
 
-/// Builds a scope from a redirected-stdin entry-number selection instead of
-/// command-line target operands. Every number must already exist in the
-/// current journal; validation happens before any selection is recorded, so a
-/// stale id is rejected before history prints anything.
-pub fn selectHistoryScopeFromStdin(
-    gpa: std.mem.Allocator,
-    io: Io,
-    root: store.Dir,
-    numbers: []const u32,
-) !HistoryScope {
-    var scope: HistoryScope = .{};
-    errdefer scope.deinit(gpa);
-    if (numbers.len == 0) return scope;
-
-    const journal_index = try loadHistoryJournal(gpa, io, root, &scope.journals, try context.currentJournal());
-    for (numbers) |number| {
-        if (!scope.journals.items[journal_index].has(number)) return error.NoSuchInteraction;
-    }
-    for (numbers) |number| {
-        try scope.selections.append(gpa, .{
-            .journal_index = journal_index,
-            .qualified = false,
-            .what = .{ .single = number },
-        });
-    }
-    return scope;
-}
-
 pub fn writeHistoryReference(
     out: *Io.Writer,
     journal: *const HistoryJournal,
@@ -316,11 +304,9 @@ pub fn listInteractions(
     const pinned_only = parsed.enabled("pinned");
     const ids_only = parsed.enabled("ids");
 
-    var scope = if (parsed.positionals.items.len == 0 and !sys.isTty(io, 0)) blk: {
-        const numbers = try context.readNumberSelection(gpa, io);
-        defer gpa.free(numbers);
-        break :blk try selectHistoryScopeFromStdin(gpa, io, root, numbers);
-    } else try selectHistoryScope(gpa, io, root, parsed.positionals.items, true);
+    const stdin_numbers = try context.readStdinOperand(gpa, io, parsed.positionals.items);
+    defer if (stdin_numbers) |numbers| gpa.free(numbers);
+    var scope = try selectHistoryScope(gpa, io, root, parsed.positionals.items, true, stdin_numbers);
     defer scope.deinit(gpa);
 
     if (ids_only) {

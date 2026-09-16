@@ -521,7 +521,7 @@ pub fn grepCommand(
         const entries = if (request.targets.len == 0)
             try listGrepNumbers(gpa, io, root, current.?, null)
         else blk: {
-            var scope = try cmd_history.selectHistoryScope(gpa, io, root, request.targets, false);
+            var scope = try cmd_history.selectHistoryScope(gpa, io, root, request.targets, false, null);
             defer scope.deinit(gpa);
             for (scope.journals.items) |journal| {
                 if (!std.mem.eql(u8, journal.name, current.?)) return error.BadArguments;
@@ -581,7 +581,7 @@ pub fn grepCommand(
             try grepJournal(gpa, io, root, journal.name, journal.numbers, true, request, active, &matcher, &output, &total, null);
         }
     } else if (request.targets.len != 0) {
-        var scope = try cmd_history.selectHistoryScope(gpa, io, root, request.targets, false);
+        var scope = try cmd_history.selectHistoryScope(gpa, io, root, request.targets, false, null);
         defer scope.deinit(gpa);
         var entries: std.ArrayList(JournalEntries) = .empty;
         defer {

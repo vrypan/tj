@@ -31,12 +31,6 @@ pub fn request(parsed: *const zecli.Parsed) !Request {
 }
 
 pub fn pinCommand(gpa: std.mem.Allocator, io: Io, home: ?[]const u8, parsed: *const zecli.Parsed, out: *Io.Writer) !void {
-    if (parsed.positionals.items.len == 0 and !parsed.enabled("ids") and !sys.isTty(io, 0)) {
-        const numbers = try context.readNumberSelection(gpa, io);
-        defer gpa.free(numbers);
-        if (numbers.len == 0) return;
-        return updatePinNumbers(gpa, io, home, numbers, !parsed.enabled("remove"));
-    }
     switch (try request(parsed)) {
         .list => |numbers_only| {
             const current = try context.currentJournal();
@@ -64,7 +58,11 @@ pub fn pinCommand(gpa: std.mem.Allocator, io: Io, home: ?[]const u8, parsed: *co
 }
 
 pub fn updatePins(gpa: std.mem.Allocator, io: Io, home: ?[]const u8, refs: []const []const u8, pinned: bool) !void {
-    var targets = try context.openMutationTargetList(gpa, io, home, refs);
+    // Read stdin before locking so a slow producer cannot stall other writers.
+    const stdin_numbers = try context.readStdinOperand(gpa, io, refs);
+    defer if (stdin_numbers) |numbers| gpa.free(numbers);
+    if (refs.len == 1 and stdin_numbers != null and stdin_numbers.?.len == 0) return;
+    var targets = try context.openMutationTargetList(gpa, io, home, refs, stdin_numbers);
     defer targets.deinit(gpa, io);
     try apply(targets.mutation.root, io, targets.mutation.journal, targets.numbers, pinned);
 }

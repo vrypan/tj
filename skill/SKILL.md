@@ -196,7 +196,8 @@ only when overriding that protection is deliberate. Whole-journal removal
 (`tjctl rm`) likewise requires `--force` while any pins remain.
 `tj rm` accepts multiple entry, output, and range targets in one invocation;
 targets are processed from left to right and one `--include-pinned` applies
-to all. `tj rm` requires explicit targets or `--stdin`, never both;
+to all. A `-` target reads current-journal entry numbers from standard input
+(`tj grep err --ids | tj pin -`) for `history`, `pin`, and `rm`;
 `--ignore-missing` makes a missing target or an empty range harmless instead
 of an error.
 

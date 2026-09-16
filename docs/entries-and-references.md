@@ -13,6 +13,7 @@ tj history @release-build.
 tj history --pinned
 tj history --ids @42 @50..@60
 tj history --pinned --ids | tj tui
+tj grep error --ids | tj history -
 ```
 
 A trailing dot selects a journal.
@@ -22,12 +23,13 @@ status. It also shows the entry reference, output size, start date, command,
 and nonzero status. Long commands wrap to the terminal width. Redirected
 output uses the same fields without wrapping.
 
-Without explicit targets, a terminal standard input lists the current
-journal, same as always. Redirected standard input is instead read as a
-whitespace-separated list of current-journal entry numbers to show, so
-`tj grep error --ids | tj history` narrows history to grep's matches. Explicit
-target operands always take precedence over redirected input. Empty
-redirected input selects nothing rather than everything.
+Without targets, history lists the current journal regardless of where
+standard input comes from. A `-` target reads standard input as a
+whitespace-separated list of current-journal entry numbers, so
+`tj grep error --ids | tj history -` narrows history to grep's matches. `-`
+may be combined with other targets but given only once. Input is capped at
+4 MiB; malformed tokens and zero are rejected, and every number must exist
+before anything is printed. Empty input selects nothing.
 
 `tj last` prints the positive decimal number of the last entry that completed.
 
@@ -148,13 +150,11 @@ retention policy.
 `tj pin --ids` is a listing mode equivalent to `tj history --pinned --ids`.
 It cannot be combined with targets or `--remove`.
 
-Without explicit targets and without `--ids`, a terminal standard input pins
-or unpins nothing and instead lists the current journal's pinned entries, same
-as always. Redirected standard input is instead read as a whitespace-separated
-list of current-journal entry numbers to pin (or unpin, with `--remove`), so
-`tj grep error --ids | tj pin` pins grep's matches. Explicit target operands
-always take precedence over redirected input. Empty redirected input changes
-nothing.
+Without targets, `tj pin` lists the current journal's pinned entries. A `-`
+target reads standard input as a whitespace-separated list of current-journal
+entry numbers to pin (or unpin, with `--remove`), so
+`tj grep error --ids | tj pin -` pins grep's matches. Those numbers join the
+same validated batch as any other targets. Empty input changes nothing.
 
 Ranges are inclusive, apply only to the current journal, and skip numbering
 holes.
@@ -168,7 +168,7 @@ tj rm @2..@10
 tj rm @12 @15/out @20..@25
 tj rm --include-pinned @42
 tj rm --ignore-missing @2 @2
-echo '2 4' | tj rm --stdin
+echo '2 4' | tj rm -
 ```
 
 Removal only changes the current journal. Targets are processed from left to
@@ -182,13 +182,12 @@ corruption, an invalid reference, an unsupported resource, a foreign journal,
 or the currently running entry) are still reported. `--include-pinned` is
 orthogonal and may be combined with it.
 
-`tj rm` requires either explicit target operands or `--stdin`, never both.
-`--stdin` reads a whitespace-separated list of current-journal entry numbers
-(capped at 4 MiB, sorted and deduplicated) and validates the whole batch
-before removing anything; combine it with `--ignore-missing` to tolerate
-stale ids in the batch. Unlike `history` and `pin`, `tj rm` never infers its
-targets from an ambient redirected pipe — `--stdin` must be explicit, so a
-stray pipe cannot make removal destructive by accident.
+A `-` target reads a whitespace-separated list of current-journal entry
+numbers from standard input (capped at 4 MiB, sorted and deduplicated) and
+removes them as one batch at that position, validating the whole batch before
+removing any of it; combine it with `--ignore-missing` to tolerate stale ids.
+Standard input is read only when `-` is given, so a stray pipe cannot select
+entries for removal.
 
 Removing an entry also removes its pin, output, resources, and metadata.
 Removing only `out` preserves the entry, command, exit status, and pin, but

@@ -35,7 +35,7 @@ pub fn run(gpa: std.mem.Allocator, io: Io, home: ?[]const u8, parsed: *const zec
         const journal = try context.currentJournal();
         var root = try store.openRoot(io, home);
         defer root.close(io);
-        const numbers = try context.selectCurrentNumbers(gpa, io, root, journal, parsed.positionals.items);
+        const numbers = try context.selectCurrentNumbers(gpa, io, root, journal, parsed.positionals.items, null);
         defer gpa.free(numbers);
         return runWithFilter(gpa, io, home, numbers);
     }

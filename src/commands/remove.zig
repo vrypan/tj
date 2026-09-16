@@ -14,19 +14,15 @@ pub const RemoveRequest = struct {
     targets: []const []const u8,
     include_pinned: bool,
     ignore_missing: bool,
-    stdin: bool,
 };
 
 pub fn removeRequest(parsed: *const zecli.Parsed) !RemoveRequest {
-    const stdin = parsed.enabled("stdin");
     const targets = parsed.positionals.items;
-    if (stdin and targets.len != 0) return error.BadArguments;
-    if (!stdin and targets.len == 0) return error.BadArguments;
+    if (targets.len == 0) return error.BadArguments;
     return .{
         .targets = targets,
         .include_pinned = parsed.enabled("include-pinned"),
         .ignore_missing = parsed.enabled("ignore-missing"),
-        .stdin = stdin,
     };
 }
 
@@ -39,34 +35,16 @@ test "pin and removal requests select one semantic mode" {
         try std.testing.expectEqualStrings("@2", (try cmd_pin.request(&parsed)).set[0]);
     }
     {
-        var parsed = try context.parseTestCommand(.rm, &.{ "--include-pinned", "@2", "@4/out", "@6..@8" });
+        var parsed = try context.parseTestCommand(.rm, &.{ "--include-pinned", "@2", "@4/out", "-", "@6..@8" });
         defer parsed.deinit(gpa);
         const request = try removeRequest(&parsed);
-        try std.testing.expectEqual(@as(usize, 3), request.targets.len);
+        try std.testing.expectEqual(@as(usize, 4), request.targets.len);
         try std.testing.expectEqualStrings("@2", request.targets[0]);
         try std.testing.expectEqualStrings("@4/out", request.targets[1]);
-        try std.testing.expectEqualStrings("@6..@8", request.targets[2]);
+        try std.testing.expectEqualStrings("-", request.targets[2]);
+        try std.testing.expectEqualStrings("@6..@8", request.targets[3]);
         try std.testing.expect(request.include_pinned);
         try std.testing.expect(!request.ignore_missing);
-        try std.testing.expect(!request.stdin);
-    }
-    {
-        var parsed = try context.parseTestCommand(.rm, &.{ "--stdin", "--ignore-missing" });
-        defer parsed.deinit(gpa);
-        const request = try removeRequest(&parsed);
-        try std.testing.expectEqual(@as(usize, 0), request.targets.len);
-        try std.testing.expect(request.stdin);
-        try std.testing.expect(request.ignore_missing);
-    }
-    {
-        var parsed = try context.parseTestCommand(.rm, &.{ "--stdin", "@2" });
-        defer parsed.deinit(gpa);
-        try std.testing.expectError(error.BadArguments, removeRequest(&parsed));
-    }
-    {
-        var parsed = try context.parseTestCommand(.rm, &.{});
-        defer parsed.deinit(gpa);
-        try std.testing.expectError(error.BadArguments, removeRequest(&parsed));
     }
 }
 
@@ -80,32 +58,42 @@ pub fn removeCommand(
     _ = out;
     const request = try removeRequest(parsed);
     // Read stdin before locking so a slow producer cannot stall other writers.
-    const stdin_numbers: []u32 = if (request.stdin) try context.readNumberSelection(gpa, io) else &.{};
-    defer if (request.stdin) gpa.free(stdin_numbers);
-    if (request.stdin and stdin_numbers.len == 0) return;
+    const stdin_numbers = try context.readStdinOperand(gpa, io, request.targets);
+    defer if (stdin_numbers) |numbers| gpa.free(numbers);
+    if (request.targets.len == 1 and stdin_numbers != null and stdin_numbers.?.len == 0) return;
 
     var mutation = try context.openCurrentMutation(gpa, io, home, .exclusive);
     defer mutation.deinit(io);
 
-    if (request.stdin) {
-        const numbers = stdin_numbers;
-        const filtered = if (request.ignore_missing)
-            try filterExisting(gpa, io, &mutation, numbers)
-        else
-            numbers;
-        defer if (request.ignore_missing) gpa.free(filtered);
-        if (filtered.len == 0) return;
-        const result = try removeNumbers(gpa, io, &mutation, filtered, request.include_pinned);
-        noteSkippedPins(io, result.skipped_pinned);
-        return;
-    }
-
     for (request.targets) |target| {
+        if (context.isStdinOperand(target)) {
+            try removeStdinNumbers(gpa, io, &mutation, stdin_numbers.?, request);
+            continue;
+        }
         removeTarget(gpa, io, &mutation, target, request.include_pinned) catch |err| switch (err) {
             error.NoSuchInteraction => if (request.ignore_missing) continue else return err,
             else => return err,
         };
     }
+}
+
+/// Removes a `-` selection as one batch: every number is validated before any
+/// entry is removed, unless --ignore-missing drops the stale ones first.
+fn removeStdinNumbers(
+    gpa: std.mem.Allocator,
+    io: Io,
+    mutation: *context.Mutation,
+    numbers: []const u32,
+    request: RemoveRequest,
+) !void {
+    const selected = if (request.ignore_missing)
+        try filterExisting(gpa, io, mutation, numbers)
+    else
+        numbers;
+    defer if (request.ignore_missing) gpa.free(selected);
+    if (selected.len == 0) return;
+    const result = try removeNumbers(gpa, io, mutation, selected, request.include_pinned);
+    noteSkippedPins(io, result.skipped_pinned);
 }
 
 fn filterExisting(
@@ -234,8 +222,8 @@ fn removeNumbers(
     const highest = try store.highestNumber(gpa, io, mutation.root, mutation.journal) orelse
         return error.NoSuchInteraction;
     for (numbers, 0..) |number, index| {
-        if (number >= highest) return error.CurrentInteraction;
         if (!store.interactionExists(io, mutation.root, mutation.journal, number)) return error.NoSuchInteraction;
+        if (number >= highest) return error.CurrentInteraction;
         if (index != 0 and numbers[index - 1] >= number) return error.BadArguments;
     }
 
