@@ -425,7 +425,7 @@ test "history and grep never replay stored terminal controls" {
     try journal.writeFile(io, .{ .sub_path = "1/out", .data = dangerous ++ "\n" });
     try journal.writeFile(io, .{ .sub_path = "1/rc", .data = "0\n" });
 
-    const history = try support.runNonTtyInJournal(gpa, &.{ "--home", scratch.path(), "hist" }, &id, "3");
+    const history = try support.runNonTtyInJournal(gpa, &.{ "--home", scratch.path(), "history" }, &id, "3");
     defer gpa.free(history.stdout);
     defer gpa.free(history.stderr);
     try std.testing.expectEqual(@as(u8, 0), history.term.exited);
@@ -832,7 +832,7 @@ test "zsh completion keeps special resource names as one inert argument" {
     try terminal.cancelZleLine();
 
     from = out.items.len;
-    try terminal.write("tj hist --p");
+    try terminal.write("tj history --p");
     try terminal.write("\t");
     try terminal.expectFrom(from, "--pin");
     try terminal.cancelZleLine();
@@ -850,7 +850,7 @@ test "zsh completion keeps special resource names as one inert argument" {
     try terminal.expectFrom(from, "TJ_BUFFER=");
     try std.testing.expectEqual(
         @as(usize, 1),
-        std.mem.count(u8, out.items[from..], "Search every journal"),
+        std.mem.count(u8, out.items[from..], "Search across all journals"),
     );
     try terminal.cancelZleLine();
 

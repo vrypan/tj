@@ -54,11 +54,11 @@ const force_flag = [_]zecli.FlagSpec{
 };
 
 const grep_flags = [_]zecli.FlagSpec{
-    .{ .name = "all", .short = 'a', .description = "Search every journal" },
-    .{ .name = "numbers", .description = "Print matching entry numbers" },
-    .{ .name = "cmd", .description = "Search commands" },
-    .{ .name = "out", .description = "Search output" },
-    .{ .name = "ignore-case", .short = 'i', .description = "Fold ASCII letter case" },
+    .{ .name = "all", .description = "Search across all journals" },
+    .{ .name = "numbers", .description = "Print only matching entry numbers" },
+    .{ .name = "cmd", .description = "Search command lines" },
+    .{ .name = "out", .description = "Search command output" },
+    .{ .name = "ignore-case", .short = 'i', .description = "Case-insensitive search (only ASCII)" },
     .{
         .name = "color",
         .aliases = &.{"colour"},
@@ -78,6 +78,7 @@ const filter_flags = [_]zecli.FlagSpec{
 const commands = [_]zecli.CommandSpec{
     .{
         .name = "tui",
+        .aliases = &.{"t"},
         .description = "Browse, inspect, pin, and delete entries",
         .usage = "tj tui",
         .extra_help = "With redirected standard input, show only the space-separated entry numbers it contains.\n",
@@ -93,10 +94,10 @@ const commands = [_]zecli.CommandSpec{
         ++ "\n",
     },
     .{
-        .name = "hist",
-        .aliases = &.{"history"},
+        .name = "history",
+        .aliases = &.{"h"},
         .description = "List entries with pin status, size, and date",
-        .usage = "tj hist [options] [TARGET...]",
+        .usage = "tj history [options] [TARGET...]",
         .flags = &hist_flags,
         .arguments = &.{.{
             .name = "TARGET",
@@ -109,6 +110,7 @@ const commands = [_]zecli.CommandSpec{
     .{ .name = "last", .description = "Print the last completed entry", .usage = "tj last" },
     .{
         .name = "cat",
+        .aliases = &.{"c"},
         .description = "Print what one or more references name",
         .usage = "tj cat [options] <REF>...",
         .flags = &cat_flags,

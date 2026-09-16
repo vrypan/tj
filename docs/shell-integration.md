@@ -195,7 +195,7 @@ The installation provides command completion for forms such as:
 
 ```text
 tj <Tab>
-tj hist --<Tab>
+tj history --<Tab>
 tjctl use <Tab>
 tjctl replay --<Tab>
 ```

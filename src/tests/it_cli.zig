@@ -44,14 +44,14 @@ test "application and every command expose generated help" {
         try std.testing.expectEqualStrings("", result.stderr);
         try std.testing.expect(std.mem.indexOf(u8, result.stdout, "Usage: tj [options] <command|@REF>") != null);
         try std.testing.expect(std.mem.indexOf(u8, result.stdout, "Commands:") != null);
-        try std.testing.expect(std.mem.indexOf(u8, result.stdout, "hist, history") != null);
+        try std.testing.expect(std.mem.indexOf(u8, result.stdout, "history, h") != null);
         try std.testing.expect(std.mem.indexOf(u8, result.stdout, "--home <DIR>") != null);
         try std.testing.expect(std.mem.indexOf(u8, result.stdout, "@release-build.42/out") != null);
         try std.testing.expect(std.mem.indexOf(u8, result.stdout, "source /path/to/tj.plugin.zsh") != null);
         try std.testing.expect(std.mem.indexOf(u8, result.stdout, "source /path/to/tj.plugin.fish") != null);
     }
 
-    const command_names = [_][]const u8{ "tui", "filter", "hist", "last", "cat", "resolve", "complete", "pin", "rm", "grep" };
+    const command_names = [_][]const u8{ "tui", "filter", "history", "last", "cat", "resolve", "complete", "pin", "rm", "grep" };
     for (command_names) |name| {
         const result = try support.runNonTty(gpa, &.{ name, "--help" });
         defer gpa.free(result.stdout);
@@ -88,11 +88,11 @@ test "application and every command expose generated help" {
         }
     }
 
-    const alias = try support.runNonTty(gpa, &.{ "history", "--help" });
+    const alias = try support.runNonTty(gpa, &.{ "h", "--help" });
     defer gpa.free(alias.stdout);
     defer gpa.free(alias.stderr);
     try std.testing.expectEqual(@as(u8, 0), alias.term.exited);
-    try std.testing.expect(std.mem.indexOf(u8, alias.stdout, "Usage: tj hist") != null);
+    try std.testing.expect(std.mem.indexOf(u8, alias.stdout, "Usage: tj history") != null);
 }
 
 test "cat reads a plain file before any journal exists" {
@@ -158,7 +158,7 @@ test "a closed stdout pipe exits quietly" {
     const cases = [_][]const []const u8{
         &.{"--help"},
         &.{"--version"},
-        &.{ "hist", "--help" },
+        &.{ "history", "--help" },
         &.{ "cat", "--raw", large_path },
     };
     for (cases) |args| {
@@ -232,7 +232,7 @@ test "build-time completions expose cli grammar and journal references" {
     const zsh = try support.Dir.cwd().readFileAlloc(io, options.zsh_completion, gpa, .limited(1 << 20));
     defer gpa.free(zsh);
     try std.testing.expect(std.mem.startsWith(u8, zsh, "#compdef tj\n"));
-    try std.testing.expect(std.mem.indexOf(u8, zsh, "'hist:List entries with pin status, size, and date'") != null);
+    try std.testing.expect(std.mem.indexOf(u8, zsh, "'history:List entries with pin status, size, and date'") != null);
     try std.testing.expect(std.mem.indexOf(u8, zsh, "'tui:Browse, inspect, pin, and delete entries'") != null);
     try std.testing.expect(std.mem.indexOf(u8, zsh, "--pinned") != null);
     try std.testing.expect(std.mem.indexOf(u8, zsh, "--pin") != null);
@@ -241,7 +241,7 @@ test "build-time completions expose cli grammar and journal references" {
     const fish = try support.Dir.cwd().readFileAlloc(io, options.fish_completion, gpa, .limited(1 << 20));
     defer gpa.free(fish);
     try std.testing.expect(std.mem.startsWith(u8, fish, "# fish completion for tj\n"));
-    try std.testing.expect(std.mem.indexOf(u8, fish, "-a 'hist' -d 'List entries with pin status, size, and date'") != null);
+    try std.testing.expect(std.mem.indexOf(u8, fish, "-a 'history' -d 'List entries with pin status, size, and date'") != null);
     for ([_][]const u8{ "echo 'never'", "echo 'auto'", "echo 'always'" }) |choice| {
         try std.testing.expect(std.mem.indexOf(u8, fish, choice) != null);
     }

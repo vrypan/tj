@@ -7,10 +7,10 @@ resource and remains in the journal.
 ## List entries
 
 ```sh
-tj hist
-tj hist @42 @50..@60
-tj hist @release-build.
-tj hist --pinned
+tj history
+tj history @42 @50..@60
+tj history @release-build.
+tj history --pinned
 ```
 
 A trailing dot selects a journal.

@@ -59,9 +59,9 @@ pub fn validateRemoveOrdering(which: CommandName, args: []const [:0]const u8) !v
 
 test "generated command tags canonicalize aliases" {
     try std.testing.expectEqual(std.meta.fields(CommandName).len, cli_spec.application.commands.len);
-    try std.testing.expectEqual(CommandName.hist, try (zecli.Command{
-        .name = "hist",
-        .spec = cli_spec.findCommand("history").?,
+    try std.testing.expectEqual(CommandName.history, try (zecli.Command{
+        .name = "history",
+        .spec = cli_spec.findCommand("h").?,
         .parsed = .{},
     }).as(CommandName));
 }
