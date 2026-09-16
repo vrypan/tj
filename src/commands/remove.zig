@@ -79,13 +79,16 @@ pub fn removeCommand(
 ) !void {
     _ = out;
     const request = try removeRequest(parsed);
+    // Read stdin before locking so a slow producer cannot stall other writers.
+    const stdin_numbers: []u32 = if (request.stdin) try context.readNumberSelection(gpa, io) else &.{};
+    defer if (request.stdin) gpa.free(stdin_numbers);
+    if (request.stdin and stdin_numbers.len == 0) return;
+
     var mutation = try context.openCurrentMutation(gpa, io, home, .exclusive);
     defer mutation.deinit(io);
 
     if (request.stdin) {
-        const numbers = try context.readNumberSelection(gpa, io);
-        defer gpa.free(numbers);
-        if (numbers.len == 0) return;
+        const numbers = stdin_numbers;
         const filtered = if (request.ignore_missing)
             try filterExisting(gpa, io, &mutation, numbers)
         else

@@ -445,6 +445,10 @@ test "rm --stdin reads a batch of entry numbers and rejects mixing with targets"
     var terminal = support.TerminalSession.init(gpa, child);
     defer terminal.deinit();
     try terminal.setupZsh("");
+    const malformed = terminal.transcript.items.len;
+    try terminal.write("print -r -- '2 abc' | command \"$TJ\" rm --stdin; print -r -- \"status=$?\"\n");
+    try terminal.expectFrom(malformed, "tj: standard input must contain only positive entry numbers");
+    try terminal.expectFrom(malformed, "status=1");
     const from = terminal.transcript.items.len;
     try terminal.write("print -r -- '1 3 999' | command \"$TJ\" rm --stdin --ignore-missing\n");
     try terminal.expectPromptFrom(from);

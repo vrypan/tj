@@ -154,6 +154,8 @@ fn commandErrorMessage(which: cli.CommandName, err: anyerror) []const u8 {
         error.InvalidMetadata => "tj: invalid entry metadata; refusing partial removal\n",
         error.InsideJournalRemoval => "tj: remove a whole journal only from outside a tj writer\n",
         error.FileNotFound => "tj: no journal yet\n",
+        error.InvalidStdinSelection => "tj: standard input must contain only positive entry numbers\n",
+        error.StdinSelectionTooLarge => "tj: standard input selection is too large\n",
         else => "tj: cannot read the journal\n",
     };
 }
