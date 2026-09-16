@@ -253,6 +253,9 @@ test "native grep searches literal command and output lines with stable statuses
     if (!support.haveZsh()) return error.SkipZigTest;
     const gpa = std.testing.allocator;
     const io = std.testing.io;
+    var environment = try support.EnvGuard.init(gpa, &.{"TJ_COLOR"});
+    defer environment.deinit();
+    support.sys.unsetEnv("TJ_COLOR");
     var journal = try support.Journal.open(gpa);
     defer journal.close();
     const producer = try journal.fixture(gpa, "grep-producer.sh", "printf 'OUTPUT_LITERAL_012\\nMixedAscii012\\n'\n");
@@ -283,12 +286,24 @@ test "native grep searches literal command and output lines with stable statuses
     const forced_color = try support.runNonTtyInJournal(gpa, &.{ "--home", home, "grep", "--cmd", "--color=always", "COMMAND_LITERAL_012" }, id, "");
     defer gpa.free(forced_color.stdout);
     defer gpa.free(forced_color.stderr);
-    try std.testing.expectEqualStrings("   1 > :\x1b[01;31m COMMAND_LITERAL_012\x1b[m\n", forced_color.stdout);
+    try std.testing.expectEqualStrings("   \x1b[33m1\x1b[0m \x1b[2m>\x1b[0m :\x1b[01;31m COMMAND_LITERAL_012\x1b[m\n", forced_color.stdout);
+
+    support.sys.setEnv("TJ_COLOR", "always");
+    const environment_color = try support.runNonTtyInJournal(
+        gpa,
+        &.{ "--home", home, "grep", "--cmd", "COMMAND_LITERAL_012" },
+        id,
+        "",
+    );
+    defer gpa.free(environment_color.stdout);
+    defer gpa.free(environment_color.stderr);
+    try std.testing.expectEqualStrings(forced_color.stdout, environment_color.stdout);
 
     const disabled_color = try support.runNonTtyInJournal(gpa, &.{ "--home", home, "grep", "--cmd", "--color=never", "COMMAND_LITERAL_012" }, id, "");
     defer gpa.free(disabled_color.stdout);
     defer gpa.free(disabled_color.stderr);
     try std.testing.expectEqualStrings(command_only.stdout, disabled_color.stdout);
+    support.sys.unsetEnv("TJ_COLOR");
 
     const output_only = try support.runNonTtyInJournal(gpa, &.{ "--home", home, "grep", "--out", "OUTPUT_LITERAL_012" }, id, "");
     defer gpa.free(output_only.stdout);
@@ -339,6 +354,53 @@ test "native grep searches literal command and output lines with stable statuses
     try std.testing.expectEqual(@as(u8, 0), numbers.term.exited);
     try std.testing.expectEqualStrings("1 2 4\n", numbers.stdout);
     try std.testing.expectEqualStrings("", numbers.stderr);
+
+    const selected_numbers = try support.runNonTtyInJournal(
+        gpa,
+        &.{ "--home", home, "grep", "LITERAL_012", "@4", "@1..@2", "@1", "--numbers", "--color=never" },
+        id,
+        "",
+    );
+    defer gpa.free(selected_numbers.stdout);
+    defer gpa.free(selected_numbers.stderr);
+    try std.testing.expectEqual(@as(u8, 0), selected_numbers.term.exited);
+    try std.testing.expectEqualStrings("1 2 4\n", selected_numbers.stdout);
+    try std.testing.expect(std.mem.indexOfScalar(u8, selected_numbers.stdout, 0x1b) == null);
+
+    const selected = try support.runNonTtyInJournal(
+        gpa,
+        &.{ "--home", home, "grep", "LITERAL_012", "@4", "@1" },
+        id,
+        "",
+    );
+    defer gpa.free(selected.stdout);
+    defer gpa.free(selected.stderr);
+    try std.testing.expectEqual(@as(u8, 0), selected.term.exited);
+    try std.testing.expect(std.mem.indexOf(u8, selected.stdout, "   1 >") != null);
+    try std.testing.expect(std.mem.indexOf(u8, selected.stdout, "   4 >") != null);
+    try std.testing.expect(std.mem.indexOf(u8, selected.stdout, "   2 <") == null);
+
+    const bad_target = try support.runNonTtyInJournal(
+        gpa,
+        &.{ "--home", home, "grep", "LITERAL_012", "not-a-target" },
+        id,
+        "",
+    );
+    defer gpa.free(bad_target.stdout);
+    defer gpa.free(bad_target.stderr);
+    try std.testing.expectEqual(@as(u8, 2), bad_target.term.exited);
+    try std.testing.expectEqualStrings("", bad_target.stdout);
+    try std.testing.expect(std.mem.indexOf(u8, bad_target.stderr, "not a journal reference") != null);
+
+    const all_with_target = try support.runNonTtyInJournal(
+        gpa,
+        &.{ "--home", home, "grep", "--all", "LITERAL_012", "@1" },
+        id,
+        "",
+    );
+    defer gpa.free(all_with_target.stdout);
+    defer gpa.free(all_with_target.stderr);
+    try std.testing.expectEqual(@as(u8, 2), all_with_target.term.exited);
 
     const outside = try support.runNonTtyInJournal(gpa, &.{ "--home", home, "grep", "x" }, "", "");
     defer gpa.free(outside.stdout);
@@ -408,6 +470,24 @@ test "native grep all uses complete journal names in lexical order" {
     const last_cmd_at = std.mem.indexOf(u8, result.stdout, last_cmd) orelse return error.TestUnexpectedResult;
     const last_out_at = std.mem.indexOf(u8, result.stdout, last_out) orelse return error.TestUnexpectedResult;
     try std.testing.expect(older_at < last_cmd_at and last_cmd_at < last_out_at);
+
+    const older_target = try std.fmt.allocPrint(gpa, "@{s}.1", .{older});
+    defer gpa.free(older_target);
+    const last_target = try std.fmt.allocPrint(gpa, "@{s}.1", .{&lexical_last});
+    defer gpa.free(last_target);
+    const selected = try support.runNonTtyInJournal(
+        gpa,
+        &.{ "--home", home, "grep", "SHARED_GREP_012", last_target, older_target, older_target },
+        "",
+        "",
+    );
+    defer gpa.free(selected.stdout);
+    defer gpa.free(selected.stderr);
+    try std.testing.expectEqual(@as(u8, 0), selected.term.exited);
+    const selected_last = std.mem.indexOf(u8, selected.stdout, last_cmd) orelse return error.TestUnexpectedResult;
+    const selected_older = std.mem.indexOf(u8, selected.stdout, older_ref) orelse return error.TestUnexpectedResult;
+    try std.testing.expect(selected_last < selected_older);
+    try std.testing.expectEqual(@as(usize, 1), std.mem.count(u8, selected.stdout, older_ref));
 }
 
 test "history and grep never replay stored terminal controls" {

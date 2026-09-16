@@ -35,8 +35,8 @@ not installed or included in release archives.
 
 Dependencies are pinned in `build.zig.zon`:
 
-- Zecli 0.3.2 supplies command parsing, help, environment mapping, and command
-  completion generation.
+- Zecli 0.4.0 supplies command parsing, configurable end-of-options handling,
+  help, environment mapping, and command completion generation.
 - Zooi supplies terminal mechanics for `tj tui` and the startup splash.
 
 Both are source dependencies and add no runtime package dependency.

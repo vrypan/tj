@@ -24,6 +24,7 @@ const hist_flags = [_]zecli.FlagSpec{
         .aliases = &.{"pin"},
         .description = "Show only pinned entries",
     },
+    .{ .name = "numbers", .description = "Print only entry numbers" },
 };
 
 const cat_flags = [_]zecli.FlagSpec{
@@ -45,12 +46,13 @@ const cat_flags = [_]zecli.FlagSpec{
     },
 };
 
-const remove_flag = [_]zecli.FlagSpec{
+const pin_flags = [_]zecli.FlagSpec{
     .{ .name = "remove", .description = "Unpin the selected entry" },
+    .{ .name = "numbers", .description = "Print only pinned entry numbers" },
 };
 
 const force_flag = [_]zecli.FlagSpec{
-    .{ .name = "force", .description = "Override pin protection or skip confirmation" },
+    .{ .name = "force", .description = "Override pin protection" },
 };
 
 const grep_flags = [_]zecli.FlagSpec{
@@ -80,7 +82,14 @@ const commands = [_]zecli.CommandSpec{
         .name = "tui",
         .aliases = &.{"t"},
         .description = "Browse, inspect, pin, and delete entries",
-        .usage = "tj tui",
+        .usage = "tj tui [TARGET...]",
+        .arguments = &.{.{
+            .name = "TARGET",
+            .description = "Entry reference or numeric range",
+            .repeatable = true,
+            .completion = reference_completion,
+        }},
+        .double_dash = .positionals,
         .extra_help = "With redirected standard input, show only the space-separated entry numbers it contains.\n",
     },
     .{
@@ -105,9 +114,10 @@ const commands = [_]zecli.CommandSpec{
             .repeatable = true,
             .completion = reference_completion,
         }},
+        .double_dash = .positionals,
         .extra_help = "With no targets, list the current journal. A trailing dot selects an entire journal: @release-build.\n",
     },
-    .{ .name = "last", .description = "Print the last completed entry", .usage = "tj last" },
+    .{ .name = "last", .description = "Print the last completed entry number", .usage = "tj last", .double_dash = .positionals },
     .{
         .name = "cat",
         .aliases = &.{"c"},
@@ -121,25 +131,29 @@ const commands = [_]zecli.CommandSpec{
             .repeatable = true,
             .completion = reference_completion,
         }},
+        .double_dash = .positionals,
     },
     .{
         .name = "resolve",
         .description = "Print the filesystem path named by a reference",
         .usage = "tj resolve <REF>",
         .arguments = &.{.{ .name = "REF", .description = "Journal reference", .required = true, .completion = reference_completion }},
+        .double_dash = .positionals,
     },
     .{
         .name = "complete",
         .description = "Print candidates for a partial journal reference",
         .usage = "tj complete [REF]",
         .arguments = &.{.{ .name = "REF", .description = "Partial journal reference", .completion = reference_completion }},
+        .double_dash = .positionals,
     },
     .{
         .name = "pin",
         .description = "Pin, unpin, or list pinned entries",
-        .usage = "tj pin [--remove] [REF]",
-        .flags = &remove_flag,
-        .arguments = &.{.{ .name = "REF", .description = "Entry reference or numeric range", .completion = reference_completion }},
+        .usage = "tj pin [--remove] [TARGET...]",
+        .flags = &pin_flags,
+        .arguments = &.{.{ .name = "TARGET", .description = "Entry reference or numeric range", .repeatable = true, .completion = reference_completion }},
+        .double_dash = .positionals,
     },
     .{
         .name = "rm",
@@ -153,16 +167,19 @@ const commands = [_]zecli.CommandSpec{
             .repeatable = true,
             .completion = reference_completion,
         }},
+        .double_dash = .positionals,
         .extra_help = "Pinned targets are skipped unless --force is present.\n",
     },
     .{
         .name = "grep",
         .description = "Search journal commands and output for a literal",
-        .usage = "tj grep [options] [--] <PATTERN>",
+        .usage = "tj grep [options] <PATTERN> [TARGET...]",
         .flags = &grep_flags,
-        // Application validation accepts this one value either before or
-        // after `--`; Zecli keeps those two namespaces separate.
-        .arguments = &.{.{ .name = "PATTERN", .description = "One non-empty literal byte string" }},
+        .arguments = &.{
+            .{ .name = "PATTERN", .description = "One non-empty literal byte string", .required = true },
+            .{ .name = "TARGET", .description = "Entry reference, numeric range, or @journal-name.", .repeatable = true, .completion = reference_completion },
+        },
+        .double_dash = .positionals,
     },
 };
 

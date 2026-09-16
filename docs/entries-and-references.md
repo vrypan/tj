@@ -11,6 +11,8 @@ tj history
 tj history @42 @50..@60
 tj history @release-build.
 tj history --pinned
+tj history --numbers @42 @50..@60
+tj history --pinned --numbers | tj tui
 ```
 
 A trailing dot selects a journal.
@@ -20,7 +22,11 @@ status. It also shows the entry reference, output size, start date, command,
 and nonzero status. Long commands wrap to the terminal width. Redirected
 output uses the same fields without color or wrapping.
 
-`tj last` prints the reference of the last entry that completed.
+`tj last` prints the positive decimal number of the last entry that completed.
+
+`--numbers` prints the unique selected entry numbers in ascending order as one
+space-separated line. It is current-journal-only, including when a target is
+explicitly qualified. An empty selection writes no bytes.
 
 ## Read entries
 
@@ -112,13 +118,22 @@ tjcd @release-build.42
 
 ```sh
 tj pin @42
-tj pin @40..@45
-tj pin --remove @42
+tj pin @40..@45 @50 @52
+tj pin --remove @42 @50..@52
+tj pin @42 --remove
 tj pin
+tj pin --numbers
 ```
 
-Pinning and unpinning are idempotent. A pin protects an entry from ordinary
-removal. It does not currently define a retention policy.
+Pinning and unpinning are idempotent. Multiple references and ranges are
+deduplicated and applied in ascending numeric order. TJ validates the complete
+batch under one current-journal mutation guard before changing any markers. A
+pin protects an entry from ordinary removal. It does not currently define a
+retention policy.
+
+`tj pin --numbers` is a listing mode equivalent to
+`tj history --pinned --numbers`. It cannot be combined with targets or
+`--remove`.
 
 Ranges are inclusive, apply only to the current journal, and skip numbering
 holes.
@@ -144,7 +159,9 @@ Individual published resources cannot be removed separately.
 
 ## Interactive browser
 
-`tj tui` opens a full-screen browser for the current journal.
+`tj tui [TARGET...]` opens a full-screen browser for the current journal.
+Targets may be unqualified entry references or current-journal numeric ranges.
+They are validated before the terminal switches to its alternate screen.
 
 When standard input is redirected, it is read as a space-separated list of
 entry numbers and the browser shows only those entries. Numbers are sorted and
@@ -152,7 +169,12 @@ duplicates are ignored:
 
 ```sh
 echo 100 101 1002 | tj tui
+tj history --numbers @100..@200 | tj tui
+tj pin --numbers | tj tui
 ```
+
+Explicit target operands take precedence over redirected standard input. An
+empty explicit selection is an error rather than an unfiltered browser.
 
 | Key | Action |
 |---|---|

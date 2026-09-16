@@ -8,6 +8,69 @@ const support = @import("it_support.zig");
 
 // Entry and journal mutation semantics.
 
+test "pin batches are deduplicated atomic and accept options after targets" {
+    if (!support.haveZsh()) return error.SkipZigTest;
+    const gpa = std.testing.allocator;
+    var journal = try support.Journal.open(gpa);
+    defer journal.close();
+    try support.recordJournal(gpa, &journal, &.{ "echo one", "echo two", "echo three", "echo four" });
+    try journal.enter(gpa);
+    const home = try journal.homeArg(gpa);
+    defer gpa.free(home);
+    const id = try journal.journalName(gpa);
+    defer gpa.free(id);
+
+    const set = try support.runNonTtyInJournal(
+        gpa,
+        &.{ "--home", home, "pin", "@3", "@1..@2", "@2" },
+        id,
+        "6",
+    );
+    defer gpa.free(set.stdout);
+    defer gpa.free(set.stderr);
+    try std.testing.expectEqual(@as(u8, 0), set.term.exited);
+    const listed = try support.runNonTtyInJournal(gpa, &.{ "--home", home, "pin" }, id, "6");
+    defer gpa.free(listed.stdout);
+    defer gpa.free(listed.stderr);
+    try std.testing.expectEqualStrings("@1\n@2\n@3\n", listed.stdout);
+
+    const remove = try support.runNonTtyInJournal(
+        gpa,
+        &.{ "--home", home, "pin", "@1", "@2", "--remove" },
+        id,
+        "6",
+    );
+    defer gpa.free(remove.stdout);
+    defer gpa.free(remove.stderr);
+    try std.testing.expectEqual(@as(u8, 0), remove.term.exited);
+
+    const invalid = try support.runNonTtyInJournal(
+        gpa,
+        &.{ "--home", home, "pin", "@1", "@999" },
+        id,
+        "6",
+    );
+    defer gpa.free(invalid.stdout);
+    defer gpa.free(invalid.stderr);
+    try std.testing.expectEqual(@as(u8, 2), invalid.term.exited);
+    const after_invalid = try support.runNonTtyInJournal(gpa, &.{ "--home", home, "pin" }, id, "6");
+    defer gpa.free(after_invalid.stdout);
+    defer gpa.free(after_invalid.stderr);
+    try std.testing.expectEqualStrings("@3\n", after_invalid.stdout);
+
+    const qualified_current = try std.fmt.allocPrint(gpa, "@{s}.4", .{id});
+    defer gpa.free(qualified_current);
+    const rejected = try support.runNonTtyInJournal(
+        gpa,
+        &.{ "--home", home, "pin", qualified_current },
+        id,
+        "6",
+    );
+    defer gpa.free(rejected.stdout);
+    defer gpa.free(rejected.stderr);
+    try std.testing.expectEqual(@as(u8, 1), rejected.term.exited);
+}
+
 test "entry mutations reject qualified journals while reads still work" {
     if (!support.haveZsh()) return error.SkipZigTest;
     const gpa = std.testing.allocator;

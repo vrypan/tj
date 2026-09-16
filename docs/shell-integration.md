@@ -196,9 +196,16 @@ The installation provides command completion for forms such as:
 ```text
 tj <Tab>
 tj history --<Tab>
+tj grep pattern -- @<Tab>
+tj pin @1 @<Tab>
+tj tui @1 @<Tab>
 tjctl use <Tab>
 tjctl replay --<Tab>
 ```
+
+For ordinary `tj` commands, completion stops offering options after `--` and
+continues completing the appropriate positional slot. `filter` keeps its
+passthrough tail and does not complete child argv as TJ operands.
 
 The shell plugin separately completes references. In zsh:
 

@@ -64,13 +64,6 @@ pub fn main(init: std.process.Init) !u8 {
     const which = try command.as(cli.CommandName);
     const spec = command.spec;
 
-    cli.validateRemoveOrdering(which, command_args) catch {
-        try stderr.writeAll("tj: invalid arguments for this subcommand\n\n");
-        try zecli.printCommandHelp(arena, stderr, spec);
-        try stderr.flush();
-        return 2;
-    };
-
     var child: []const [:0]const u8 = &.{};
     if (which == .filter) {
         if (command.positionals().len != 0) {
@@ -80,11 +73,6 @@ pub fn main(init: std.process.Init) !u8 {
             return 2;
         }
         child = command.passthrough() orelse &.{};
-    } else if (which != .grep and command.passthrough() != null) {
-        try stderr.writeAll("tj: invalid arguments for this subcommand\n\n");
-        try zecli.printCommandHelp(arena, stderr, spec);
-        try stderr.flush();
-        return 2;
     }
 
     const status = commands.run(

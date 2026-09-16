@@ -43,20 +43,6 @@ pub fn routeBareReference(
     return routed;
 }
 
-/// Pin removal is deliberately a leading mode.
-pub fn validateRemoveOrdering(which: CommandName, args: []const [:0]const u8) !void {
-    switch (which) {
-        .pin => {},
-        else => return,
-    }
-    for (args, 0..) |arg, i| {
-        if (!std.mem.eql(u8, arg, "--remove")) continue;
-        if (i == 0) return error.InvalidCommandArguments;
-        const previous = cli_spec.findCommand(args[i - 1]) orelse return error.InvalidCommandArguments;
-        if (!std.mem.eql(u8, previous.name, @tagName(which))) return error.InvalidCommandArguments;
-    }
-}
-
 test "generated command tags canonicalize aliases" {
     try std.testing.expectEqual(std.meta.fields(CommandName).len, cli_spec.application.commands.len);
     try std.testing.expectEqual(CommandName.history, try (zecli.Command{
@@ -82,11 +68,76 @@ test "a non-reference stays a normal root command" {
     try std.testing.expectEqual(args.ptr, routed.ptr);
 }
 
-test "pin removal remains a leading mode" {
-    try validateRemoveOrdering(.pin, &.{ "pin", "--remove", "@1" });
-    try validateRemoveOrdering(.rm, &.{ "rm", "--force", "@2" });
-    try std.testing.expectError(
-        error.InvalidCommandArguments,
-        validateRemoveOrdering(.pin, &.{ "pin", "@1", "--remove" }),
+test "ordinary command parsers treat double dash tails as positionals" {
+    const allocator = std.testing.allocator;
+    var buffer_storage: [2048]u8 = undefined;
+    var buffer = std.Io.Writer.Discarding.init(&buffer_storage);
+
+    var cat = try zecli.parseCommand(
+        allocator,
+        &buffer.writer,
+        &.{ "--", "@42/out" },
+        cli_spec.findCommand("cat").?,
     );
+    defer cat.deinit(allocator);
+    try std.testing.expectEqual(@as(usize, 1), cat.positionals.items.len);
+    try std.testing.expectEqualStrings("@42/out", cat.positionals.items[0]);
+    try std.testing.expect(!cat.has_passthrough);
+
+    var grep = try zecli.parseCommand(
+        allocator,
+        &buffer.writer,
+        &.{ "pattern", "--", "@42", "--help", "--" },
+        cli_spec.findCommand("grep").?,
+    );
+    defer grep.deinit(allocator);
+    try std.testing.expectEqual(@as(usize, 4), grep.positionals.items.len);
+    try std.testing.expectEqualStrings("pattern", grep.positionals.items[0]);
+    try std.testing.expectEqualStrings("@42", grep.positionals.items[1]);
+    try std.testing.expectEqualStrings("--help", grep.positionals.items[2]);
+    try std.testing.expectEqualStrings("--", grep.positionals.items[3]);
+
+    var complete = try zecli.parseCommand(
+        allocator,
+        &buffer.writer,
+        &.{ "--", "" },
+        cli_spec.findCommand("complete").?,
+    );
+    defer complete.deinit(allocator);
+    try std.testing.expectEqualStrings("", complete.positionals.items[0]);
+
+    try std.testing.expectError(
+        error.ReportedCliError,
+        zecli.parseCommand(allocator, &buffer.writer, &.{"--"}, cli_spec.findCommand("resolve").?),
+    );
+}
+
+test "Invocation honors positional double dash mode without changing filter" {
+    const allocator = std.testing.allocator;
+    var buffer_storage: [2048]u8 = undefined;
+    var buffer = std.Io.Writer.Discarding.init(&buffer_storage);
+    var environ = std.process.Environ.Map.init(allocator);
+    defer environ.deinit();
+
+    var invocation = try zecli.Invocation.init(
+        allocator,
+        &buffer.writer,
+        cli_spec.application,
+        &.{ "cat", "@1/out", "--", "@2/out" },
+        &environ,
+    );
+    defer invocation.deinit(allocator);
+    const cat = invocation.getCommand().?;
+    try std.testing.expectEqual(@as(usize, 2), cat.positionals().len);
+    try std.testing.expect(cat.passthrough() == null);
+
+    var filter = try zecli.Invocation.init(
+        allocator,
+        &buffer.writer,
+        cli_spec.application,
+        &.{ "filter", "--noout", "--", "/bin/echo", "--help" },
+        &environ,
+    );
+    defer filter.deinit(allocator);
+    try std.testing.expectEqualStrings("--help", filter.getCommand().?.passthrough().?[1]);
 }

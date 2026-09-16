@@ -227,7 +227,10 @@ test "build-time completions expose cli grammar and journal references" {
     defer gpa.free(bash);
     try std.testing.expect(std.mem.indexOf(u8, bash, "complete -F _tj tj") != null);
     try std.testing.expect(std.mem.indexOf(u8, bash, "--pinned") != null);
+    try std.testing.expect(std.mem.indexOf(u8, bash, "--numbers") != null);
     try std.testing.expect(std.mem.indexOf(u8, bash, "never\\nauto\\nalways") != null);
+    try std.testing.expect(std.mem.indexOf(u8, bash, "_tj__cmd_grep()") != null);
+    try std.testing.expect(std.mem.indexOf(u8, bash, "*)\n            __tj_ext_cmd_grep_a_TARGET") != null);
 
     const zsh = try support.Dir.cwd().readFileAlloc(io, options.zsh_completion, gpa, .limited(1 << 20));
     defer gpa.free(zsh);
@@ -237,6 +240,10 @@ test "build-time completions expose cli grammar and journal references" {
     try std.testing.expect(std.mem.indexOf(u8, zsh, "--pinned") != null);
     try std.testing.expect(std.mem.indexOf(u8, zsh, "--pin") != null);
     try std.testing.expect(std.mem.indexOf(u8, zsh, "WHEN:(never auto always)") != null);
+    try std.testing.expect(std.mem.indexOf(u8, zsh, "':PATTERN:'") != null);
+    try std.testing.expect(std.mem.indexOf(u8, zsh, "'*:TARGET:__tj_ext_cmd_grep_a_TARGET'") != null);
+    try std.testing.expect(std.mem.indexOf(u8, zsh, "'*:TARGET:__tj_ext_cmd_pin_a_TARGET'") != null);
+    try std.testing.expect(std.mem.indexOf(u8, zsh, "'*:TARGET:__tj_ext_cmd_tui_a_TARGET'") != null);
 
     const fish = try support.Dir.cwd().readFileAlloc(io, options.fish_completion, gpa, .limited(1 << 20));
     defer gpa.free(fish);
@@ -245,6 +252,9 @@ test "build-time completions expose cli grammar and journal references" {
     for ([_][]const u8{ "echo 'never'", "echo 'auto'", "echo 'always'" }) |choice| {
         try std.testing.expect(std.mem.indexOf(u8, fish, choice) != null);
     }
+    try std.testing.expect(std.mem.indexOf(u8, fish, "__tj_using_command grep; and test (__tj_pos_grep) -ge 1") != null);
+    try std.testing.expect(std.mem.indexOf(u8, fish, "__tj_using_command pin' -a '(__tj_ext_cmd_pin_a_TARGET)") != null);
+    try std.testing.expect(std.mem.indexOf(u8, fish, "__tj_using_command tui t' -a '(__tj_ext_cmd_tui_a_TARGET)") != null);
 
     const ctl_zsh = try support.Dir.cwd().readFileAlloc(io, options.tjctl_zsh_completion, gpa, .limited(1 << 20));
     defer gpa.free(ctl_zsh);
@@ -276,10 +286,7 @@ test "schema errors use status two and command help" {
         .{ .args = &.{ "complete", "@1", "@2" }, .diagnostic = "too many arguments", .usage = "Usage: tj complete" },
         .{ .args = &.{ "grep", "--color=sometimes", "x" }, .diagnostic = "invalid value", .usage = "Usage: tj grep" },
         .{ .args = &.{ "grep", "--numbers", "--all", "x" }, .diagnostic = "invalid arguments", .usage = "Usage: tj grep" },
-        .{ .args = &.{ "grep", "--numbers", "--color=never", "x" }, .diagnostic = "invalid arguments", .usage = "Usage: tj grep" },
-        .{ .args = &.{"grep"}, .diagnostic = "invalid arguments", .usage = "Usage: tj grep" },
-        .{ .args = &.{ "grep", "needle", "--", "other" }, .diagnostic = "invalid arguments", .usage = "Usage: tj grep" },
-        .{ .args = &.{ "grep", "--", "one", "two" }, .diagnostic = "invalid arguments", .usage = "Usage: tj grep" },
+        .{ .args = &.{"grep"}, .diagnostic = "missing required argument", .usage = "Usage: tj grep" },
     };
     for (cases) |case| {
         const result = try support.runNonTty(gpa, case.args);

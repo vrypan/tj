@@ -26,7 +26,7 @@ test "pin and removal requests select one semantic mode" {
     {
         var parsed = try context.parseTestCommand(.pin, &.{"@2"});
         defer parsed.deinit(gpa);
-        try std.testing.expectEqualStrings("@2", (try cmd_pin.request(&parsed)).set);
+        try std.testing.expectEqualStrings("@2", (try cmd_pin.request(&parsed)).set[0]);
     }
     {
         var parsed = try context.parseTestCommand(.rm, &.{ "--force", "@2", "@4/out", "@6..@8" });

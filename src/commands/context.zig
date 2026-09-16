@@ -233,6 +233,72 @@ pub fn openMutationTargets(
     return .{ .mutation = mutation, .numbers = numbers };
 }
 
+/// Resolve a batch of current-journal entry selectors under one mutation
+/// guard. The returned numbers are sorted and deduplicated, and no marker is
+/// changed until every operand has been validated.
+pub fn openMutationTargetList(
+    gpa: std.mem.Allocator,
+    io: Io,
+    home: ?[]const u8,
+    refs: []const []const u8,
+) !MutationTargets {
+    var mutation = try openCurrentMutation(gpa, io, home, .exclusive);
+    errdefer mutation.deinit(io);
+    const numbers = try selectCurrentNumbers(gpa, io, mutation.root, mutation.journal, refs);
+    return .{ .mutation = mutation, .numbers = numbers };
+}
+
+/// Resolve only unqualified current-journal entry references and ranges.
+/// Paths, resources, qualified references, and empty ranges are rejected.
+pub fn selectCurrentNumbers(
+    gpa: std.mem.Allocator,
+    io: Io,
+    root: store.Dir,
+    journal: []const u8,
+    refs: []const []const u8,
+) ![]u32 {
+    const existing = try store.listNumbers(gpa, io, root, journal);
+    defer gpa.free(existing);
+
+    var selected: std.ArrayList(u32) = .empty;
+    defer selected.deinit(gpa);
+    for (refs) |text| {
+        if (try parseInteractionRange(text)) |range| {
+            if (!rangeSelectsAny(existing, range)) return error.NoSuchInteraction;
+            for (existing) |number| if (range.contains(number)) try selected.append(gpa, number);
+            continue;
+        }
+
+        const parsed_ref = reference.parse(text) catch |err| switch (err) {
+            error.Malformed, error.NotAReference => return error.BadReference,
+        };
+        switch (parsed_ref.body) {
+            .qualified => return error.CrossJournalMutation,
+            else => {},
+        }
+        if (parsed_ref.subpath.len != 0 or parsed_ref.trailing_slash) return error.BadReference;
+
+        const target = try locateCommandTarget(gpa, io, root, text);
+        defer target.deinit(gpa);
+        if (target.syntactically_qualified or !std.mem.eql(u8, target.journal, journal)) {
+            return error.CrossJournalMutation;
+        }
+        try requireInteraction(target);
+        if (std.mem.indexOfScalar(u32, existing, target.number) == null) return error.NoSuchInteraction;
+        try selected.append(gpa, target.number);
+    }
+
+    std.mem.sort(u32, selected.items, {}, std.sort.asc(u32));
+    var unique: usize = 0;
+    for (selected.items) |number| {
+        if (unique != 0 and selected.items[unique - 1] == number) continue;
+        selected.items[unique] = number;
+        unique += 1;
+    }
+    selected.items.len = unique;
+    return selected.toOwnedSlice(gpa);
+}
+
 /// The existing entries a range covers, refusing a range that selects none.
 pub fn selectedNumbers(
     gpa: std.mem.Allocator,
@@ -289,6 +355,14 @@ pub fn parseInteractionRangeEndpoint(text: []const u8) !u32 {
 pub fn rangeSelectsAny(numbers: []const u32, range: InteractionRange) bool {
     for (numbers) |number| if (range.contains(number)) return true;
     return false;
+}
+
+pub fn writeNumbers(out: *Io.Writer, numbers: []const u32) !void {
+    for (numbers, 0..) |number, index| {
+        if (index != 0) try out.writeByte(' ');
+        try out.print("{d}", .{number});
+    }
+    if (numbers.len != 0) try out.writeByte('\n');
 }
 
 test "entry ranges are inclusive numeric current-journal references" {

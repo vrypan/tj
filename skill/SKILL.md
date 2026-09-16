@@ -34,6 +34,7 @@ tj history
 tj history @242
 tj history @2..@10 @15
 tj history @release-build.
+tj history --numbers @2..@10 | tj tui
 ```
 
 ```
@@ -69,6 +70,7 @@ search narrowly instead of opening many outputs:
 ```sh
 tj grep --out 'connection refused'
 tj grep --cmd 'docker compose'
+tj grep 'connection refused' @2..@10 @release-build.42
 ```
 
 Results use history-like rows: two status flags, entry reference, `>` for
@@ -182,6 +184,9 @@ Words such as `@handle` are not entry references and remain literal in an
 interactive command.
 
 Use `tj history --pinned` (or `--pin`) to show only pinned entries.
+Use `tj history --pinned --numbers` or the equivalent `tj pin --numbers` when
+the selected IDs should feed `tj tui`. Numeric output is an ascending,
+deduplicated, current-journal-only space-separated line with no formatting.
 Direct terminal history is deliberately omitted from the entry recording with
 `<tj:noout>` so browsing the index does not duplicate it into the journal.
 Piped or redirected history remains ordinary output.
@@ -194,6 +199,8 @@ targets are processed from left to right and one `--force` applies to all.
 
 Do not add or remove pins unless the user asks. Pin updates and entry/output
 deletion are current-journal-only; qualified references are read-only.
+When asked, `tj pin` and `tj pin --remove` accept multiple unqualified entry
+references and ranges and validate the whole batch before changing markers.
 
 ## Published resources
 

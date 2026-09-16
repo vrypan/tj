@@ -28,7 +28,7 @@ pub fn run(
     out: *Io.Writer,
 ) !u8 {
     switch (which) {
-        .tui => try cmd_tui.run(gpa, io, home),
+        .tui => try cmd_tui.run(gpa, io, home, parsed),
         .filter => return cmd_filter.run(gpa, io, parsed, child, out),
         .history => try cmd_history.listInteractions(gpa, io, home, parsed, out),
         .last => try cmd_history.printLast(gpa, io, home, out),

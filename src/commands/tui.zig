@@ -8,6 +8,7 @@ const Io = std.Io;
 const posix = std.posix;
 const c = std.c;
 const zooi = @import("zooi");
+const zecli = @import("zecli");
 
 const pins = @import("../journal/pins.zig");
 const cmd_pin = @import("pin.zig");
@@ -30,7 +31,15 @@ const Model = tui_model.Model;
 var region_active: std.atomic.Value(bool) = .init(false);
 var region_fd: std.atomic.Value(c_int) = .init(-1);
 
-pub fn run(gpa: std.mem.Allocator, io: Io, home: ?[]const u8) !void {
+pub fn run(gpa: std.mem.Allocator, io: Io, home: ?[]const u8, parsed: *const zecli.Parsed) !void {
+    if (parsed.positionals.items.len != 0) {
+        const journal = try context.currentJournal();
+        var root = try store.openRoot(io, home);
+        defer root.close(io);
+        const numbers = try context.selectCurrentNumbers(gpa, io, root, journal, parsed.positionals.items);
+        defer gpa.free(numbers);
+        return runWithFilter(gpa, io, home, numbers);
+    }
     if (!sys.isTty(io, 0)) {
         const numbers = try readFilterNumbers(gpa, io);
         defer gpa.free(numbers);

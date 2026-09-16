@@ -51,7 +51,7 @@ pub const HistoryCursor = struct {
     selection: usize = 0,
     index: usize = 0,
 
-    const Item = struct {
+    pub const Item = struct {
         journal_index: usize,
         number: u32,
         qualified: bool,
@@ -88,6 +88,56 @@ pub const HistoryCursor = struct {
             }
         }
         return null;
+    }
+};
+
+pub const HistoryScope = struct {
+    journals: std.ArrayList(HistoryJournal) = .empty,
+    selections: std.ArrayList(HistorySelection) = .empty,
+
+    pub fn deinit(self: *HistoryScope, gpa: std.mem.Allocator) void {
+        for (self.journals.items) |*journal| journal.deinit(gpa);
+        self.journals.deinit(gpa);
+        self.selections.deinit(gpa);
+        self.* = .{};
+    }
+
+    pub fn cursor(self: *const HistoryScope) HistoryCursor {
+        return .{ .journals = self.journals.items, .selections = self.selections.items };
+    }
+
+    pub fn selectedUniqueNumbers(
+        self: *const HistoryScope,
+        gpa: std.mem.Allocator,
+        journal_index: usize,
+    ) ![]u32 {
+        var numbers: std.ArrayList(u32) = .empty;
+        errdefer numbers.deinit(gpa);
+        const journal = &self.journals.items[journal_index];
+        for (journal.numbers) |number| {
+            for (self.selections.items) |selection| {
+                if (selection.journal_index != journal_index) continue;
+                const matches = switch (selection.what) {
+                    .whole => true,
+                    .range => |range| range.contains(number),
+                    .single => |single| single == number,
+                };
+                if (matches) {
+                    try numbers.append(gpa, number);
+                    break;
+                }
+            }
+        }
+        return numbers.toOwnedSlice(gpa);
+    }
+
+    pub fn journalQualified(self: *const HistoryScope, journal_index: usize, current: ?[]const u8) bool {
+        const journal = &self.journals.items[journal_index];
+        if (current == null or !std.mem.eql(u8, current.?, journal.name)) return true;
+        for (self.selections.items) |selection| {
+            if (selection.journal_index == journal_index and selection.qualified) return true;
+        }
+        return false;
     }
 };
 
@@ -150,6 +200,64 @@ pub fn appendWholeHistoryJournal(
     });
 }
 
+pub fn selectHistoryScope(
+    gpa: std.mem.Allocator,
+    io: Io,
+    root: store.Dir,
+    targets: []const []const u8,
+    default_current: bool,
+) !HistoryScope {
+    var scope: HistoryScope = .{};
+    errdefer scope.deinit(gpa);
+
+    if (targets.len == 0) {
+        if (default_current) {
+            try appendWholeHistoryJournal(gpa, io, root, &scope.journals, &scope.selections, try context.currentJournal(), false);
+        }
+        return scope;
+    }
+
+    for (targets) |text| {
+        if (parseHistoryJournalSelector(text)) |suffix| {
+            const journal = try store.findUniqueJournal(gpa, io, root, suffix);
+            defer gpa.free(journal);
+            try appendWholeHistoryJournal(gpa, io, root, &scope.journals, &scope.selections, journal, true);
+            continue;
+        }
+
+        const maybe_range = context.parseInteractionRange(text) catch |err| switch (err) {
+            error.CrossJournalMutation => return error.InvalidRange,
+            else => |other| return other,
+        };
+        if (maybe_range) |range| {
+            const journal_index = try loadHistoryJournal(gpa, io, root, &scope.journals, try context.currentJournal());
+            if (!context.rangeSelectsAny(scope.journals.items[journal_index].numbers, range)) {
+                return error.NoSuchInteraction;
+            }
+            try scope.selections.append(gpa, .{
+                .journal_index = journal_index,
+                .qualified = false,
+                .what = .{ .range = range },
+            });
+            continue;
+        }
+
+        const target = try context.locateCommandTarget(gpa, io, root, text);
+        defer target.deinit(gpa);
+        try context.requireInteraction(target);
+        const journal_index = try loadHistoryJournal(gpa, io, root, &scope.journals, target.journal);
+        if (!scope.journals.items[journal_index].has(target.number)) return error.NoSuchInteraction;
+        const current = sys.env("TJ_JOURNAL");
+        try scope.selections.append(gpa, .{
+            .journal_index = journal_index,
+            .qualified = target.syntactically_qualified or current == null or
+                !std.mem.eql(u8, current.?, target.journal),
+            .what = .{ .single = target.number },
+        });
+    }
+    return scope;
+}
+
 pub fn writeHistoryReference(
     out: *Io.Writer,
     journal: *const HistoryJournal,
@@ -178,55 +286,32 @@ pub fn listInteractions(
 
     const pinned_only = parsed.enabled("pinned");
 
-    var journals: std.ArrayList(HistoryJournal) = .empty;
-    defer {
-        for (journals.items) |*journal| journal.deinit(gpa);
-        journals.deinit(gpa);
-    }
-    var selected: std.ArrayList(HistorySelection) = .empty;
-    defer selected.deinit(gpa);
+    var scope = try selectHistoryScope(gpa, io, root, parsed.positionals.items, true);
+    defer scope.deinit(gpa);
 
-    if (parsed.positionals.items.len == 0) {
-        try appendWholeHistoryJournal(gpa, io, root, &journals, &selected, try context.currentJournal(), false);
-    } else {
-        for (parsed.positionals.items) |text| {
-            if (parseHistoryJournalSelector(text)) |suffix| {
-                const journal = try store.findUniqueJournal(gpa, io, root, suffix);
-                defer gpa.free(journal);
-                try appendWholeHistoryJournal(gpa, io, root, &journals, &selected, journal, true);
-                continue;
-            }
-
-            const maybe_range = context.parseInteractionRange(text) catch |err| switch (err) {
-                error.CrossJournalMutation => return error.InvalidRange,
-                else => |other| return other,
-            };
-            if (maybe_range) |range| {
-                const journal_index = try loadHistoryJournal(gpa, io, root, &journals, try context.currentJournal());
-                if (!context.rangeSelectsAny(journals.items[journal_index].numbers, range)) {
-                    return error.NoSuchInteraction;
-                }
-                try selected.append(gpa, .{
-                    .journal_index = journal_index,
-                    .qualified = false,
-                    .what = .{ .range = range },
-                });
-                continue;
-            }
-
-            const target = try context.locateCommandTarget(gpa, io, root, text);
-            defer target.deinit(gpa);
-            try context.requireInteraction(target);
-            const journal_index = try loadHistoryJournal(gpa, io, root, &journals, target.journal);
-            if (!journals.items[journal_index].has(target.number)) return error.NoSuchInteraction;
-            const current = sys.env("TJ_JOURNAL");
-            try selected.append(gpa, .{
-                .journal_index = journal_index,
-                .qualified = target.syntactically_qualified or current == null or
-                    !std.mem.eql(u8, current.?, target.journal),
-                .what = .{ .single = target.number },
-            });
+    if (parsed.enabled("numbers")) {
+        const current = try context.currentJournal();
+        for (scope.journals.items) |journal| {
+            if (!std.mem.eql(u8, journal.name, current)) return error.BadArguments;
         }
+        if (scope.journals.items.len == 0) return;
+        const allocated_numbers = try scope.selectedUniqueNumbers(gpa, 0);
+        defer gpa.free(allocated_numbers);
+        var numbers = allocated_numbers;
+        if (pinned_only) {
+            var kept: usize = 0;
+            for (numbers) |number| {
+                if (!try pins.isPinned(io, root, current, number)) continue;
+                numbers[kept] = number;
+                kept += 1;
+            }
+            numbers.len = kept;
+        }
+        var noout_region: report.NooutRegion = .{ .out = out, .enabled = sys.isTty(io, 1) };
+        defer noout_region.finish();
+        if (numbers.len != 0) try noout_region.begin();
+        try context.writeNumbers(out, numbers);
+        return;
     }
 
     // Column widths depend on every visible entry, so they need a pass before
@@ -240,8 +325,8 @@ pub fn listInteractions(
     // guessed, and a listing lines up with every other listing of the same
     // journal instead of shifting with whatever the filter happened to match.
     var number_width: usize = 1;
-    for (selected.items) |selection| {
-        const journal = &journals.items[selection.journal_index];
+    for (scope.selections.items) |selection| {
+        const journal = &scope.journals.items[selection.journal_index];
         if (journal.numbers.len == 0) continue;
         var width = report.decimalWidth(journal.numbers[journal.numbers.len - 1]);
         if (selection.qualified) width += 1 + journal.name.len + 1;
@@ -265,9 +350,9 @@ pub fn listInteractions(
     defer noout_region.finish();
     const now_ms = Io.Clock.now(.real, io).toMilliseconds();
 
-    var render_cursor: HistoryCursor = .{ .journals = journals.items, .selections = selected.items };
+    var render_cursor = scope.cursor();
     while (render_cursor.next()) |item| {
-        const journal = &journals.items[item.journal_index];
+        const journal = &scope.journals.items[item.journal_index];
         const pinned = try pins.isPinned(io, root, journal.name, item.number);
         if (pinned_only and !pinned) continue;
 

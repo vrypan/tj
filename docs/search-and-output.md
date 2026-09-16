@@ -10,19 +10,27 @@ tj grep --cmd docker
 tj grep --out 'connection refused'
 tj grep --all example.com
 tj grep --ignore-case warning
+tj grep warning @20 @30..@40 @release-build.42
 tj grep warning --numbers
 tj grep warning --numbers | tj tui
 tj grep -- --pattern-starting-with-a-dash
 ```
 
 Options that select `--cmd` or `--out` may be combined. Without either option,
-both are searched. `--all` searches every journal.
+both are searched. Targets select entries, ranges, or complete journals using
+the same syntax as history. Selected journals are visited in first-selected
+order and their entries in ascending numeric order; duplicates are suppressed.
+Fully qualified targets work without a current journal. Without targets, grep
+searches the current journal. `--all` searches every journal and cannot be
+combined with targets.
 
 `--numbers` prints each matching entry number once as one space-separated line,
 even when several lines or both resources match. It searches the current
 journal and may be combined with `--cmd`, `--out`, and `--ignore-case`. Pipe
-it to `tj tui` to browse the matches. It cannot be combined with `--all` or
-`--color` because its unqualified numbers belong to the current journal.
+it to `tj tui` to browse the matches. It cannot be combined with `--all` or an
+explicit `--color=auto`/`always` setting because its unqualified numbers belong
+to the current journal. Explicit `--color=never` is allowed. Every selected
+target must resolve to the current journal before numeric output begins.
 
 Exit status is `0` when a match is found, `1` when no match is found, and
 greater than `1` for an error.
@@ -41,10 +49,17 @@ tj grep --color=always error
 tj grep --color=never error
 ```
 
-`auto` uses color only on a terminal, `always` emits color for pipes too, and
-`never` disables it. The default is `never`. The optional
+An explicit color setting controls both layout and match highlighting. `auto`
+uses the terminal and `NO_COLOR` policy, `always` emits both kinds of color for
+pipes too, and `never` disables both. With no setting, layout color remains
+automatic while matches are not highlighted. The optional
 `contrib/tj-grep` script adds ripgrep regular expressions, context, line
 numbers, and arbitrary `rg` options; new scripts should use `tj grep`.
+
+For ordinary `tj` commands, `--` ends option parsing and later words remain
+literal operands. This permits dash-leading patterns, for example
+`tj grep -- -pattern @42`. `tj filter -- COMMAND...` remains the exception:
+its tail is child process argv.
 
 When shown directly in a journal terminal, grep and history enclose their own
 display in a noout region so search results do not become input to the next

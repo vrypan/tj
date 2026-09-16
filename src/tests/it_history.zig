@@ -41,6 +41,27 @@ test "history wraps to terminal width and pipes remain one entry per line" {
 
     const id = try journal.journalName(gpa);
     defer gpa.free(id);
+
+    const cat_after_separator = try support.runNonTtyInJournal(
+        gpa,
+        &.{ "--home", home, "cat", "--", "@1/out" },
+        id,
+        "6",
+    );
+    defer gpa.free(cat_after_separator.stdout);
+    defer gpa.free(cat_after_separator.stderr);
+    try std.testing.expectEqual(@as(u8, 0), cat_after_separator.term.exited);
+    try std.testing.expect(std.mem.indexOf(u8, cat_after_separator.stdout, "one two three") != null);
+    const resolve_after_separator = try support.runNonTtyInJournal(
+        gpa,
+        &.{ "--home", home, "resolve", "--", "@1" },
+        id,
+        "6",
+    );
+    defer gpa.free(resolve_after_separator.stdout);
+    defer gpa.free(resolve_after_separator.stderr);
+    try std.testing.expectEqual(@as(u8, 0), resolve_after_separator.term.exited);
+    try std.testing.expect(std.mem.endsWith(u8, resolve_after_separator.stdout, "/1\n"));
     const piped = try support.runNonTtyInJournal(gpa, &.{ "--home", home, "history" }, id, "3");
     defer gpa.free(piped.stdout);
     defer gpa.free(piped.stderr);
@@ -169,6 +190,49 @@ test "history shows pin and failure flags size UTC date and wrapped commands" {
     try std.testing.expect(std.mem.indexOf(u8, pinned.stdout, "printf 1234567890") != null);
     try std.testing.expect(std.mem.indexOf(u8, pinned.stdout, "false") == null);
 
+    const numeric = try support.runNonTtyInJournal(
+        gpa,
+        &.{ "--home", home, "history", "--numbers", "@2", "@1..@2", "@1" },
+        id,
+        "4",
+    );
+    defer gpa.free(numeric.stdout);
+    defer gpa.free(numeric.stderr);
+    try std.testing.expectEqual(@as(u8, 0), numeric.term.exited);
+    try std.testing.expectEqualStrings("1 2\n", numeric.stdout);
+    try std.testing.expectEqualStrings("", numeric.stderr);
+    try std.testing.expect(std.mem.indexOfScalar(u8, numeric.stdout, 0x1b) == null);
+
+    const qualified_current = try std.fmt.allocPrint(gpa, "@{s}.1", .{id});
+    defer gpa.free(qualified_current);
+    const qualified_numeric = try support.runNonTtyInJournal(
+        gpa,
+        &.{ "--home", home, "history", "--numbers", qualified_current },
+        id,
+        "4",
+    );
+    defer gpa.free(qualified_numeric.stdout);
+    defer gpa.free(qualified_numeric.stderr);
+    try std.testing.expectEqualStrings("1\n", qualified_numeric.stdout);
+
+    const history_pins = try support.runNonTtyInJournal(
+        gpa,
+        &.{ "--home", home, "history", "--pinned", "--numbers" },
+        id,
+        "4",
+    );
+    defer gpa.free(history_pins.stdout);
+    defer gpa.free(history_pins.stderr);
+    const pin_numbers = try support.runNonTtyInJournal(gpa, &.{ "--home", home, "pin", "--numbers" }, id, "4");
+    defer gpa.free(pin_numbers.stdout);
+    defer gpa.free(pin_numbers.stderr);
+    try std.testing.expectEqual(@as(u8, 0), history_pins.term.exited);
+    try std.testing.expectEqualStrings("", history_pins.stderr);
+    try std.testing.expectEqual(@as(u8, 0), pin_numbers.term.exited);
+    try std.testing.expectEqualStrings("", pin_numbers.stderr);
+    try std.testing.expectEqualStrings("1\n", history_pins.stdout);
+    try std.testing.expectEqualStrings(history_pins.stdout, pin_numbers.stdout);
+
     // Columns are fixed rather than fitted to whatever a filter matched, so a
     // narrowed listing lines up with the full one instead of shifting left.
     const whole_line = "*  1   10b Aug 29  2001 printf";
@@ -183,6 +247,20 @@ test "history shows pin and failure flags size UTC date and wrapped commands" {
         defer gpa.free(narrowed.stderr);
         try std.testing.expect(std.mem.indexOf(u8, narrowed.stdout, whole_line) != null);
     }
+
+    const unpin_after_target = try support.runNonTtyInJournal(
+        gpa,
+        &.{ "--home", home, "pin", "@1", "--remove" },
+        id,
+        "4",
+    );
+    defer gpa.free(unpin_after_target.stdout);
+    defer gpa.free(unpin_after_target.stderr);
+    try std.testing.expectEqual(@as(u8, 0), unpin_after_target.term.exited);
+    const empty_pins = try support.runNonTtyInJournal(gpa, &.{ "--home", home, "pin", "--numbers" }, id, "4");
+    defer gpa.free(empty_pins.stdout);
+    defer gpa.free(empty_pins.stderr);
+    try std.testing.expectEqualStrings("", empty_pins.stdout);
 }
 
 test "history accepts ordered entry ranges and trailing-dot journal selectors" {
@@ -254,6 +332,17 @@ test "history accepts ordered entry ranges and trailing-dot journal selectors" {
     const qualified = try std.fmt.allocPrint(gpa, "@{s}.1", .{foreign});
     defer gpa.free(qualified);
     try std.testing.expect(std.mem.indexOf(u8, mixed.stdout, qualified) != null);
+
+    const foreign_numeric = try support.runNonTtyInJournal(
+        gpa,
+        &.{ "--home", home, "history", "--numbers", "@1", journal_selector },
+        id,
+        "5",
+    );
+    defer gpa.free(foreign_numeric.stdout);
+    defer gpa.free(foreign_numeric.stderr);
+    try std.testing.expectEqual(@as(u8, 2), foreign_numeric.term.exited);
+    try std.testing.expectEqualStrings("", foreign_numeric.stdout);
 
     const bare = try support.runNonTtyInJournal(gpa, &.{ "--home", home, "history", suffix }, id, "5");
     defer gpa.free(bare.stdout);

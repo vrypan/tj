@@ -129,6 +129,34 @@ test "tui filters entries from a space-separated stdin list" {
     try terminal.expectPromptFrom(from);
 
     from = transcript.items.len;
+    try terminal.write("print -r -- 'not numeric' | command \"$TJ\" tui '@4' '@1..@3' '@1'\n");
+    try terminal.expectFrom(from, "4 entries");
+    try terminal.expectFrom(from, "FILTER_KEEP_ONE");
+    try terminal.expectFrom(from, "FILTER_DROP_TWO");
+    try terminal.expectFrom(from, "FILTER_KEEP_THREE");
+    try terminal.expectFrom(from, "FILTER_KEEP_FOUR");
+    try terminal.write("q");
+    try terminal.expectPromptFrom(from);
+
+    from = transcript.items.len;
+    try terminal.write("command \"$TJ\" history --numbers '@1' '@3' | command \"$TJ\" tui\n");
+    try terminal.expectFrom(from, "2 entries");
+    try terminal.write("q");
+    try terminal.expectPromptFrom(from);
+
+    from = transcript.items.len;
+    try terminal.write("command \"$TJ\" pin '@1' '@3'; command \"$TJ\" pin --numbers | command \"$TJ\" tui\n");
+    try terminal.expectFrom(from, "2 entries");
+    try terminal.write("q");
+    try terminal.expectPromptFrom(from);
+
+    from = transcript.items.len;
+    try terminal.write("command \"$TJ\" tui '@999'\n");
+    try terminal.expectFrom(from, "cannot open the journal browser");
+    try terminal.expectPromptFrom(from);
+    try std.testing.expect(std.mem.indexOf(u8, transcript.items[from..], "\x1b[?1049h") == null);
+
+    from = transcript.items.len;
     try terminal.write("print -r -- '1 nope' | command \"$TJ\" tui\n");
     try terminal.expectFrom(from, "tui stdin must contain space-separated entry numbers");
     try terminal.expectPromptFrom(from);
