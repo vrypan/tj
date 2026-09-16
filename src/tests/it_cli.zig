@@ -62,7 +62,7 @@ test "application and every command expose generated help" {
         defer gpa.free(usage);
         try std.testing.expect(std.mem.indexOf(u8, result.stdout, usage) != null);
         if (std.mem.eql(u8, name, "grep")) {
-            try std.testing.expect(std.mem.indexOf(u8, result.stdout, "--numbers") != null);
+            try std.testing.expect(std.mem.indexOf(u8, result.stdout, "--ids") != null);
             try std.testing.expect(std.mem.indexOf(u8, result.stdout, "--tui") == null);
             try std.testing.expect(std.mem.indexOf(u8, result.stdout, "Arguments:") != null);
             try std.testing.expect(std.mem.indexOf(u8, result.stdout, "Options:") != null);
@@ -227,7 +227,7 @@ test "build-time completions expose cli grammar and journal references" {
     defer gpa.free(bash);
     try std.testing.expect(std.mem.indexOf(u8, bash, "complete -F _tj tj") != null);
     try std.testing.expect(std.mem.indexOf(u8, bash, "--pinned") != null);
-    try std.testing.expect(std.mem.indexOf(u8, bash, "--numbers") != null);
+    try std.testing.expect(std.mem.indexOf(u8, bash, "--ids") != null);
     try std.testing.expect(std.mem.indexOf(u8, bash, "never\\nauto\\nalways") != null);
     try std.testing.expect(std.mem.indexOf(u8, bash, "_tj__cmd_grep()") != null);
     try std.testing.expect(std.mem.indexOf(u8, bash, "*)\n            __tj_ext_cmd_grep_a_TARGET") != null);
@@ -285,7 +285,7 @@ test "schema errors use status two and command help" {
         .{ .args = &.{"resolve"}, .diagnostic = "missing required argument", .usage = "Usage: tj resolve" },
         .{ .args = &.{ "complete", "@1", "@2" }, .diagnostic = "too many arguments", .usage = "Usage: tj complete" },
         .{ .args = &.{ "grep", "--color=sometimes", "x" }, .diagnostic = "invalid value", .usage = "Usage: tj grep" },
-        .{ .args = &.{ "grep", "--numbers", "--all", "x" }, .diagnostic = "invalid arguments", .usage = "Usage: tj grep" },
+        .{ .args = &.{ "grep", "--ids", "--all", "x" }, .diagnostic = "invalid arguments", .usage = "Usage: tj grep" },
         .{ .args = &.{"grep"}, .diagnostic = "missing required argument", .usage = "Usage: tj grep" },
     };
     for (cases) |case| {

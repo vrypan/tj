@@ -92,7 +92,7 @@ pub fn main(init: std.process.Init) !u8 {
             try zecli.printCommandHelp(arena, stderr, spec);
         }
         try stderr.flush();
-        if (isUsageError(err) or err == error.NoSuchInteraction) return 2;
+        if (isUsageError(err)) return 2;
         if (which == .grep) return 2;
         return 1;
     };

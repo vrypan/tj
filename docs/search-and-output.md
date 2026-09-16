@@ -11,8 +11,8 @@ tj grep --out 'connection refused'
 tj grep --all example.com
 tj grep --ignore-case warning
 tj grep warning @20 @30..@40 @release-build.42
-tj grep warning --numbers
-tj grep warning --numbers | tj tui
+tj grep warning --ids
+tj grep warning --ids | tj tui
 tj grep -- --pattern-starting-with-a-dash
 ```
 
@@ -24,13 +24,13 @@ Fully qualified targets work without a current journal. Without targets, grep
 searches the current journal. `--all` searches every journal and cannot be
 combined with targets.
 
-`--numbers` prints each matching entry number once as one space-separated line,
+`--ids` prints each matching entry number once as one space-separated line,
 even when several lines or both resources match. It searches the current
 journal and may be combined with `--cmd`, `--out`, and `--ignore-case`. Pipe
-it to `tj tui` to browse the matches. It cannot be combined with `--all` or an
-explicit `--color=auto`/`always` setting because its unqualified numbers belong
-to the current journal. Explicit `--color=never` is allowed. Every selected
-target must resolve to the current journal before numeric output begins.
+it to `tj tui` to browse the matches. It cannot be combined with `--all`, but
+any `--color` setting may be given alongside it: `--ids` output is always
+plain regardless of color. Every selected target must resolve to the current
+journal before id output begins.
 
 Exit status is `0` when a match is found, `1` when no match is found, and
 greater than `1` for an error.

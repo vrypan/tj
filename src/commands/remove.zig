@@ -12,12 +12,22 @@ const cmd_pin = @import("pin.zig");
 
 pub const RemoveRequest = struct {
     targets: []const []const u8,
-    force: bool,
+    include_pinned: bool,
+    ignore_missing: bool,
+    stdin: bool,
 };
 
 pub fn removeRequest(parsed: *const zecli.Parsed) !RemoveRequest {
-    if (parsed.positionals.items.len == 0) return error.BadArguments;
-    return .{ .targets = parsed.positionals.items, .force = parsed.enabled("force") };
+    const stdin = parsed.enabled("stdin");
+    const targets = parsed.positionals.items;
+    if (stdin and targets.len != 0) return error.BadArguments;
+    if (!stdin and targets.len == 0) return error.BadArguments;
+    return .{
+        .targets = targets,
+        .include_pinned = parsed.enabled("include-pinned"),
+        .ignore_missing = parsed.enabled("ignore-missing"),
+        .stdin = stdin,
+    };
 }
 
 test "pin and removal requests select one semantic mode" {
@@ -29,14 +39,34 @@ test "pin and removal requests select one semantic mode" {
         try std.testing.expectEqualStrings("@2", (try cmd_pin.request(&parsed)).set[0]);
     }
     {
-        var parsed = try context.parseTestCommand(.rm, &.{ "--force", "@2", "@4/out", "@6..@8" });
+        var parsed = try context.parseTestCommand(.rm, &.{ "--include-pinned", "@2", "@4/out", "@6..@8" });
         defer parsed.deinit(gpa);
         const request = try removeRequest(&parsed);
         try std.testing.expectEqual(@as(usize, 3), request.targets.len);
         try std.testing.expectEqualStrings("@2", request.targets[0]);
         try std.testing.expectEqualStrings("@4/out", request.targets[1]);
         try std.testing.expectEqualStrings("@6..@8", request.targets[2]);
-        try std.testing.expect(request.force);
+        try std.testing.expect(request.include_pinned);
+        try std.testing.expect(!request.ignore_missing);
+        try std.testing.expect(!request.stdin);
+    }
+    {
+        var parsed = try context.parseTestCommand(.rm, &.{ "--stdin", "--ignore-missing" });
+        defer parsed.deinit(gpa);
+        const request = try removeRequest(&parsed);
+        try std.testing.expectEqual(@as(usize, 0), request.targets.len);
+        try std.testing.expect(request.stdin);
+        try std.testing.expect(request.ignore_missing);
+    }
+    {
+        var parsed = try context.parseTestCommand(.rm, &.{ "--stdin", "@2" });
+        defer parsed.deinit(gpa);
+        try std.testing.expectError(error.BadArguments, removeRequest(&parsed));
+    }
+    {
+        var parsed = try context.parseTestCommand(.rm, &.{});
+        defer parsed.deinit(gpa);
+        try std.testing.expectError(error.BadArguments, removeRequest(&parsed));
     }
 }
 
@@ -51,9 +81,42 @@ pub fn removeCommand(
     const request = try removeRequest(parsed);
     var mutation = try context.openCurrentMutation(gpa, io, home, .exclusive);
     defer mutation.deinit(io);
-    for (request.targets) |target| {
-        try removeTarget(gpa, io, &mutation, target, request.force);
+
+    if (request.stdin) {
+        const numbers = try context.readNumberSelection(gpa, io);
+        defer gpa.free(numbers);
+        if (numbers.len == 0) return;
+        const filtered = if (request.ignore_missing)
+            try filterExisting(gpa, io, &mutation, numbers)
+        else
+            numbers;
+        defer if (request.ignore_missing) gpa.free(filtered);
+        if (filtered.len == 0) return;
+        const result = try removeNumbers(gpa, io, &mutation, filtered, request.include_pinned);
+        noteSkippedPins(io, result.skipped_pinned);
+        return;
     }
+
+    for (request.targets) |target| {
+        removeTarget(gpa, io, &mutation, target, request.include_pinned) catch |err| switch (err) {
+            error.NoSuchInteraction => if (request.ignore_missing) continue else return err,
+            else => return err,
+        };
+    }
+}
+
+fn filterExisting(
+    gpa: std.mem.Allocator,
+    io: Io,
+    mutation: *context.Mutation,
+    numbers: []const u32,
+) ![]u32 {
+    var kept: std.ArrayList(u32) = .empty;
+    errdefer kept.deinit(gpa);
+    for (numbers) |number| {
+        if (store.interactionExists(io, mutation.root, mutation.journal, number)) try kept.append(gpa, number);
+    }
+    return kept.toOwnedSlice(gpa);
 }
 
 pub fn removeJournal(
@@ -100,12 +163,12 @@ fn removeTarget(
     io: Io,
     mutation: *context.Mutation,
     interaction: []const u8,
-    force: bool,
+    include_pinned: bool,
 ) !void {
     if (try context.parseInteractionRange(interaction)) |range| {
         const selected = try context.selectedNumbers(gpa, io, mutation.root, mutation.journal, range);
         defer gpa.free(selected);
-        const result = try removeNumbers(gpa, io, mutation, selected, force);
+        const result = try removeNumbers(gpa, io, mutation, selected, include_pinned);
         noteSkippedPins(io, result.skipped_pinned);
         return;
     }
@@ -120,8 +183,8 @@ fn removeTarget(
         return error.NoSuchInteraction;
     if (target.number >= highest) return error.CurrentInteraction;
 
-    if (!force and try pins.isPinned(io, mutation.root, mutation.journal, target.number)) {
-        context.note(io, "tj: skipped pinned entry @{d}; use --force to remove it\n", .{target.number});
+    if (!include_pinned and try pins.isPinned(io, mutation.root, mutation.journal, target.number)) {
+        context.note(io, "tj: skipped pinned entry @{d}; use --include-pinned to remove it\n", .{target.number});
         return;
     }
 
@@ -150,11 +213,11 @@ pub fn removeInteractionNumbers(
     io: Io,
     home: ?[]const u8,
     numbers: []const u32,
-    force: bool,
+    include_pinned: bool,
 ) !RemovalResult {
     var mutation = try context.openCurrentMutation(gpa, io, home, .exclusive);
     defer mutation.deinit(io);
-    return removeNumbers(gpa, io, &mutation, numbers, force);
+    return removeNumbers(gpa, io, &mutation, numbers, include_pinned);
 }
 
 fn removeNumbers(
@@ -162,7 +225,7 @@ fn removeNumbers(
     io: Io,
     mutation: *context.Mutation,
     numbers: []const u32,
-    force: bool,
+    include_pinned: bool,
 ) !RemovalResult {
     if (numbers.len == 0) return error.NoSuchInteraction;
     const highest = try store.highestNumber(gpa, io, mutation.root, mutation.journal) orelse
@@ -185,7 +248,7 @@ fn removeNumbers(
 
     var skipped_pinned: usize = 0;
     for (numbers) |number| {
-        if (!force and try pins.isPinned(io, mutation.root, mutation.journal, number)) {
+        if (!include_pinned and try pins.isPinned(io, mutation.root, mutation.journal, number)) {
             skipped_pinned += 1;
             continue;
         }
@@ -199,7 +262,7 @@ fn removeNumbers(
 
 fn noteSkippedPins(io: Io, skipped_pinned: usize) void {
     if (skipped_pinned == 0) return;
-    context.note(io, "tj: skipped {d} pinned {s}; use --force to remove {s}\n", .{
+    context.note(io, "tj: skipped {d} pinned {s}; use --include-pinned to remove {s}\n", .{
         skipped_pinned,
         if (skipped_pinned == 1) "entry" else "entries",
         if (skipped_pinned == 1) "it" else "them",

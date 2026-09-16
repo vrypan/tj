@@ -18,7 +18,7 @@ pub const Request = union(enum) {
 
 pub fn request(parsed: *const zecli.Parsed) !Request {
     const args = parsed.positionals.items;
-    if (parsed.enabled("numbers")) {
+    if (parsed.enabled("ids")) {
         if (args.len != 0 or parsed.enabled("remove")) return error.BadArguments;
         return .{ .list = true };
     }
@@ -31,6 +31,12 @@ pub fn request(parsed: *const zecli.Parsed) !Request {
 }
 
 pub fn pinCommand(gpa: std.mem.Allocator, io: Io, home: ?[]const u8, parsed: *const zecli.Parsed, out: *Io.Writer) !void {
+    if (parsed.positionals.items.len == 0 and !parsed.enabled("ids") and !sys.isTty(io, 0)) {
+        const numbers = try context.readNumberSelection(gpa, io);
+        defer gpa.free(numbers);
+        if (numbers.len == 0) return;
+        return updatePinNumbers(gpa, io, home, numbers, !parsed.enabled("remove"));
+    }
     switch (try request(parsed)) {
         .list => |numbers_only| {
             const current = try context.currentJournal();

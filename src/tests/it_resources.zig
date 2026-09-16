@@ -348,7 +348,7 @@ test "native grep searches literal command and output lines with stable statuses
     try std.testing.expect(std.mem.indexOf(u8, both.stdout, "   4 >") != null);
     try std.testing.expect(std.mem.indexOf(u8, both.stdout, "   4 <") != null);
 
-    const numbers = try support.runNonTtyInJournal(gpa, &.{ "--home", home, "grep", "LITERAL_012", "--numbers" }, id, "");
+    const numbers = try support.runNonTtyInJournal(gpa, &.{ "--home", home, "grep", "LITERAL_012", "--ids" }, id, "");
     defer gpa.free(numbers.stdout);
     defer gpa.free(numbers.stderr);
     try std.testing.expectEqual(@as(u8, 0), numbers.term.exited);
@@ -357,7 +357,7 @@ test "native grep searches literal command and output lines with stable statuses
 
     const selected_numbers = try support.runNonTtyInJournal(
         gpa,
-        &.{ "--home", home, "grep", "LITERAL_012", "@4", "@1..@2", "@1", "--numbers", "--color=never" },
+        &.{ "--home", home, "grep", "LITERAL_012", "@4", "@1..@2", "@1", "--ids", "--color=never" },
         id,
         "",
     );
@@ -408,11 +408,11 @@ test "native grep searches literal command and output lines with stable statuses
     try std.testing.expectEqual(@as(u8, 2), outside.term.exited);
     try std.testing.expectEqualStrings("tj grep: no current journal; use --all\n", outside.stderr);
 
-    const numbers_outside = try support.runNonTtyInJournal(gpa, &.{ "--home", home, "grep", "x", "--numbers" }, "", "");
+    const numbers_outside = try support.runNonTtyInJournal(gpa, &.{ "--home", home, "grep", "x", "--ids" }, "", "");
     defer gpa.free(numbers_outside.stdout);
     defer gpa.free(numbers_outside.stderr);
     try std.testing.expectEqual(@as(u8, 2), numbers_outside.term.exited);
-    try std.testing.expectEqualStrings("tj grep --numbers: no current journal\n", numbers_outside.stderr);
+    try std.testing.expectEqualStrings("tj grep --ids: no current journal\n", numbers_outside.stderr);
 
     const help = try support.runNonTtyInJournal(gpa, &.{ "grep", "--help" }, "", "");
     defer gpa.free(help.stdout);
@@ -505,7 +505,7 @@ test "history and grep never replay stored terminal controls" {
     try journal.writeFile(io, .{ .sub_path = "1/out", .data = dangerous ++ "\n" });
     try journal.writeFile(io, .{ .sub_path = "1/rc", .data = "0\n" });
 
-    const history = try support.runNonTtyInJournal(gpa, &.{ "--home", scratch.path(), "history" }, &id, "3");
+    const history = try support.runNonTtyInJournal(gpa, &.{ "--home", scratch.path(), "history", "@1..@999999" }, &id, "3");
     defer gpa.free(history.stdout);
     defer gpa.free(history.stderr);
     try std.testing.expectEqual(@as(u8, 0), history.term.exited);
@@ -650,7 +650,7 @@ test "grep numbers preserves numeric order and match status" {
 
     var matched = try support.run(
         gpa,
-        &.{ "--home", home, "grep", "--cmd", "--numbers", "ORDERED_GREP_MATCH" },
+        &.{ "--home", home, "grep", "--cmd", "--ids", "ORDERED_GREP_MATCH" },
         24,
         80,
     );
@@ -663,7 +663,7 @@ test "grep numbers preserves numeric order and match status" {
 
     var absent = try support.run(
         gpa,
-        &.{ "--home", home, "grep", "--cmd", "--numbers", "NO_SUCH_GREP_MATCH" },
+        &.{ "--home", home, "grep", "--cmd", "--ids", "NO_SUCH_GREP_MATCH" },
         24,
         80,
     );

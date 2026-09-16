@@ -11,6 +11,7 @@ const pins = @import("../journal/pins.zig");
 const report = @import("../presentation/report.zig");
 const context = @import("context.zig");
 const presentation = @import("../presentation/entry.zig");
+const cmd_grep = @import("grep.zig");
 
 pub const HistoryJournal = struct {
     name: []u8,
@@ -258,6 +259,34 @@ pub fn selectHistoryScope(
     return scope;
 }
 
+/// Builds a scope from a redirected-stdin entry-number selection instead of
+/// command-line target operands. Every number must already exist in the
+/// current journal; validation happens before any selection is recorded, so a
+/// stale id is rejected before history prints anything.
+pub fn selectHistoryScopeFromStdin(
+    gpa: std.mem.Allocator,
+    io: Io,
+    root: store.Dir,
+    numbers: []const u32,
+) !HistoryScope {
+    var scope: HistoryScope = .{};
+    errdefer scope.deinit(gpa);
+    if (numbers.len == 0) return scope;
+
+    const journal_index = try loadHistoryJournal(gpa, io, root, &scope.journals, try context.currentJournal());
+    for (numbers) |number| {
+        if (!scope.journals.items[journal_index].has(number)) return error.NoSuchInteraction;
+    }
+    for (numbers) |number| {
+        try scope.selections.append(gpa, .{
+            .journal_index = journal_index,
+            .qualified = false,
+            .what = .{ .single = number },
+        });
+    }
+    return scope;
+}
+
 pub fn writeHistoryReference(
     out: *Io.Writer,
     journal: *const HistoryJournal,
@@ -285,11 +314,16 @@ pub fn listInteractions(
     defer root.close(io);
 
     const pinned_only = parsed.enabled("pinned");
+    const ids_only = parsed.enabled("ids");
 
-    var scope = try selectHistoryScope(gpa, io, root, parsed.positionals.items, true);
+    var scope = if (parsed.positionals.items.len == 0 and !sys.isTty(io, 0)) blk: {
+        const numbers = try context.readNumberSelection(gpa, io);
+        defer gpa.free(numbers);
+        break :blk try selectHistoryScopeFromStdin(gpa, io, root, numbers);
+    } else try selectHistoryScope(gpa, io, root, parsed.positionals.items, true);
     defer scope.deinit(gpa);
 
-    if (parsed.enabled("numbers")) {
+    if (ids_only) {
         const current = try context.currentJournal();
         for (scope.journals.items) |journal| {
             if (!std.mem.eql(u8, journal.name, current)) return error.BadArguments;
@@ -341,7 +375,8 @@ pub fn listInteractions(
         if (value > prefix_width) value - prefix_width else 1
     else
         null;
-    const color_enabled = report.layoutColorEnabled(io);
+    const color_when = std.meta.stringToEnum(cmd_grep.ColorWhen, parsed.last("color") orelse "auto") orelse .auto;
+    const color_enabled = cmd_grep.colorEnabled(io, color_when);
     const current = sys.env("TJ_JOURNAL");
     var noout_region: report.NooutRegion = .{
         .out = out,

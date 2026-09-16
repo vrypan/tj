@@ -34,7 +34,7 @@ tj history
 tj history @242
 tj history @2..@10 @15
 tj history @release-build.
-tj history --numbers @2..@10 | tj tui
+tj history --ids @2..@10 | tj tui
 ```
 
 ```
@@ -184,18 +184,21 @@ Words such as `@handle` are not entry references and remain literal in an
 interactive command.
 
 Use `tj history --pinned` (or `--pin`) to show only pinned entries.
-Use `tj history --pinned --numbers` or the equivalent `tj pin --numbers` when
+Use `tj history --pinned --ids` or the equivalent `tj pin --ids` when
 the selected IDs should feed `tj tui`. Numeric output is an ascending,
 deduplicated, current-journal-only space-separated line with no formatting.
 Direct terminal history is deliberately omitted from the entry recording with
 `<tj:noout>` so browsing the index does not duplicate it into the journal.
 Piped or redirected history remains ordinary output.
 Pins imply no retention policy, but protect an entry and its output from
-`tj rm`. Removal ranges skip pinned entries; use `tj rm --force REF` only
-when overriding that protection is deliberate. Whole-journal removal likewise
-requires `--force` while any pins remain.
+`tj rm`. Removal ranges skip pinned entries; use `tj rm --include-pinned REF`
+only when overriding that protection is deliberate. Whole-journal removal
+(`tjctl rm`) likewise requires `--force` while any pins remain.
 `tj rm` accepts multiple entry, output, and range targets in one invocation;
-targets are processed from left to right and one `--force` applies to all.
+targets are processed from left to right and one `--include-pinned` applies
+to all. `tj rm` requires explicit targets or `--stdin`, never both;
+`--ignore-missing` makes a missing target or an empty range harmless instead
+of an error.
 
 Do not add or remove pins unless the user asks. Pin updates and entry/output
 deletion are current-journal-only; qualified references are read-only.

@@ -335,10 +335,10 @@ test "mv preserves entries and pins while invalidating the old identity" {
     try std.testing.expectEqual(@as(u8, 0), contents.term.exited);
     try std.testing.expectEqualStrings("all tests passed\n", contents.stdout);
 
-    const listed = try support.runNonTtyInJournal(gpa, &.{ "--home", scratch.path(), "pin" }, "renamed-build", "2");
+    const listed = try support.runNonTtyInJournal(gpa, &.{ "--home", scratch.path(), "pin", "--ids" }, "renamed-build", "2");
     defer gpa.free(listed.stdout);
     defer gpa.free(listed.stderr);
-    try std.testing.expectEqualStrings("@1\n", listed.stdout);
+    try std.testing.expectEqualStrings("1\n", listed.stdout);
 
     const collision = try support.runTjctlNonTty(gpa, &.{ "--home", scratch.path(), "mv", "renamed-build", "renamed-build" });
     defer gpa.free(collision.stdout);

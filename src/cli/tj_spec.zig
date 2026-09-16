@@ -24,7 +24,16 @@ const hist_flags = [_]zecli.FlagSpec{
         .aliases = &.{"pin"},
         .description = "Show only pinned entries",
     },
-    .{ .name = "numbers", .description = "Print only entry numbers" },
+    .{ .name = "ids", .description = "Print only entry numbers" },
+    .{
+        .name = "color",
+        .aliases = &.{"colour"},
+        .value = .string,
+        .value_name = "WHEN",
+        .description = "Colour the listing",
+        .default_value = "auto",
+        .choices = &.{ "never", "auto", "always" },
+    },
 };
 
 const cat_flags = [_]zecli.FlagSpec{
@@ -48,16 +57,18 @@ const cat_flags = [_]zecli.FlagSpec{
 
 const pin_flags = [_]zecli.FlagSpec{
     .{ .name = "remove", .description = "Unpin the selected entry" },
-    .{ .name = "numbers", .description = "Print only pinned entry numbers" },
+    .{ .name = "ids", .description = "Print only pinned entry numbers" },
 };
 
-const force_flag = [_]zecli.FlagSpec{
-    .{ .name = "force", .description = "Override pin protection" },
+const rm_flags = [_]zecli.FlagSpec{
+    .{ .name = "include-pinned", .short = 'p', .description = "Remove pinned entries instead of skipping them" },
+    .{ .name = "ignore-missing", .description = "Ignore targets that do not exist" },
+    .{ .name = "stdin", .description = "Read targets as entry numbers from standard input" },
 };
 
 const grep_flags = [_]zecli.FlagSpec{
     .{ .name = "all", .description = "Search across all journals" },
-    .{ .name = "numbers", .description = "Print only matching entry numbers" },
+    .{ .name = "ids", .description = "Print only matching entry numbers" },
     .{ .name = "cmd", .description = "Search command lines" },
     .{ .name = "out", .description = "Search command output" },
     .{ .name = "ignore-case", .short = 'i', .description = "Case-insensitive search (only ASCII)" },
@@ -158,17 +169,20 @@ const commands = [_]zecli.CommandSpec{
     .{
         .name = "rm",
         .description = "Remove recorded entry data",
-        .usage = "tj rm [--force] <TARGET>...",
-        .flags = &force_flag,
+        .usage = "tj rm [options] (<TARGET>... | --stdin)",
+        .flags = &rm_flags,
         .arguments = &.{.{
             .name = "TARGET",
             .description = "Entry, out resource, or numeric range",
-            .required = true,
             .repeatable = true,
             .completion = reference_completion,
         }},
         .double_dash = .positionals,
-        .extra_help = "Pinned targets are skipped unless --force is present.\n",
+        .extra_help =
+        \\Pinned targets are skipped unless --include-pinned is present. Exactly
+        \\one of explicit TARGET operands or --stdin is required; --stdin reads
+        \\whitespace-separated current-journal entry numbers.
+        ++ "\n",
     },
     .{
         .name = "grep",

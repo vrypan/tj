@@ -35,7 +35,62 @@ pub const Error = error{
     BadArguments,
     InvalidMetadata,
     InsideJournalRemoval,
+    InvalidStdinSelection,
+    StdinSelectionTooLarge,
 };
+
+/// A batch entry-number selection read from redirected standard input, used
+/// where a command accepts explicit target operands or, in their absence,
+/// a piped list of current-journal entry numbers (`tj grep ... --ids | tj
+/// pin`). Mirrors the TUI's own filter-input parser: ASCII whitespace
+/// separators, no zero or malformed tokens, sorted and deduplicated, capped
+/// so a runaway pipe cannot exhaust memory.
+pub const max_stdin_selection_bytes = 4 * 1024 * 1024;
+
+pub fn readNumberSelection(gpa: std.mem.Allocator, io: Io) ![]u32 {
+    var reader_buffer: [4096]u8 = undefined;
+    var reader = Io.File.stdin().readerStreaming(io, &reader_buffer);
+    const input = reader.interface.allocRemaining(gpa, .limited(max_stdin_selection_bytes)) catch |err| switch (err) {
+        error.StreamTooLong => return error.StdinSelectionTooLarge,
+        else => return err,
+    };
+    defer gpa.free(input);
+    return parseNumberSelection(gpa, input);
+}
+
+pub fn parseNumberSelection(gpa: std.mem.Allocator, input: []const u8) ![]u32 {
+    var numbers: std.ArrayList(u32) = .empty;
+    defer numbers.deinit(gpa);
+
+    var tokens = std.mem.tokenizeAny(u8, input, " \t\r\n\x0b\x0c");
+    while (tokens.next()) |token| {
+        const number = std.fmt.parseInt(u32, token, 10) catch return error.InvalidStdinSelection;
+        if (number == 0) return error.InvalidStdinSelection;
+        try numbers.append(gpa, number);
+    }
+
+    std.mem.sort(u32, numbers.items, {}, std.sort.asc(u32));
+    var unique: usize = 0;
+    for (numbers.items) |number| {
+        if (unique != 0 and numbers.items[unique - 1] == number) continue;
+        numbers.items[unique] = number;
+        unique += 1;
+    }
+    numbers.items.len = unique;
+    return numbers.toOwnedSlice(gpa);
+}
+
+test "number selection parsing is sorted, deduplicated, and rejects malformed tokens" {
+    const gpa = std.testing.allocator;
+    const numbers = try parseNumberSelection(gpa, "1002  100\n101\t1002\n");
+    defer gpa.free(numbers);
+    try std.testing.expectEqualSlices(u32, &.{ 100, 101, 1002 }, numbers);
+    try std.testing.expectError(error.InvalidStdinSelection, parseNumberSelection(gpa, "1 @2"));
+    try std.testing.expectError(error.InvalidStdinSelection, parseNumberSelection(gpa, "0"));
+    const empty = try parseNumberSelection(gpa, "   \n\t  ");
+    defer gpa.free(empty);
+    try std.testing.expectEqual(@as(usize, 0), empty.len);
+}
 
 pub fn parseTestCommand(which: cli.CommandName, args: []const [:0]const u8) !zecli.Parsed {
     var discard_buf: [1024]u8 = undefined;

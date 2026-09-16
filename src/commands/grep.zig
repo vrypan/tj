@@ -90,7 +90,7 @@ pub fn grepStatsSnapshot(stats: *const GrepStats) GrepStatsSnapshot {
 pub fn grepRequest(parsed: *const zecli.Parsed) !GrepRequest {
     var request: GrepRequest = .{
         .all = parsed.enabled("all"),
-        .numbers = parsed.enabled("numbers"),
+        .numbers = parsed.enabled("ids"),
         .ignore_case = parsed.enabled("ignore-case"),
     };
     if (parsed.enabled("cmd") or parsed.enabled("out")) {
@@ -493,16 +493,16 @@ pub fn grepCommand(
     const request = try grepRequest(parsed);
 
     if (request.all and request.targets.len != 0) return error.BadArguments;
-    if (request.numbers and (request.all or (request.color_supplied and request.color != .never))) return error.BadArguments;
+    if (request.numbers and request.all) return error.BadArguments;
 
     const current = sys.env("TJ_JOURNAL");
     if (request.numbers and (current == null or current.?.len == 0)) {
-        cmd_context.note(io, "tj grep --numbers: no current journal\n", .{});
+        cmd_context.note(io, "tj grep --ids: no current journal\n", .{});
         return 2;
     }
     if (!request.all and request.targets.len == 0 and (current == null or current.?.len == 0)) {
         if (request.numbers) {
-            cmd_context.note(io, "tj grep --numbers: no current journal\n", .{});
+            cmd_context.note(io, "tj grep --ids: no current journal\n", .{});
         } else {
             cmd_context.note(io, "tj grep: no current journal; use --all\n", .{});
         }
@@ -1211,13 +1211,19 @@ test "grep arguments select resources and preserve literal syntax" {
     try std.testing.expectEqualStrings("-needle", leading.pattern);
 
     try std.testing.expectEqual(ColorWhen.never, (try grepRequestFromArgs(&.{"x"})).color);
-    try std.testing.expect((try grepRequestFromArgs(&.{ "x", "--numbers" })).numbers);
+    try std.testing.expect((try grepRequestFromArgs(&.{ "x", "--ids" })).numbers);
     const automatic = try grepRequestFromArgs(&.{ "--color", "auto", "x" });
     try std.testing.expectEqual(ColorWhen.auto, automatic.color);
     try std.testing.expectEqualStrings("x", automatic.pattern);
     try std.testing.expectEqual(ColorWhen.always, (try grepRequestFromArgs(&.{ "--color", "always", "x" })).color);
     try std.testing.expectEqual(ColorWhen.always, (try grepRequestFromArgs(&.{ "--colour=always", "x" })).color);
     try std.testing.expectEqual(ColorWhen.never, (try grepRequestFromArgs(&.{ "--color=never", "x" })).color);
+
+    // --ids output is always plain; combining it with any --color setting is
+    // accepted rather than rejected as a usage error.
+    const ids_with_color = try grepRequestFromArgs(&.{ "x", "--ids", "--color=always" });
+    try std.testing.expect(ids_with_color.numbers);
+    try std.testing.expectEqual(ColorWhen.always, ids_with_color.color);
 }
 
 test "grep rejects missing multiline extra and unknown patterns" {

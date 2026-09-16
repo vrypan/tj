@@ -128,12 +128,12 @@ Inside a journal:
 ```sh
 tj history                    # list entries
 tj history @12                # show details for one entry
-tj history --numbers @10..@20 # print IDs for a pipeline
+tj history --ids @10..@20     # print IDs for a pipeline
 tj cat @12                    # show recorded output
 tj cat @12/out                # show only recorded output
 tj grep 'connection refused' @10..@20 # search selected entries
 tj pin @12 @15..@18
-tj pin --numbers | tj tui
+tj pin --ids | tj tui
 tj rm @15..@18
 ```
 
